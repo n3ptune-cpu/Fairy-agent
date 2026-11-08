@@ -115,7 +115,7 @@ func applyACL(path, sddl string) error {
 		windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION, nil, nil, dacl, nil)
 }
 
-const starterConfig = `# fairy-agent configuration (see AGENT.md). Restart the service after a change:
+const windowsStarter = `# fairy-agent configuration (see AGENT.md). Restart the service after a change:
 #   Restart-Service fairy-agent
 #
 # listen: empty = this PC's Tailscale address on port 9101 (the agent never listens on every network).
@@ -147,6 +147,8 @@ wol:
 self_update:
   enabled: false         # let the panel's Update button install the latest signed release (see AGENT.md)
 `
+
+func starterConfig() string { return strings.ReplaceAll(windowsStarter, "\n", "\r\n") }
 
 func writeIfMissing(path string, data []byte) (bool, error) {
 	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
@@ -226,7 +228,7 @@ func install(cfgPath, account string) error {
 	if err := setupSelfUpdate(cfgPath); err != nil {
 		return fmt.Errorf("self-update permissions: %w", err)
 	}
-	if created, err := writeIfMissing(cfgPath, []byte(strings.ReplaceAll(starterConfig, "\n", "\r\n"))); err != nil {
+	if created, err := writeIfMissing(cfgPath, []byte(starterConfig())); err != nil {
 		return err
 	} else if created {
 		fmt.Println("wrote a starter", cfgPath)
@@ -305,6 +307,9 @@ func setupSelfUpdate(cfgPath string) error {
 	}
 	if err := applyACL(upd, "D:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1301bf;;;"+sid.String()+")"); err != nil {
 		return fmt.Errorf("update folder %s: %w", upd, err)
+	}
+	if err := prepareStateDir(filepath.Join(filepath.Dir(cfgPath), "state")); err != nil { // pairing (Add host)
+		return fmt.Errorf("state folder: %w", err)
 	}
 	m, err := mgr.Connect()
 	if err != nil {

@@ -30,3 +30,38 @@ func install(string, string) error {
 AGENT.md has the exact commands.`)
 	return nil
 }
+
+const linuxStarter = `# fairy-agent configuration: /etc/fairy-agent/config.yaml (see AGENT.md). Everything that can change the
+# machine is off unless switched on here. After a change: systemctl restart fairy-agent
+# Change one setting without an editor: fairy-agent config set <setting> <value>   (e.g. power_control.enabled true)
+#
+# listen: empty = this machine's Tailscale address on port 9101 (never every network).
+# The panel's tokens are the files "token" and "control-token" next to this one.
+
+processes:
+  enabled: true          # the panel's Processes tab; false = the agent never looks at other programs
+  cmdline: true          # command lines (passwords and tokens are blanked)
+
+gpu:
+  nvidia_smi: auto       # auto | off | full path to nvidia-smi
+  amdgpu: auto           # AMD GPUs via the amdgpu driver's /sys files | off
+
+ipmi:
+  enabled: false         # BMC sensors (ipmitool, see AGENT.md)
+
+fan_control:
+  enabled: false         # needs ipmi.enabled; fans never below 30 %, back to 100 % at 80 °C
+
+power_control:
+  enabled: false         # remote shutdown / reboot from the panel
+
+wol:
+  enabled: false         # send Wake-on-LAN packets for the panel
+
+self_update:
+  enabled: false         # let the panel's Update button install the latest signed release
+
+ups: []                  # UPSes this agent reads and passes on, e.g. [{id: local-ups, type: nut, host: 127.0.0.1}]
+`
+
+func starterConfig() string { return linuxStarter }

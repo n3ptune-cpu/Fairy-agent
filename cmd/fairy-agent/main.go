@@ -5,6 +5,9 @@
 //	fairy-agent uninstall                  Windows: remove the service (config and tokens stay)
 //	fairy-agent check-config [--config path]
 //	fairy-agent config get|set|show ...      read or change one setting of config.yaml (set: root / Administrator)
+//	fairy-agent join --code CODE --panel IP [...]  the machine side of the panel's Add host (the installer runs it)
+//	fairy-agent pair-status                is the panel paired yet (0 yes, 3 waiting, 1 no code / expired)
+//	fairy-agent verify-release DIR         check a downloaded release's signature and hashes (the installer)
 //	fairy-agent gen-token                  print a new random token (for the token files)
 //	fairy-agent update [--check] [--yes] [--force]  install the latest signed release by hand (root / Administrator)
 //	fairy-agent apply-update [--config path]  install the release the agent staged (run by the updater, see AGENT.md)
@@ -48,6 +51,11 @@ const usage = `fairy-agent: reports this machine's metrics to the Fairy panel (s
                                             read or change config.yaml (keeps its comments; set checks the
                                             result like check-config, needs root / Administrator), e.g.
                                             fairy-agent config set fan_control.auto_mode standard
+  fairy-agent join --code CODE --panel IP [--power-control] [--self-update] [--wol] [--ups] [--ups-name NAME]
+                   [--coretemp] [--ipmi]     the machine side of the panel's "Add host" (install.sh / install.ps1
+                                            run it): tokens, the chosen features, the one-time join code
+  fairy-agent pair-status                   has the panel paired yet (exit 0 yes, 3 still waiting, 1 no)
+  fairy-agent verify-release DIR            check SHA256SUMS' signature and the files in DIR (installers)
   fairy-agent gen-token                     print a new random token
   fairy-agent update [--check] [--yes] [--force] [--config PATH]
                                             install the latest signed release now (root / Administrator):
@@ -102,6 +110,12 @@ func main() {
 		fmt.Println("config OK:", *cfgPath)
 	case "config":
 		os.Exit(configCmd(args, os.Stdout, os.Stderr))
+	case "join":
+		os.Exit(joinCmd(args, os.Stdout, os.Stderr))
+	case "pair-status":
+		os.Exit(pairStatus(args, os.Stdout, os.Stderr))
+	case "verify-release":
+		os.Exit(verifyRelease(args, os.Stdout, os.Stderr))
 	case "gen-token":
 		tok, err := newToken()
 		if err != nil {
