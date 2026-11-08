@@ -11,6 +11,8 @@ coverage.out
 *.test
 
 # local testing (never commit secrets or tokens)
+fairy-release-key*.txt
+*.key
 *.env
 /config.yaml
 /token

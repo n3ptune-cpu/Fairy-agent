@@ -1,0 +1,392 @@
+package release_test
+
+import (
+	"context"
+	"crypto/ed25519"
+	"crypto/sha256"
+	"errors"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/n3ptune-cpu/Fairy-agent/pkg/release"
+	"github.com/n3ptune-cpu/Fairy-agent/pkg/release/releasetest"
+)
+
+func TestKeysSignAndVerify(t *testing.T) {
+	pubS, privS, err := release.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	pub, err := release.ParsePublicKey(pubS + "\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	priv, err := release.ParsePrivateKey(privS)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if release.PublicOf(priv) != pubS {
+		t.Fatal("public key does not belong to the private key")
+	}
+	files := map[string][]byte{"fairy-agent-linux-amd64": []byte("binary"), "VERSION": []byte("fairy-agent 7-abcdef1\n")}
+	sums := release.FormatSums([]string{"VERSION", "fairy-agent-linux-amd64"}, files)
+	sig := release.Sign(priv, sums)
+
+	s, err := release.VerifySums(pub, sums, sig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Check("fairy-agent-linux-amd64", []byte("binary")); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Check("fairy-agent-linux-amd64", []byte("binarY")); err == nil {
+		t.Fatal("tampered asset accepted")
+	}
+	if err := s.Check("fairy-agent-linux-arm64", []byte("binary")); err == nil {
+		t.Fatal("unlisted asset accepted")
+	}
+	// tampered SHA256SUMS
+	bad := []byte(strings.Replace(string(sums), "fairy-agent-linux-amd64", "fairy-agent-linux-arm64", 1))
+	if _, err := release.VerifySums(pub, bad, sig); err == nil {
+		t.Fatal("tampered SHA256SUMS accepted")
+	}
+	// tampered signature
+	raw := []byte(strings.TrimSpace(string(sig)))
+	raw[5] ^= 1
+	if _, err := release.VerifySums(pub, sums, raw); err == nil {
+		t.Fatal("tampered signature accepted")
+	}
+	// wrong key
+	otherPub, _, _ := ed25519.GenerateKey(nil)
+	if _, err := release.VerifySums(otherPub, sums, sig); err == nil {
+		t.Fatal("signature from another key accepted")
+	}
+	// no key at all (local build)
+	if _, err := release.VerifySums(nil, sums, sig); !errors.Is(err, release.ErrNoKey) {
+		t.Fatalf("no key: %v", err)
+	}
+	if _, err := release.ParsePublicKey(""); !errors.Is(err, release.ErrNoKey) {
+		t.Fatal("empty public key must be ErrNoKey")
+	}
+	for _, k := range []string{"not base64!", "AAAA"} {
+		if _, err := release.ParsePublicKey(k); err == nil {
+			t.Fatalf("bad public key %q accepted", k)
+		}
+		if _, err := release.ParsePrivateKey(k); err == nil {
+			t.Fatalf("bad private key %q accepted", k)
+		}
+	}
+}
+
+func TestParseSums(t *testing.T) {
+	h := strings.Repeat("ab", 32)
+	s, err := release.ParseSums([]byte(h + "  fairy-linux-amd64\n" + h + " *fairy-linux-arm64\r\n\n"))
+	if err != nil || len(s) != 2 {
+		t.Fatalf("%v %v", s, err)
+	}
+	for _, bad := range []string{"", h + "  ../etc/passwd\n", h + "  a/b\n", "xyz  file\n", h + "  f\n" + h + "  f\n", h[:60] + "  f\n"} {
+		if _, err := release.ParseSums([]byte(bad)); err == nil {
+			t.Fatalf("accepted %q", bad)
+		}
+	}
+}
+
+func TestAssetNamesAndVersions(t *testing.T) {
+	for _, c := range [][4]string{
+		{"fairy-agent", "windows", "amd64", "fairy-agent-windows-amd64.exe"},
+		{"fairy-agent", "linux", "arm64", "fairy-agent-linux-arm64"},
+		{"fairy", "linux", "amd64", "fairy-linux-amd64"},
+	} {
+		if got := release.AssetName(c[0], c[1], c[2]); got != c[3] {
+			t.Fatalf("%v: %s", c, got)
+		}
+	}
+	if n, ok := release.BuildNumber("42-1a2b3c4"); !ok || n != 42 {
+		t.Fatal(n, ok)
+	}
+	for _, v := range []string{"dev", "v0.1.0-3-gabc", "", "-1"} {
+		if _, ok := release.BuildNumber(v); ok {
+			t.Fatalf("%q has no build number", v)
+		}
+	}
+	cases := []struct {
+		cur, cand string
+		cmp       int
+		known     bool
+	}{{"41-aaaaaaa", "42-bbbbbbb", 1, true}, {"42-bbbbbbb", "42-bbbbbbb", 0, true}, {"43-c", "42-b", -1, true},
+		{"dev", "42-b", 1, false}}
+	for _, c := range cases {
+		if cmp, known := release.Compare(c.cur, c.cand); cmp != c.cmp || known != c.known {
+			t.Fatalf("%v: %d %v", c, cmp, known)
+		}
+	}
+	if p, v, err := release.ParseVersionFile([]byte("fairy-agent 42-1a2b3c4\n")); err != nil || p != "fairy-agent" || v != "42-1a2b3c4" {
+		t.Fatal(p, v, err)
+	}
+	for _, bad := range []string{"", "fairy-agent", "fairy-agent 1 2", "fairy-agent ../x"} {
+		if _, _, err := release.ParseVersionFile([]byte(bad)); err == nil {
+			t.Fatalf("accepted %q", bad)
+		}
+	}
+}
+
+func TestValidRepo(t *testing.T) {
+	for _, ok := range []string{"n3ptune-cpu/Fairy-agent", "someone/fork.of_fairy"} {
+		if !release.ValidRepo(ok) {
+			t.Fatalf("%s refused", ok)
+		}
+	}
+	for _, bad := range []string{"", "Fairy-agent", "a/b/c", "evil.example/x", "https://evil/x", "o/..", "o/.", "-o/x",
+		"o/x?y", "o/x#", "o/x y", "127.0.0.1:80/x", "o/" + strings.Repeat("x", 101)} {
+		if release.ValidRepo(bad) {
+			t.Fatalf("%q accepted", bad)
+		}
+		if _, err := release.NewClient(bad, "t"); err == nil {
+			t.Fatalf("client for %q", bad)
+		}
+	}
+}
+
+func TestCheckAndFetchFromFakeGitHub(t *testing.T) {
+	gh := releasetest.New(t, release.AgentRepo)
+	bin := []byte("new fairy-agent binary")
+	gh.Publish("build-42", "fairy-agent", "42-1a2b3c4", map[string][]byte{"fairy-agent-linux-amd64": bin}, nil)
+	c := gh.Client()
+	ctx := context.Background()
+
+	ch, err := c.Check(ctx, gh.Pub, "fairy-agent")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ch.Tag != "build-42" || ch.Version != "42-1a2b3c4" || ch.Program != "fairy-agent" {
+		t.Fatalf("%+v", ch)
+	}
+	dir := t.TempDir()
+	p, err := c.FetchAsset(ctx, ch, "fairy-agent-linux-amd64", dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(p); string(b) != string(bin) || filepath.Dir(p) != dir {
+		t.Fatalf("%s %q", p, b)
+	}
+	for _, h := range gh.Hits() {
+		if strings.Contains(h, "evil") {
+			t.Fatal("followed a URL from the API JSON")
+		}
+	}
+	// not built for this platform
+	if _, err := c.FetchAsset(ctx, ch, "fairy-agent-linux-riscv64", dir); err == nil {
+		t.Fatal("missing asset")
+	}
+	// tampered asset after signing: refused, nothing left behind
+	gh.Replace("fairy-agent-linux-amd64", []byte("evil binary"))
+	if _, err := c.FetchAsset(ctx, ch, "fairy-agent-linux-amd64", dir); err == nil || !strings.Contains(err.Error(), "does not match") {
+		t.Fatalf("tampered asset: %v", err)
+	}
+	if ents, _ := os.ReadDir(dir); len(ents) != 1 {
+		t.Fatalf("left files behind: %v", ents)
+	}
+	// wrong key / wrong program / tampered VERSION
+	other, _, _ := ed25519.GenerateKey(nil)
+	if _, err := c.Check(ctx, other, "fairy-agent"); err == nil {
+		t.Fatal("wrong key accepted")
+	}
+	if _, err := c.Check(ctx, gh.Pub, "fairy"); err == nil {
+		t.Fatal("agent release accepted as a panel release")
+	}
+	gh.Replace("VERSION", []byte("fairy-agent 99-fffffff\n"))
+	if _, err := c.Check(ctx, gh.Pub, "fairy-agent"); err == nil {
+		t.Fatal("tampered VERSION accepted")
+	}
+	// signed by another key
+	_, otherPriv, _ := ed25519.GenerateKey(nil)
+	gh.Publish("build-43", "fairy-agent", "43-1a2b3c4", map[string][]byte{"fairy-agent-linux-amd64": bin}, otherPriv)
+	if _, err := c.Check(ctx, gh.Pub, "fairy-agent"); err == nil {
+		t.Fatal("release signed by another key accepted")
+	}
+	if _, err := c.Check(ctx, nil, "fairy-agent"); !errors.Is(err, release.ErrNoKey) {
+		t.Fatal("no key")
+	}
+	gh.SetBroken(true)
+	if _, err := c.Latest(ctx); err == nil {
+		t.Fatal("503 accepted")
+	}
+}
+
+func TestRedirectsOnlyToAllowedHosts(t *testing.T) {
+	gh := releasetest.New(t, release.AgentRepo)
+	evil := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte("x")) }))
+	defer evil.Close()
+	redir := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, strings.Replace(evil.URL, "127.0.0.1", "localhost", 1)+"/x", http.StatusFound)
+	}))
+	defer redir.Close()
+	c := gh.Client()
+	c.APIBase = redir.URL // allowed host that redirects to one not in the list
+	if _, err := c.Latest(context.Background()); err == nil || !strings.Contains(err.Error(), "refusing") {
+		t.Fatalf("redirect to an unlisted host: %v", err)
+	}
+	c.APIBase = strings.Replace(redir.URL, "127.0.0.1", "localhost", 1) // a host not in the list at all
+	if _, err := c.Latest(context.Background()); err == nil || !strings.Contains(err.Error(), "refusing") {
+		t.Fatalf("unlisted host: %v", err)
+	}
+	c = gh.Client()
+	c.Hosts = append(c.Hosts, "localhost")
+	// plain http is never used
+	c.APIBase = strings.Replace(gh.URL, "https://", "http://", 1) + "/api"
+	if _, err := c.Latest(context.Background()); err == nil || !strings.Contains(err.Error(), "refusing") {
+		t.Fatalf("http: %v", err)
+	}
+}
+
+func TestDefaultClient(t *testing.T) {
+	c, err := release.NewClient(release.AgentRepo, "t")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.APIBase != "https://api.github.com" || c.DownloadBase != "https://github.com" || c.HTTP == nil {
+		t.Fatalf("%+v", c)
+	}
+}
+
+// ---- installer: swap, health check, rollback (with fakes)
+
+type fakeSvc struct {
+	target   string
+	starts   int
+	stops    int
+	failNew  bool // the new binary "crashes": Healthy fails while it is installed
+	startErr error
+}
+
+func (f *fakeSvc) installer(renameSwap bool) *release.Installer {
+	return &release.Installer{Target: f.target, RenameSwap: renameSwap, HealthTimeout: 300 * time.Millisecond, Interval: 10 * time.Millisecond,
+		Start: func(context.Context) error { f.starts++; return f.startErr },
+		Stop: func() func(context.Context) error {
+			if !renameSwap {
+				return nil
+			}
+			return func(context.Context) error { f.stops++; return nil }
+		}(),
+		Healthy: func(context.Context) error {
+			b, _ := os.ReadFile(f.target)
+			if f.failNew && string(b) == "new" {
+				return errors.New("version check: still old")
+			}
+			return nil
+		}, Logf: func(string, ...any) {}}
+}
+
+func setupTarget(t *testing.T) (string, string) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "fairy-agent")
+	if err := os.WriteFile(target, []byte("old"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	h := sha256.Sum256([]byte("new"))
+	staged := filepath.Join(t.TempDir(), "fairy-agent-linux-amd64")
+	if err := os.WriteFile(staged, []byte("new"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	p, err := release.CopyVerified(staged, dir, h)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return target, p
+}
+
+func TestInstallerSwapsAndKeepsOld(t *testing.T) {
+	for _, rs := range []bool{false, true} {
+		target, newPath := setupTarget(t)
+		f := &fakeSvc{target: target}
+		if err := f.installer(rs).Install(context.Background(), newPath); err != nil {
+			t.Fatal(rs, err)
+		}
+		if b, _ := os.ReadFile(target); string(b) != "new" {
+			t.Fatal(rs, string(b))
+		}
+		if b, _ := os.ReadFile(target + ".old"); string(b) != "old" {
+			t.Fatal(rs, "old not kept:", string(b))
+		}
+		if st, _ := os.Stat(target); st.Mode().Perm() != 0o755 {
+			t.Fatal(rs, st.Mode())
+		}
+		if f.starts != 1 {
+			t.Fatal(rs, f.starts)
+		}
+	}
+}
+
+func TestInstallerRollsBack(t *testing.T) {
+	for _, rs := range []bool{false, true} {
+		// unhealthy new version
+		target, newPath := setupTarget(t)
+		f := &fakeSvc{target: target, failNew: true}
+		err := f.installer(rs).Install(context.Background(), newPath)
+		var rb *release.RolledBackError
+		if !errors.As(err, &rb) || rb.RollbackErr != nil || !strings.Contains(err.Error(), "rolled back") {
+			t.Fatalf("%v: %v", rs, err)
+		}
+		if b, _ := os.ReadFile(target); string(b) != "old" {
+			t.Fatal(rs, "not rolled back:", string(b))
+		}
+		if f.starts != 2 {
+			t.Fatal(rs, "starts", f.starts)
+		}
+		// start fails: rollback, and the rollback's start fails too
+		target, newPath = setupTarget(t)
+		f = &fakeSvc{target: target, startErr: errors.New("unit failed")}
+		err = f.installer(rs).Install(context.Background(), newPath)
+		if !errors.As(err, &rb) || rb.RollbackErr == nil {
+			t.Fatalf("%v: %v", rs, err)
+		}
+		if b, _ := os.ReadFile(target); string(b) != "old" {
+			t.Fatal(rs, "not rolled back:", string(b))
+		}
+	}
+}
+
+func TestInstallerRefusesOtherFolder(t *testing.T) {
+	target, _ := setupTarget(t)
+	other := filepath.Join(t.TempDir(), "x")
+	_ = os.WriteFile(other, []byte("new"), 0o644)
+	f := &fakeSvc{target: target}
+	if err := f.installer(false).Install(context.Background(), other); err == nil {
+		t.Fatal("accepted a binary from another folder")
+	}
+}
+
+func TestCopyVerifiedAndReadStaged(t *testing.T) {
+	dir := t.TempDir()
+	src := filepath.Join(dir, "staged")
+	_ = os.WriteFile(src, []byte("payload"), 0o644)
+	if _, err := release.CopyVerified(src, dir, sha256.Sum256([]byte("other"))); err == nil {
+		t.Fatal("mismatch accepted")
+	}
+	if ents, _ := os.ReadDir(dir); len(ents) != 1 {
+		t.Fatalf("left files behind: %v", ents)
+	}
+	link := filepath.Join(dir, "link")
+	if err := os.Symlink(src, link); err == nil {
+		if _, err := release.ReadStaged(link, 100); err == nil {
+			t.Fatal("followed a symlink")
+		}
+		if _, err := release.CopyVerified(link, dir, sha256.Sum256([]byte("payload"))); err == nil {
+			t.Fatal("copied through a symlink")
+		}
+	}
+	if _, err := release.ReadStaged(dir, 100); err == nil {
+		t.Fatal("read a directory")
+	}
+	if _, err := release.ReadStaged(src, 3); err == nil {
+		t.Fatal("size limit")
+	}
+	if b, err := release.ReadStaged(src, 100); err != nil || string(b) != "payload" {
+		t.Fatal(string(b), err)
+	}
+}
