@@ -6,6 +6,7 @@
 #   install -d -m 0750 -o root -g fairy-agent /etc/fairy-agent
 #   config.yaml 0640 root:fairy-agent; token (and control-token) 0640 root:fairy-agent
 #   systemctl daemon-reload && systemctl enable --now fairy-agent
+# Self-update (optional, self_update.enabled): also fairy-agent-update.service and the polkit rule.
 [Unit]
 Description=Fairy agent (metrics for the Fairy panel)
 Documentation=file:///usr/local/share/doc/fairy-agent/AGENT.md
@@ -20,6 +21,10 @@ Group=fairy-agent
 Restart=on-failure
 RestartSec=10
 UMask=0077
+# /var/lib/fairy-agent: the only place the agent may write (self-update stages a verified download here; the
+# root unit fairy-agent-update.service checks it again and installs it).
+StateDirectory=fairy-agent
+StateDirectoryMode=0700
 
 # Small and polite: low CPU and I/O priority, hard memory cap.
 Nice=10
@@ -29,7 +34,8 @@ MemoryMax=64M
 TasksMax=64
 
 # Hardening. The agent only reads /proc and /sys, talks HTTP on its listen address and (only if enabled) runs
-# nvidia-smi, ipmitool and `systemctl poweroff|reboot`. It needs NO capabilities. AMD GPUs are read from plain
+# nvidia-smi, ipmitool, `systemctl poweroff|reboot` and `systemctl start fairy-agent-update.service`. It needs NO
+# capabilities. AMD GPUs are read from plain
 # sysfs files (/sys/class/drm/card*/device), not device nodes: DevicePolicy below does not affect them and
 # ProtectKernelTunables leaves /sys readable.
 NoNewPrivileges=yes

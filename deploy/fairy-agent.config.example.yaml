@@ -9,7 +9,7 @@
 # The panel's token for this machine (its token_env value), one line, at least 24 characters. Default: the file
 # "token" next to this config. FAIRY_AGENT_TOKEN in the environment wins over the file.
 # token_file: /etc/fairy-agent/token
-# A second, different token, only needed when fan_control, power_control or wol is enabled (the panel's
+# A second, different token, only needed when fan_control, power_control, wol or self_update is enabled (the panel's
 # control_token_env value). Default: the file "control-token" next to this config.
 # control_token_file: /etc/fairy-agent/control-token
 
@@ -58,7 +58,15 @@ wol:
   enabled: false
   allowed_macs: []             # empty = any MAC the panel asks for
 
-control_rate_per_min: 12       # fan / power / Wake-on-LAN requests per minute, all together
+# Self-update from the panel's Update button (panel: self_update: true). Off = the agent never updates itself.
+# On: an admin's Update makes the agent download the latest Fairy-agent release from GitHub, check its signature
+# (key built into this binary), install it, restart and roll back if the new version does not come up.
+# Linux also needs deploy/fairy-agent-update.service and the polkit rule; Windows: install-fairy-agent.ps1.
+self_update:
+  enabled: false
+  # repo: n3ptune-cpu/Fairy-agent   # only for a fork; its releases must be signed with the same key
+
+control_rate_per_min: 12       # fan / power / Wake-on-LAN / update requests per minute, all together
 
 # Devices on this machine's LAN that the panel cannot reach itself; the agent reads them and passes the readings
 # on (credentials stay here). Same entries as the panel's power_sources / ups. system_hint: self = this host.

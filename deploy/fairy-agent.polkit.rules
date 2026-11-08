@@ -1,6 +1,8 @@
 // /etc/polkit-1/rules.d/49-fairy-agent.rules
-// Only needed with power_control.enabled: lets the fairy-agent user (and nobody else) power off or reboot this
-// machine through systemd-logind, which is what `systemctl poweroff|reboot` asks for.
+// Lets the fairy-agent user (and nobody else) do exactly two things through systemd. Each one is used only when
+// it is switched on in /etc/fairy-agent/config.yaml (and in the panel).
+
+// 1. power_control: power off or reboot this machine through systemd-logind (`systemctl poweroff|reboot`).
 polkit.addRule(function (action, subject) {
     if (subject.user === "fairy-agent" && [
         "org.freedesktop.login1.power-off",
@@ -8,6 +10,15 @@ polkit.addRule(function (action, subject) {
         "org.freedesktop.login1.reboot",
         "org.freedesktop.login1.reboot-multiple-sessions"
     ].indexOf(action.id) >= 0) {
+        return polkit.Result.YES;
+    }
+});
+
+// 2. self_update: start the root installer unit fairy-agent-update.service (`systemctl start`), nothing else:
+// no other unit, no stop/restart/enable. The installer checks the release signature itself before installing.
+polkit.addRule(function (action, subject) {
+    if (subject.user === "fairy-agent" && action.id === "org.freedesktop.systemd1.manage-units" &&
+        action.lookup("unit") === "fairy-agent-update.service" && action.lookup("verb") === "start") {
         return polkit.Result.YES;
     }
 });

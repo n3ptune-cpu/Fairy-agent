@@ -9,9 +9,12 @@
      config.yaml, token and control-token, readable only by administrators, SYSTEM and the service)
   3. allows the panel in through Windows Firewall: TCP port 9101, only on the Tailscale network adapter and only
      from Tailscale addresses (100.64.0.0/10, or just the panel's address with -PanelAddress)
-  4. checks the configuration and starts the service
+  4. gives the service what the panel's Update button needs (only used when self_update is enabled in
+     config.yaml): its own account (NT SERVICE\fairy-agent) may replace files in C:\Program Files\Fairy, write
+     C:\ProgramData\fairy-agent\update and stop / start its own service. Safe to run again.
+  5. checks the configuration and starts the service
 
-  Run it again with a newer fairy-agent-windows-amd64.exe to update; config and tokens are kept.
+  Run it again with a newer fairy-agent-windows-amd64.exe to update by hand; config and tokens are kept.
 
 .PARAMETER LocalSystem
   Run the service as LocalSystem instead of LocalService. Only needed for IPMI / fan control on a Supermicro
@@ -49,6 +52,9 @@ if (-not $svc) {
     $account = if ($LocalSystem) { 'LocalSystem' } else { 'LocalService' }
     & $exe install --account $account
     if ($LASTEXITCODE -ne 0) { throw 'fairy-agent install failed' }
+} else {
+    & $exe setup-self-update   # existing installs: add the self-update permissions (idempotent)
+    if ($LASTEXITCODE -ne 0) { throw 'fairy-agent setup-self-update failed' }
 }
 
 $ruleName = 'Fairy agent (Tailscale only)'
