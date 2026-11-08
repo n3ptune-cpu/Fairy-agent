@@ -50,6 +50,18 @@ func TestEstimatedWattsWithoutRealpower(t *testing.T) {
 	}
 }
 
+func TestUPSPlaceholders(t *testing.T) {
+	r := UPSFromVars("cp", map[string]string{"ups.status": "OL", "battery.date": "1", "battery.mfr.date": "2021/03/01",
+		"ups.mfr": "1", "device.mfr": "CPS", "ups.model": "1500", "ups.serial": "unknown"}, "")
+	if r.BatteryDate == nil || *r.BatteryDate != "2021/03/01" || r.Mfr == nil || *r.Mfr != "CPS" || *r.Model != "1500" || r.Serial != nil {
+		t.Fatalf("%+v", r)
+	}
+	r = UPSFromVars("cp", map[string]string{"ups.status": "OL", "battery.date": "1", "ups.mfr": " 1 "}, "")
+	if r.BatteryDate != nil || r.Mfr != nil {
+		t.Fatalf("placeholders kept: %+v", r)
+	}
+}
+
 func TestDescribeNeverLeaksDetails(t *testing.T) {
 	if Describe(context.DeadlineExceeded) != "timeout" || Describe(&HTTPStatusError{Code: 500}) != "http 500" ||
 		Describe(Errf("nut: ERR ACCESS-DENIED")) != "nut: ERR ACCESS-DENIED" ||

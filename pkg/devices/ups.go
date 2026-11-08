@@ -2,6 +2,7 @@ package devices
 
 import (
 	"context"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -83,8 +84,8 @@ func UPSFromVars(name string, v map[string]string, description string) UPSRow {
 		BatteryRuntimeS: runtime, BatteryVoltage: numVar(v, "battery.voltage"), LoadPercent: load, Watts: watts,
 		WattsEstimated: est, NominalW: nominal, InputVoltage: numVar(v, "input.voltage"),
 		OutputVoltage: numVar(v, "output.voltage"), InputFrequency: numVar(v, "input.frequency", "output.frequency"),
-		Model: strVar(v, "ups.model", "device.model"), Mfr: strVar(v, "ups.mfr", "device.mfr"),
-		Serial: strVar(v, "ups.serial", "device.serial"), BatteryDate: strVar(v, "battery.date", "battery.mfr.date"),
+		Model: infoVar(v, "ups.model", "device.model"), Mfr: infoVar(v, "ups.mfr", "device.mfr"),
+		Serial: infoVar(v, "ups.serial", "device.serial"), BatteryDate: infoVar(v, "battery.date", "battery.mfr.date"),
 		TestResult: strVar(v, "ups.test.result"), TransferReason: strVar(v, "input.transfer.reason"), OK: true}
 	if raw != "" {
 		row.StatusRaw = &raw
@@ -114,4 +115,18 @@ func PollUPS(ctx context.Context, host string, port int, user, pass string, name
 		out = append(out, UPSFromVars(u.Name, u.Vars, u.Description))
 	}
 	return out
+}
+
+// placeholder matches the filler some UPS firmwares report instead of a real model, maker, serial or date
+// (CyberPower over usbhid: battery.date "1", ups.mfr "1"): one or two digits, or words that mean "unknown".
+var placeholder = regexp.MustCompile(`(?i)^(\d{1,2}|0+|unknown|n/?a|none|not set|-+|\?+)$`)
+
+// infoVar is strVar for descriptive values: placeholders count as missing, so the panel shows "–" instead.
+func infoVar(v map[string]string, keys ...string) *string {
+	for _, k := range keys {
+		if s := strings.TrimSpace(v[k]); s != "" && !placeholder.MatchString(s) {
+			return &s
+		}
+	}
+	return nil
 }
