@@ -46,7 +46,7 @@ fan_control:
   enabled: false
   min_duty: 30                 # never lower than 30 %
   max_temp_c: 80               # watchdog: at this CPU temperature (or with no reading for 30 s) fans go to 100 %
-  auto_mode: optimal           # the BMC mode that counts as "not overridden"
+  auto_mode: optimal           # the BMC mode that counts as "not overridden"; boards without optimal: standard
 
 # Shutdown / reboot from the panel (panel: power_control: true). Delayed, cancellable, logged.
 power_control:

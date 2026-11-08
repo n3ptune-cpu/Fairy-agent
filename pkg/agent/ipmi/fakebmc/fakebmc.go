@@ -19,7 +19,10 @@ type BMC struct {
 	Duty    [2]byte
 	Calls   int
 	Fail    error // every request fails with this when set
-	resv    byte
+	// Refuse maps a fan mode byte to the completion code the BMC answers when asked to set it (e.g. 2: 0xCC for
+	// a board without "optimal", like the Enginetech EG320W-G20). Set it with RefuseMode.
+	Refuse map[byte]byte
+	resv   byte
 }
 
 // FullSensor builds a Full Sensor Record (SDR type 0x01). analog: 0 unsigned, 2 two's complement.
@@ -60,6 +63,20 @@ func (b *BMC) SetRaw(num, v byte) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.Values[num] = v
+}
+
+// RefuseMode makes the BMC answer completion code cc when asked to set fan mode mode (cc 0: accept it again).
+func (b *BMC) RefuseMode(mode, cc byte) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.Refuse == nil {
+		b.Refuse = map[byte]byte{}
+	}
+	if cc == 0 {
+		delete(b.Refuse, mode)
+		return
+	}
+	b.Refuse[mode] = cc
 }
 
 // State returns the fan mode byte and the duties.
@@ -112,6 +129,9 @@ func (b *BMC) Raw(_ context.Context, netfn, cmd byte, data []byte) ([]byte, erro
 	case netfn == ipmi.NetFnOEM && cmd == ipmi.CmdSMCFanMode:
 		if data[0] == 0 {
 			return []byte{b.Mode}, nil
+		}
+		if c, ok := b.Refuse[data[1]]; ok {
+			return nil, cc(c)
 		}
 		b.Mode = data[1]
 		if b.Mode == 1 { // full speed resets duties to 100

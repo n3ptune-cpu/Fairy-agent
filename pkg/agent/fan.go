@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"slices"
 	"strconv"
 	"sync"
 	"time"
@@ -29,15 +30,32 @@ type Fan struct {
 	localTemps func() []collect.Temp
 	now        func() time.Time
 
-	mu     sync.Mutex // one fan change at a time (API and watchdog)
-	evMu   sync.Mutex
-	events []FanEvent
-	noTemp int
+	mu          sync.Mutex // one fan change at a time (API and watchdog)
+	unsupported map[string]bool
+	evMu        sync.Mutex
+	events      []FanEvent
+	noTemp      int
 }
 
 // NewFan returns the fan controller.
 func NewFan(t ipmi.Transport, bmc *BMC, cfg FanConfig, localTemps func() []collect.Temp) *Fan {
-	return &Fan{t: t, bmc: bmc, cfg: cfg, localTemps: localTemps, now: time.Now}
+	return &Fan{t: t, bmc: bmc, cfg: cfg, localTemps: localTemps, now: time.Now, unsupported: map[string]bool{}}
+}
+
+// modeUnsupported reports whether a SetFanMode error means "this board has no such mode" (the BMC rejects the
+// mode byte itself), rather than a failure worth retrying.
+func modeUnsupported(err error) bool {
+	return ipmi.IsCompletion(err, 0xCC) || ipmi.IsCompletion(err, 0xC9)
+}
+
+// unsupportedModes are the modes the BMC refused since the agent started, sorted. Caller holds f.mu.
+func (f *Fan) unsupportedModes() []string {
+	out := []string{}
+	for m := range f.unsupported {
+		out = append(out, m)
+	}
+	slices.Sort(out)
+	return out
 }
 
 func (f *Fan) event(action, detail string) {
@@ -62,14 +80,17 @@ func ctxTimeout(ctx context.Context) (context.Context, context.CancelFunc) {
 }
 
 // Status is /fan/status. BMC errors are reported in `error` (HTTP 200), so the panel can show them.
+// unsupported_modes lists the modes this board's BMC refused (since the agent started), so the panel can grey
+// them out; auto_mode is the configured "not overridden" mode.
 func (f *Fan) Status(ctx context.Context) map[string]any {
 	ctx, cancel := ctxTimeout(ctx)
 	defer cancel()
 	out := map[string]any{"enabled": true, "vendor": f.cfg.Vendor, "mode": nil, "error": nil, "overridden": false,
 		"duty": map[string]int{}, "min_duty": f.cfg.MinDuty, "max_temp_c": f.cfg.MaxTempC, "fans": f.bmc.FanList(),
-		"events": f.recentEvents()}
+		"events": f.recentEvents(), "auto_mode": f.cfg.AutoMode}
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	out["unsupported_modes"] = f.unsupportedModes()
 	mode, err := ipmi.GetFanMode(ctx, f.t)
 	if err != nil {
 		out["error"] = "cannot read the fan mode: " + safeErr(err)
@@ -89,7 +110,9 @@ func (f *Fan) Status(ctx context.Context) map[string]any {
 	return out
 }
 
-// SetMode is POST /fan/mode.
+// SetMode is POST /fan/mode. A mode the BMC rejects as invalid (completion code 0xCC / 0xC9: the board has no
+// such mode) is remembered and reported in /fan/status `unsupported_modes`; the answer is 422 with code
+// "fan_mode_unsupported". The mode is still tried again on the next request (a BMC firmware update may add it).
 func (f *Fan) SetMode(ctx context.Context, mode, who string) (int, map[string]any) {
 	if _, ok := ipmi.ModeByte(mode); !ok {
 		return 400, map[string]any{"error": "mode must be standard, full, optimal or heavyio"}
@@ -99,8 +122,22 @@ func (f *Fan) SetMode(ctx context.Context, mode, who string) (int, map[string]an
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if err := ipmi.SetFanMode(ctx, f.t, mode); err != nil {
-		return 502, map[string]any{"error": "BMC refused the fan mode: " + safeErr(err)}
+		if !modeUnsupported(err) {
+			return 502, map[string]any{"error": "BMC refused the fan mode: " + safeErr(err)}
+		}
+		if !f.unsupported[mode] {
+			f.unsupported[mode] = true
+			f.event("mode "+mode+" unsupported", "BMC refused it: "+safeErr(err))
+		}
+		if mode == f.cfg.AutoMode {
+			slog.Warn("fan_control.auto_mode is a mode this board's BMC does not support; set it to one the BMC accepts, "+
+				"e.g. `fairy-agent config set fan_control.auto_mode standard`, then restart fairy-agent",
+				"auto_mode", mode, "error", safeErr(err))
+		}
+		return 422, map[string]any{"error": fmt.Sprintf("BMC refused the fan mode %s: %s; this board's BMC does not support it",
+			mode, safeErr(err)), "code": "fan_mode_unsupported", "mode": mode}
 	}
+	delete(f.unsupported, mode)
 	f.noTemp = 0
 	f.event("mode="+mode, who)
 	return 200, map[string]any{"mode": mode}

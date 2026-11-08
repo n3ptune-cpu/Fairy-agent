@@ -611,3 +611,58 @@ func TestCombineGPUs(t *testing.T) {
 		t.Fatal("amdgpu defaults to auto", err)
 	}
 }
+
+// A board whose BMC has no "optimal" mode (Enginetech EG320W-G20, a Supermicro OEM board: completion code 0xCC):
+// the agent answers 422 fan_mode_unsupported, lists the mode in /fan/status, warns when it is auto_mode, and
+// forgets it again once the BMC accepts it.
+func TestFanModeUnsupported(t *testing.T) {
+	var logs bytes.Buffer
+	old := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(old) })
+	r := newRig(t, "ipmi: {enabled: true}\nfan_control: {enabled: true}\ncontrol_rate_per_min: 60\n")
+	r.bmc.RefuseMode(2, 0xCC)
+	r.bmc.Mode = 0 // the board runs "standard"
+	_, s := r.do(t, "GET", "/fan/status", readTok, nil)
+	if um := s["unsupported_modes"].([]any); len(um) != 0 || s["auto_mode"] != "optimal" {
+		t.Fatal(s)
+	}
+	st, b := r.do(t, "POST", "/fan/mode", ctlTok, map[string]any{"mode": "optimal"})
+	if st != 422 || b["code"] != "fan_mode_unsupported" || !strings.Contains(b["error"].(string), "0xCC") {
+		t.Fatal(st, b)
+	}
+	if !strings.Contains(logs.String(), "fan_control.auto_mode standard") {
+		t.Fatal("auto_mode refused: no warning", logs.String())
+	}
+	if mode, _ := r.bmc.State(); mode != 0 {
+		t.Fatal("mode changed", mode)
+	}
+	r.do(t, "POST", "/fan/mode", ctlTok, map[string]any{"mode": "optimal"}) // twice: listed and logged once
+	_, s = r.do(t, "GET", "/fan/status", readTok, nil)
+	if um := s["unsupported_modes"].([]any); len(um) != 1 || um[0] != "optimal" || len(s["events"].([]any)) != 1 {
+		t.Fatal(s)
+	}
+	if st, _ := r.do(t, "POST", "/fan/mode", ctlTok, map[string]any{"mode": "heavyio"}); st != 200 {
+		t.Fatal("other modes still work", st)
+	}
+	// other completion codes are BMC failures, not "unsupported"
+	r.bmc.RefuseMode(0, 0xC3)
+	if st, _ := r.do(t, "POST", "/fan/mode", ctlTok, map[string]any{"mode": "standard"}); st != 502 {
+		t.Fatal(st)
+	}
+	r.bmc.RefuseMode(2, 0)
+	if st, _ := r.do(t, "POST", "/fan/mode", ctlTok, map[string]any{"mode": "optimal"}); st != 200 {
+		t.Fatal(st)
+	}
+	_, s = r.do(t, "GET", "/fan/status", readTok, nil)
+	if um := s["unsupported_modes"].([]any); len(um) != 0 {
+		t.Fatal("accepted again: no longer listed", s)
+	}
+	// a refused mode that is not auto_mode logs no auto_mode warning
+	logs.Reset()
+	r2 := newRig(t, "ipmi: {enabled: true}\nfan_control: {enabled: true, auto_mode: standard}\n")
+	r2.bmc.RefuseMode(2, 0xCC)
+	if st, _ := r2.do(t, "POST", "/fan/mode", ctlTok, map[string]any{"mode": "optimal"}); st != 422 || strings.Contains(logs.String(), "auto_mode") {
+		t.Fatal(st, logs.String())
+	}
+}

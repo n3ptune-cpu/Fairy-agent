@@ -204,7 +204,14 @@ fan_control:
   enabled: true
   min_duty: 30          # never below 30 %
   max_temp_c: 80        # watchdog
+  auto_mode: optimal    # the BMC's automatic mode on this board: optimal, standard or heavyio
 ```
+
+Not every board has every mode. Some (e.g. the Enginetech EG320W-G20, a Supermicro OEM board) refuse "optimal"
+with BMC completion code 0xCC. The agent remembers a mode its BMC refused, reports it in `/fan/status`
+(`unsupported_modes`) and the panel greys that button out. If the refused mode is `auto_mode`, the log says so:
+set `auto_mode` to a mode the board has, e.g.
+`fairy-agent config set fan_control.auto_mode standard` (see [Settings](#settings-configyaml)), and restart.
 
 Safety: the agent refuses any speed below 30 % (the panel does too). While you have set a fixed speed, it checks
 the CPU temperature every 10 seconds; at 80 °C, or if it cannot read any temperature for 30 seconds, it sets
