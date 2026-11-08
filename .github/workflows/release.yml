@@ -27,6 +27,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          fetch-depth: 0 # the release notes list the commits since the previous release
 
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
@@ -76,6 +77,30 @@ jobs:
           go run ./cmd/fairy-release-key sign --pub release/signing.pub dist/SHA256SUMS
           go run ./cmd/fairy-release-key verify --pub release/signing.pub dist/SHA256SUMS
 
+      - name: Release notes (commits since the previous release)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          prev="$(gh release view --repo "$GITHUB_REPOSITORY" --json tagName --jq .tagName 2>/dev/null || true)"
+          {
+            echo "fairy-agent ${GITHUB_RUN_NUMBER}-${GITHUB_SHA::7}, built from ${GITHUB_SHA}."
+            echo
+            if [ -n "$prev" ] && git fetch --quiet origin "refs/tags/${prev}:refs/tags/${prev}" 2>/dev/null; then
+              echo "Changes since ${prev}:"
+              echo
+              git log --no-merges --format='- %s (%h)' "${prev}..${GITHUB_SHA}"
+            else
+              echo "Changes (last 20 commits):"
+              echo
+              git log --no-merges --format='- %s (%h)' -n 20 "$GITHUB_SHA"
+            fi
+            echo
+            echo "Install: the panel's Update button (agents with self_update), or \`fairy-agent update\` on the machine. See SETUP-UPDATES.md."
+            echo "SHA256SUMS is signed (SHA256SUMS.sig, ed25519, public key release/signing.pub)."
+          } > notes.md
+          cat notes.md
+
       - name: Publish the release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -83,5 +108,4 @@ jobs:
           set -eu
           tag="build-${GITHUB_RUN_NUMBER}"
           gh release create "$tag" dist/* --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --latest \
-            --title "fairy-agent build ${GITHUB_RUN_NUMBER} (${GITHUB_SHA::7})" \
-            --notes "Built from ${GITHUB_SHA} by run ${GITHUB_RUN_ID}. Install with the panel's Update button (self_update) or by hand: see SETUP-UPDATES.md. SHA256SUMS is signed (SHA256SUMS.sig, ed25519, key release/signing.pub)."
+            --title "fairy-agent build ${GITHUB_RUN_NUMBER} (${GITHUB_SHA::7})" --notes-file notes.md
