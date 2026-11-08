@@ -13,6 +13,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"runtime"
@@ -525,4 +526,74 @@ func ApplyUpdate(ctx context.Context, cfg *Config, version, releaseKey string) e
 		return errors.New(res.Message)
 	}
 	return nil
+}
+
+// NewUpdateCLI is `fairy-agent update` on the machine itself (root on Linux, Administrator on Windows), like
+// `tailscale update`: the same signed download, swap, restart, health check and rollback as the panel's Update
+// button, without the stage (the downloading process is already privileged). cfg may be nil (no config file):
+// then the official repository is used and the health check only asks the service manager.
+func NewUpdateCLI(ctx context.Context, cfg *Config, version, releaseKey string) (*release.CLI, error) {
+	repo := release.AgentRepo
+	if cfg != nil {
+		repo = cfg.SelfUpdate.Repo
+	}
+	c, err := release.NewClient(repo, "fairy-agent/"+version)
+	if err != nil {
+		return nil, err
+	}
+	key, err := release.ParsePublicKey(releaseKey)
+	if err != nil {
+		return nil, err
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		return nil, err
+	}
+	if p, err := filepath.EvalSymlinks(exe); err == nil {
+		exe = p
+	}
+	running := serviceRunning(ctx) == nil
+	cli := &release.CLI{Client: c, Key: key, Program: release.AgentProgram, Current: version, Target: exe,
+		Asset: release.AssetName(release.AgentProgram, runtime.GOOS, runtime.GOARCH), Out: os.Stdout, In: os.Stdin,
+		RunNew: func(path string) (string, error) {
+			out, err := exec.Command(path, "version").Output()
+			return string(out), err
+		},
+		Installer: func(target, want string) *release.Installer {
+			in := installerFor(target)
+			if !running { // service stopped or not installed: swap only, nothing to restart or check
+				in.Stop = nil
+				in.Start = func(context.Context) error { return nil }
+				in.Healthy = func(context.Context) error { return nil }
+				return in
+			}
+			in.Healthy = func(ctx context.Context) error {
+				if err := serviceRunning(ctx); err != nil {
+					return err
+				}
+				if cfg == nil {
+					return nil
+				}
+				return CheckRunning(ctx, cfg, want)
+			}
+			return in
+		}}
+	if !running {
+		fmt.Fprintln(os.Stdout, "(the fairy-agent service is not running: the binary is replaced but not started)")
+	}
+	if cfg != nil {
+		if _, result := UpdatePaths(cfg); result != "" {
+			cli.Done = func(from, to string, err error) {
+				idb := make([]byte, 8)
+				_, _ = rand.Read(idb)
+				r := UpdateResult{ID: hex.EncodeToString(idb), OK: err == nil, From: from, To: to, At: float64(time.Now().Unix()),
+					Message: "updated from " + from + " to " + to + " (fairy-agent update on the machine)"}
+				if err != nil {
+					r.Message = "update to " + to + " failed (fairy-agent update on the machine): " + err.Error()
+				}
+				_ = writeResult(result, r)
+			}
+		}
+	}
+	return cli, nil
 }

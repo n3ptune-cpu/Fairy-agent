@@ -5,6 +5,7 @@
 //	fairy-agent uninstall                  Windows: remove the service (config and tokens stay)
 //	fairy-agent check-config [--config path]
 //	fairy-agent gen-token                  print a new random token (for the token files)
+//	fairy-agent update [--check] [--yes] [--force]  install the latest signed release by hand (root / Administrator)
 //	fairy-agent apply-update [--config path]  install the release the agent staged (run by the updater, see AGENT.md)
 //	fairy-agent setup-self-update          Windows: give the service the rights self-update needs
 //	fairy-agent version
@@ -43,6 +44,9 @@ const usage = `fairy-agent: reports this machine's metrics to the Fairy panel (s
   fairy-agent uninstall                     Windows: remove the service (config and tokens are kept)
   fairy-agent check-config [--config PATH]  check config.yaml and the token files, then exit
   fairy-agent gen-token                     print a new random token
+  fairy-agent update [--check] [--yes] [--force] [--config PATH]
+                                            install the latest signed release now (root / Administrator):
+                                            download, verify, swap (keeps .old), restart, roll back on failure
   fairy-agent apply-update [--config PATH]  install the update the agent staged (started by the panel's
                                             Update button through fairy-agent-update.service / the service)
   fairy-agent setup-self-update             Windows: give the service the rights self-update needs
@@ -61,6 +65,9 @@ func main() {
 	fs := flag.NewFlagSet(cmd, flag.ExitOnError)
 	cfgPath := fs.String("config", agent.DefaultConfigPath(), "path of config.yaml")
 	account := fs.String("account", "LocalService", "Windows service account: LocalService or LocalSystem")
+	check := fs.Bool("check", false, "update: only show the installed and the latest version")
+	yes := fs.Bool("yes", false, "update: do not ask before installing")
+	force := fs.Bool("force", false, "update: also reinstall the same version or install an older one")
 	switch cmd {
 	case "run":
 		_ = fs.Parse(args)
@@ -101,6 +108,9 @@ func main() {
 			os.Exit(1)
 		}
 		fmt.Println(tok)
+	case "update":
+		_ = fs.Parse(args)
+		os.Exit(localUpdate(*cfgPath, *check, *yes, *force))
 	case "apply-update":
 		_ = fs.Parse(args)
 		os.Exit(applyUpdate(*cfgPath))
@@ -217,6 +227,36 @@ func applyUpdate(cfgPath string) int {
 	slog.Warn("apply-update: starting", "installed", version)
 	if err := agent.ApplyUpdate(ctx, cfg, version, releaseKey); err != nil {
 		fmt.Fprintln(os.Stderr, "fairy-agent apply-update:", err)
+		return 1
+	}
+	return 0
+}
+
+// localUpdate is `fairy-agent update`: like the panel's Update button, run by hand on the machine.
+func localUpdate(cfgPath string, check, yes, force bool) int {
+	if !check && runtime.GOOS == "linux" && os.Geteuid() != 0 {
+		fmt.Fprintln(os.Stderr, "fairy-agent update must run as root (it replaces the binary and restarts fairy-agent); --check works as any user")
+		return 1
+	}
+	cfg, err := agent.Load(cfgPath)
+	if err != nil {
+		cfg = nil // no or unreadable config: official repository, service-only health check
+		if !check {
+			fmt.Fprintln(os.Stderr, "note:", err)
+		}
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	ctx, cancel := context.WithTimeout(ctx, 15*time.Minute)
+	defer cancel()
+	cli, err := agent.NewUpdateCLI(ctx, cfg, version, releaseKey)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "fairy-agent update:", err)
+		return 1
+	}
+	cli.Check, cli.Yes, cli.Force = check, yes, force
+	if err := cli.Run(ctx); err != nil {
+		fmt.Fprintln(os.Stderr, "fairy-agent update:", err)
 		return 1
 	}
 	return 0
