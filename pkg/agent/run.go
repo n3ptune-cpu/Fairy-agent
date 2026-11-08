@@ -16,6 +16,7 @@ import (
 
 	"github.com/n3ptune-cpu/Fairy-agent/pkg/agent/collect"
 	"github.com/n3ptune-cpu/Fairy-agent/pkg/agent/ipmi"
+	"github.com/n3ptune-cpu/Fairy-agent/pkg/enroll"
 )
 
 // StartupWait is how long the agent waits at start for its listen address (Tailscale coming up after boot).
@@ -156,6 +157,11 @@ func Run(ctx context.Context, cfg *Config, b Build) error {
 	}
 	if !relay.Empty() {
 		go relay.Run(ctx)
+	}
+	pairPath := PairingPath(cfg)
+	d.Pairer = NewPairer(pairPath, cfg.LoadTokens, func() enroll.Response { return a.PairInfo() })
+	if st, err := enroll.ReadState(pairPath); err == nil && st.Active(time.Now()) {
+		slog.Info("waiting for the panel to pair (Add host)", "panel", st.Panel, "until", time.Unix(st.ExpiresAt, 0).Format(time.RFC3339))
 	}
 	a = New(cfg, tokens, d)
 

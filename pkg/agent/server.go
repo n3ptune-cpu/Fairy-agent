@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -17,6 +18,7 @@ import (
 	"time"
 
 	"github.com/n3ptune-cpu/Fairy-agent/pkg/agent/collect"
+	"github.com/n3ptune-cpu/Fairy-agent/pkg/enroll"
 	"github.com/n3ptune-cpu/Fairy-agent/pkg/redact"
 )
 
@@ -73,6 +75,7 @@ type Deps struct {
 	WOL       *WOL      // nil unless wol is enabled
 	Relay     *Relay    // may be nil
 	Updater   *Updater  // nil unless self_update is enabled
+	Pairer    *Pairer   // POST /pair ("Add host" in the panel); nil = never answers
 	Version   string
 }
 
@@ -236,6 +239,10 @@ func (a *Agent) Handler() http.Handler {
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ip := clientIP(r)
+		if r.URL.Path == enroll.Path { // no bearer token yet: the join code is the credential (see Pairer)
+			a.d.Pairer.ServeHTTP(w, r)
+			return
+		}
 		rt, ok := routes[r.URL.Path]
 		if !ok {
 			writeJSON(w, 404, map[string]any{"error": "not found"})
@@ -342,9 +349,10 @@ func (a *Agent) Metrics(ctx context.Context) map[string]any {
 			pw.Source = append(pw.Source, "gpu")
 		}
 	}
-	feat := map[string]any{"processes": a.cfg.ProcessesEnabled(), "cmdline": a.cfg.ProcessesEnabled() && a.cfg.CmdlineEnabled(),
-		"fan_control": a.d.Fan != nil, "power_control": a.d.Power != nil, "wol_relay": a.d.WOL != nil,
-		"self_update": a.d.Updater != nil}
+	feat := map[string]any{}
+	for k, v := range a.Features() {
+		feat[k] = v
+	}
 	ps, us := a.d.Relay.Rows()
 	m := map[string]any{
 		"agent_version": a.d.Version, "timestamp": collect.Round(float64(time.Now().UnixMilli())/1000, 3),
@@ -377,6 +385,22 @@ func (a *Agent) Metrics(ctx context.Context) map[string]any {
 		m["self_update"] = a.d.Updater.Status()
 	}
 	return m
+}
+
+// Features are the panel-visible switches (the "features" block of /metrics and the /pair answer).
+func (a *Agent) Features() map[string]bool {
+	return map[string]bool{"processes": a.cfg.ProcessesEnabled(), "cmdline": a.cfg.ProcessesEnabled() && a.cfg.CmdlineEnabled(),
+		"fan_control": a.d.Fan != nil, "power_control": a.d.Power != nil, "wol_relay": a.d.WOL != nil,
+		"self_update": a.d.Updater != nil}
+}
+
+// PairInfo is the /pair answer without the tokens.
+func (a *Agent) PairInfo() enroll.Response {
+	r := enroll.Response{AgentVersion: a.d.Version, Platform: runtime.GOOS, Features: a.Features()}
+	if !a.cfg.HideHostDetails {
+		r.Hostname = a.d.Collector.Static().Hostname
+	}
+	return r
 }
 
 func orEmpty[T any](s []T) []T {
