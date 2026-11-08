@@ -92,10 +92,12 @@ type Updater struct {
 	o   UpdaterOptions
 	now func() time.Time
 
-	mu   sync.Mutex
-	st   UpdateStatus
-	busy bool
-	done chan struct{} // closed when a run ends (tests)
+	mu        sync.Mutex
+	st        UpdateStatus
+	busy      bool
+	done      chan struct{} // closed when a run ends (tests)
+	resultMod time.Time     // the result file's mtime when it was last read
+	checkedAt time.Time
 }
 
 // NewUpdater returns the updater and reads the installer's last result.
@@ -111,13 +113,36 @@ func NewUpdater(o UpdaterOptions) *Updater {
 			u.st.Message = o.KeyErr.Error()
 		}
 	}
-	if r := readResult(o.ResultPath); r != nil {
-		u.st.Last = r
-		if !r.OK && u.ts()-r.At < 3600 && u.st.State == "idle" {
-			u.st.State, u.st.Message = "failed", r.Message
-		}
-	}
+	u.refreshLast(true)
 	return u
+}
+
+// refreshLast picks up a new result file. The installer writes it only after the restarted agent has proven
+// healthy (or after the rollback), i.e. while this process is already running. Caller holds u.mu (or owns u).
+func (u *Updater) refreshLast(force bool) {
+	if u.o.ResultPath == "" || (!force && time.Since(u.checkedAt) < 2*time.Second) {
+		return
+	}
+	u.checkedAt = time.Now()
+	st, err := os.Stat(u.o.ResultPath)
+	if err != nil || st.ModTime().Equal(u.resultMod) {
+		return
+	}
+	u.resultMod = st.ModTime()
+	r := readResult(u.o.ResultPath)
+	if r == nil {
+		return
+	}
+	u.st.Last = r
+	if u.busy {
+		return
+	}
+	switch {
+	case !r.OK && u.ts()-r.At < 3600 && u.st.State == "idle":
+		u.st.State, u.st.Message = "failed", r.Message
+	case r.OK && u.st.State == "failed" && !force:
+		u.st.State, u.st.Message = "idle", r.Message
+	}
 }
 
 func (u *Updater) ts() float64 { return collect.Round(float64(u.now().UnixMilli())/1000, 3) }
@@ -126,6 +151,7 @@ func (u *Updater) ts() float64 { return collect.Round(float64(u.now().UnixMilli(
 func (u *Updater) Status() UpdateStatus {
 	u.mu.Lock()
 	defer u.mu.Unlock()
+	u.refreshLast(false)
 	st := u.st
 	if st.Last != nil {
 		l := *st.Last

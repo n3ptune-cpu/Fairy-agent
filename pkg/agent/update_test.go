@@ -231,6 +231,19 @@ func TestUpdaterReportsLastResult(t *testing.T) {
 	if st := u.Status(); st.State != "failed" || st.Last == nil || st.Last.To != "42-b" {
 		t.Fatalf("%+v", st)
 	}
+	// the installer writes its verdict after this (restarted) agent is up: picked up without a restart
+	path2 := filepath.Join(t.TempDir(), "result.json")
+	u = NewUpdater(UpdaterOptions{Version: "42-b", Key: make([]byte, 32), ResultPath: path2})
+	if st := u.Status(); st.State != "idle" || st.Last != nil {
+		t.Fatalf("%+v", st)
+	}
+	_ = writeResult(path2, UpdateResult{ID: "cd", OK: true, From: "41-a", To: "42-b", Message: "updated from 41-a to 42-b", At: float64(time.Now().Unix())})
+	u.mu.Lock()
+	u.checkedAt = time.Time{}
+	u.mu.Unlock()
+	if st := u.Status(); st.State != "idle" || st.Last == nil || !st.Last.OK || st.Last.ID != "cd" {
+		t.Fatalf("%+v", st)
+	}
 }
 
 // ---- the installer side, with a fake service
