@@ -5,11 +5,13 @@ package main
 import (
 	"errors"
 	"fmt"
+	"os"
 )
 
 func isService() bool  { return false }
 func runService() int  { return 1 }
 func lowerPriority()   {} // the systemd unit sets Nice= and the I/O class
+func isAdmin() bool    { return os.Geteuid() == 0 }
 func uninstall() error { return errors.New("on Linux, remove the systemd unit instead (see AGENT.md)") }
 
 func setupSelfUpdate(string) error {

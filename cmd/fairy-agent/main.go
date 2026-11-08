@@ -4,6 +4,7 @@
 //	fairy-agent install [--config path] [--account LocalService|LocalSystem]   Windows: install the service
 //	fairy-agent uninstall                  Windows: remove the service (config and tokens stay)
 //	fairy-agent check-config [--config path]
+//	fairy-agent config get|set|show ...      read or change one setting of config.yaml (set: root / Administrator)
 //	fairy-agent gen-token                  print a new random token (for the token files)
 //	fairy-agent update [--check] [--yes] [--force]  install the latest signed release by hand (root / Administrator)
 //	fairy-agent apply-update [--config path]  install the release the agent staged (run by the updater, see AGENT.md)
@@ -43,6 +44,10 @@ const usage = `fairy-agent: reports this machine's metrics to the Fairy panel (s
                                             Windows: install and configure the "fairy-agent" service
   fairy-agent uninstall                     Windows: remove the service (config and tokens are kept)
   fairy-agent check-config [--config PATH]  check config.yaml and the token files, then exit
+  fairy-agent config get <setting> | set <setting> <value> | show  [--config PATH]
+                                            read or change config.yaml (keeps its comments; set checks the
+                                            result like check-config, needs root / Administrator), e.g.
+                                            fairy-agent config set fan_control.auto_mode standard
   fairy-agent gen-token                     print a new random token
   fairy-agent update [--check] [--yes] [--force] [--config PATH]
                                             install the latest signed release now (root / Administrator):
@@ -88,19 +93,15 @@ func main() {
 		_ = fs.Parse(args)
 		cfg, err := agent.Load(*cfgPath)
 		if err == nil {
-			_, err = agent.LoadEnvFile(cfg.EnvFile)
-		}
-		if err == nil {
-			_, err = cfg.LoadTokens()
-		}
-		if err == nil {
-			_, err = agent.NewRelay(cfg.PowerSources, cfg.UPS)
+			err = checkConfig(cfg)
 		}
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "config problem:", err)
 			os.Exit(1)
 		}
 		fmt.Println("config OK:", *cfgPath)
+	case "config":
+		os.Exit(configCmd(args, os.Stdout, os.Stderr))
 	case "gen-token":
 		tok, err := newToken()
 		if err != nil {

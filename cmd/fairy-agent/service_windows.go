@@ -26,6 +26,20 @@ func isService() bool {
 	return err == nil && ok
 }
 
+// isAdmin reports whether this process may change config.yaml: an elevated (UAC) token, or one that holds the
+// Administrators group (SYSTEM, e.g. a remote-support shell).
+func isAdmin() bool {
+	if windows.GetCurrentProcessToken().IsElevated() {
+		return true
+	}
+	sid, err := windows.CreateWellKnownSid(windows.WinBuiltinAdministratorsSid)
+	if err != nil {
+		return false
+	}
+	ok, err := windows.Token(0).IsMember(sid)
+	return err == nil && ok
+}
+
 // lowerPriority runs the agent below normal priority so it never competes with games.
 func lowerPriority() {
 	_ = windows.SetPriorityClass(windows.CurrentProcess(), windows.BELOW_NORMAL_PRIORITY_CLASS)

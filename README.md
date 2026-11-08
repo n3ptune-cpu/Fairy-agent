@@ -54,12 +54,13 @@ Each folder is one Go package; inside a package, files are named after what they
 
 | Folder | What it does |
 | --- | --- |
-| `cmd/fairy-agent` | The `fairy-agent` program: `main.go` (run, check-config, gen-token, apply-update, version), `service_windows.go` (the Windows service: install, uninstall, setup-self-update, run under the service manager). |
+| `cmd/fairy-agent` | The `fairy-agent` program: `main.go` (run, check-config, gen-token, apply-update, version), `config_cmd.go` (`config get/set/show`), `service_windows.go` (the Windows service: install, uninstall, setup-self-update, run under the service manager). |
 | `cmd/fairy-release-key` | The release signing key: `gen` (owner, once), `sign` and `verify` (release workflow). |
 | `pkg/agent` | The agent's HTTP server and the panel contract (`server.go`), settings and tokens (`config.go`), BMC sensors (`bmc.go`), Supermicro fan control and its watchdog (`fan.go`), shutdown / reboot (`power*.go`), Wake-on-LAN (`wol.go`), plugs and UPSes it relays (`relay.go`), self-update and its installer (`update*.go`), Tailscale address (`listen.go`), start-up (`run.go`), log file (`logfile.go`). |
 | `pkg/release` | Signed releases, shared with the panel's `fairy update`: signature and SHA256SUMS checks, the GitHub download (fixed hosts, size and time limits), and the swap / restart / health check / rollback installer; `releasetest/` is a fake GitHub for tests. |
 | `pkg/agent/collect` | What the agent measures: Linux `/proc` and `/sys` (`procfs.go`, `linux.go`), Windows APIs, registry and PDH (`windows.go`, `pdh_windows.go`), NVIDIA GPUs via nvidia-smi (`nvidia.go`), AMD GPUs via amdgpu sysfs (`amdgpu.go`), laptop batteries (`battery.go`), Core Temp's shared memory on Windows (`coretemp*.go`). |
 | `pkg/agent/ipmi` | Raw IPMI to the BMC: sensor list and readings (`sdr.go`), Supermicro fan commands (`ipmi.go`), through ipmitool or Windows' IPMI WMI class (`ipmitool.go`, `wmi_windows.go`); `fakebmc/` for tests. |
+| `pkg/agent/configedit` | `fairy-agent config set`: changes one setting's text in config.yaml (comments, order and layout stay), checks the result, and replaces the file in one step keeping its owner, permissions and Windows access list. |
 | `pkg/agent/agenttest` | A fake collector for tests (here and in the panel's contract test). |
 | `pkg/devices` | Device protocols shared with the panel: Shelly/Tasmota/Redfish/Tuya parsing, NUT client, HTTP helpers, digest auth, and `Describe` (errors as short messages without secrets). |
 | `pkg/power` | One power source per device type (`shelly.go`, `tasmota.go`, `tuya.go`, `nut.go`, `redfish.go`, `agentpower.go`), built from a `power_sources:` entry (`build.go`). The agent relays them; the panel adds backoff, totals and history. |

@@ -405,6 +405,31 @@ The file is `C:\ProgramData\fairy-agent\config.yaml` (Windows) or `/etc/fairy-ag
 Unknown settings are an error (so a typo does not silently do nothing). `fairy-agent check-config` checks the
 file and the tokens without starting anything.
 
+### Changing a setting from the command line
+
+`fairy-agent config set <setting> <value>` changes one setting in config.yaml without an editor (handy in a
+remote shell such as DWService): it keeps the file's comments and order, adds a missing setting under the
+right section, checks the result exactly like `check-config` **before** writing, then replaces the file in one
+step (keeping its owner and permissions, on Windows its access list). Run it as root / in an Administrator
+PowerShell, then restart the agent.
+
+```powershell
+& "C:\Program Files\Fairy\fairy-agent.exe" config set fan_control.auto_mode standard
+& "C:\Program Files\Fairy\fairy-agent.exe" config get fan_control.auto_mode
+Restart-Service fairy-agent
+```
+
+```sh
+sudo fairy-agent config set ipmi.enabled true
+sudo fairy-agent config set wol.allowed_macs "aa:bb:cc:dd:ee:ff, 11:22:33:44:55:66"
+sudo systemctl restart fairy-agent
+```
+
+Settings are written with dots (`fan_control.min_duty`). Values: `true`/`false`, numbers, text, and lists as
+comma-separated values (`[]` for an empty list). `config get <setting>` prints the value the agent uses
+(the default when the file does not set it); `config show` prints every setting. `power_sources` and `ups`
+are lists of devices: edit those in the file.
+
 ## Checking, logs, updating, removing
 
 * **Is it running?** Windows: `Get-Service fairy-agent`. Linux: `systemctl status fairy-agent`.
