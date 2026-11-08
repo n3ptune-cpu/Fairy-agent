@@ -19,8 +19,10 @@ import (
 	"github.com/n3ptune-cpu/Fairy-agent/pkg/enroll"
 )
 
-// StartupWait is how long the agent waits at start for its listen address (Tailscale coming up after boot).
-const StartupWait = 3 * time.Minute
+// StartupWait is how long the agent waits at start for its listen address (Tailscale coming up after boot, or
+// on Windows without "Run unattended" only after someone signs in): as long as it takes. The service keeps
+// running meanwhile and the log says once a minute that it waits.
+const StartupWait = WaitForever
 
 func nvidiaPath(c GPUConfig) (string, error) {
 	switch c.NvidiaSMI {

@@ -93,7 +93,10 @@ folder, not in `config.yaml`.
 
 ## Install on Windows
 
-You need: Windows 10 or 11 (64-bit), Tailscale installed and signed in, and the file
+You need: Windows 10 or 11 (64-bit), Tailscale installed and signed in with **Run unattended** switched on
+(Tailscale icon > Preferences > Run unattended, or `tailscale up --unattended`; without it Tailscale only
+connects after someone signs in to Windows, so after a reboot or a Wake-on-LAN the panel shows the PC offline
+until then; the installer warns when it is off), and the file
 `fairy-agent-windows-amd64.exe` (plus `install-fairy-agent.ps1` from the `deploy` folder).
 
 **The easy way.** Put both files in one folder, open **PowerShell as Administrator** (right-click the Start
@@ -141,7 +144,8 @@ everything except two things, which need **LocalSystem** (`install --account Loc
 Shutdown / reboot and Wake-on-LAN work as LocalService.
 
 By default the agent listens on this PC's Tailscale address, port 9101 (it finds it by itself). It never listens
-on your home network or the internet unless you set `listen:` yourself.
+on your home network or the internet unless you set `listen:` yourself. Until Tailscale is up the agent waits
+(as long as it takes; the log says so once a minute) and then starts answering by itself.
 
 ## Install on Linux
 

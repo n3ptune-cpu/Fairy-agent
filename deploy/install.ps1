@@ -77,6 +77,16 @@ try {
     elseif ($rc -eq 3) { Write-Warning 'this build has no release key: the signature was not checked (hashes only)' }
     else { throw 'the release signature check failed' }
 
+    # Tailscale must be up without anyone signed in, or the panel cannot reach this PC after a reboot or a
+    # Wake-on-LAN until someone logs on ("Run unattended" = ForceDaemon in Tailscale's prefs).
+    $ts = Join-Path $env:ProgramFiles 'Tailscale\tailscale.exe'
+    if (Test-Path $ts) {
+        $prefs = Invoke-Quiet $ts @('debug', 'prefs')
+        if ($prefs.Code -eq 0 -and $prefs.Text -match '"ForceDaemon":\s*false') {
+            Write-Warning 'Tailscale "Run unattended" is off: after a reboot or Wake-on-LAN the panel cannot reach this PC until someone signs in. Turn it on: Tailscale icon > Preferences > Run unattended (or: tailscale up --unattended).'
+        }
+    } else { Write-Warning 'Tailscale was not found in C:\Program Files\Tailscale: the panel reaches the agent only over Tailscale.' }
+
     # 3. program, service, permissions, firewall (the existing installer script)
     $system = $CoreTemp -or $Ipmi
     $svc = Get-CimInstance Win32_Service -Filter "Name='fairy-agent'" -ErrorAction SilentlyContinue

@@ -2,8 +2,10 @@ package agent
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -179,4 +181,24 @@ func TestPairTokensUnreadableKeepsCode(t *testing.T) {
 		t.Fatalf("GET /pair: %d", resp.StatusCode)
 	}
 	resp.Body.Close()
+}
+
+func TestListenAddrWaitsForTailscale(t *testing.T) {
+	if _, ok := TailscaleIP(systemAddrs()); ok || countTailnet(systemAddrs()) > 0 {
+		t.Skip("this machine has a Tailscale-looking address")
+	}
+	cfg := mustParse(t, "")
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	if _, err := ListenAddr(ctx, cfg, WaitForever); !errors.Is(err, context.DeadlineExceeded) || time.Since(start) < 150*time.Millisecond {
+		t.Fatalf("WaitForever must wait until the context ends: %v after %v", err, time.Since(start))
+	}
+	if _, err := ListenAddr(context.Background(), cfg, 0); err == nil || !strings.Contains(err.Error(), "no Tailscale address") {
+		t.Fatalf("wait 0: %v", err)
+	}
+	two := []IfaceAddr{{"tailscale0", net.ParseIP("100.64.0.1")}, {"tailscale1", net.ParseIP("100.64.0.2")}}
+	if countTailnet(two) != 2 {
+		t.Fatal("countTailnet")
+	}
 }
