@@ -21,6 +21,8 @@ import (
 	"strings"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/n3ptune-cpu/Fairy-agent/pkg/release"
 )
 
 // DefaultPort is the agent's TCP port (the panel's example config uses http://<tailscale ip>:9101).
@@ -55,8 +57,9 @@ type Config struct {
 	FanControl   FanConfig          `yaml:"fan_control"`
 	PowerControl PowerControlConfig `yaml:"power_control"`
 	WOL          WOLConfig          `yaml:"wol"`
+	SelfUpdate   SelfUpdateConfig   `yaml:"self_update"`
 
-	// ControlRatePerMin limits POST requests (fan, power, Wake-on-LAN) for the whole agent.
+	// ControlRatePerMin limits POST requests (fan, power, Wake-on-LAN, self-update) for the whole agent.
 	ControlRatePerMin int `yaml:"control_rate_per_min"`
 
 	// PowerSources / UPS: devices on this machine's LAN that the agent reads and relays to the panel (same
@@ -127,6 +130,15 @@ type WOLConfig struct {
 	AllowedMACs []string `yaml:"allowed_macs"` // empty = any MAC
 }
 
+// SelfUpdateConfig lets the panel's Update button make this agent install the latest signed Fairy-agent
+// release from GitHub (POST /update with the control token). Nothing is ever installed on its own.
+type SelfUpdateConfig struct {
+	Enabled bool `yaml:"enabled"`
+	// Repo is the GitHub repository ("owner/name") whose latest release is installed; only for forks. Releases
+	// must still be signed with the key built into this binary.
+	Repo string `yaml:"repo"`
+}
+
 // DefaultConfigPath is where install and run look for config.yaml.
 func DefaultConfigPath() string {
 	if runtime.GOOS == "windows" {
@@ -167,7 +179,7 @@ func (c *Config) IPMISensors() bool { return c.IPMI.Enabled && boolOr(c.IPMI.Sen
 
 // ControlEnabled reports whether any POST feature is on (then a control token is required).
 func (c *Config) ControlEnabled() bool {
-	return c.FanControl.Enabled || c.PowerControl.Enabled || c.WOL.Enabled
+	return c.FanControl.Enabled || c.PowerControl.Enabled || c.WOL.Enabled || c.SelfUpdate.Enabled
 }
 
 var (
@@ -246,6 +258,9 @@ func (c *Config) defaults() {
 	}
 	if c.ControlRatePerMin == 0 {
 		c.ControlRatePerMin = 12
+	}
+	if c.SelfUpdate.Repo == "" {
+		c.SelfUpdate.Repo = release.AgentRepo
 	}
 }
 
@@ -328,6 +343,12 @@ func (c *Config) Validate() error {
 			add("wol.allowed_macs: %q is not a MAC address", m)
 		}
 	}
+	if !release.ValidRepo(c.SelfUpdate.Repo) {
+		add("self_update.repo must be a GitHub repository name like %s (not a URL)", release.AgentRepo)
+	}
+	if c.SelfUpdate.Enabled && runtime.GOOS != "linux" && runtime.GOOS != "windows" {
+		add("self_update is only available on Linux and Windows")
+	}
 	if c.ControlRatePerMin < 1 || c.ControlRatePerMin > 60 {
 		add("control_rate_per_min must be 1-60")
 	}
@@ -391,7 +412,7 @@ func (c *Config) LoadTokens() (Tokens, error) {
 	if !c.ControlEnabled() {
 		return t, nil
 	}
-	if t.Control, err = get("FAIRY_AGENT_CONTROL_TOKEN", c.ControlTokenFile, "control token (fan, power or Wake-on-LAN is enabled)", true); err != nil {
+	if t.Control, err = get("FAIRY_AGENT_CONTROL_TOKEN", c.ControlTokenFile, "control token (fan, power, Wake-on-LAN or self-update is enabled)", true); err != nil {
 		return t, err
 	}
 	if len(t.Control) < MinTokenLen {

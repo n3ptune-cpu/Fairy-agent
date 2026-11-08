@@ -73,8 +73,15 @@ func IPMITransport(c IPMIConfig) (ipmi.Transport, error) {
 	return t, nil
 }
 
+// Build describes the running binary (set at build time with -ldflags).
+type Build struct {
+	Version    string
+	ReleaseKey string // base64 ed25519 public key of signed releases; "" in local builds (no self-update)
+}
+
 // Run starts every part of the agent and serves until ctx ends.
-func Run(ctx context.Context, cfg *Config, version string) error {
+func Run(ctx context.Context, cfg *Config, b Build) error {
+	version := b.Version
 	names, err := LoadEnvFile(cfg.EnvFile)
 	if err != nil {
 		return err
@@ -132,6 +139,21 @@ func Run(ctx context.Context, cfg *Config, version string) error {
 	if cfg.WOL.Enabled {
 		d.WOL = NewWOL(cfg.WOL.AllowedMACs)
 	}
+	if cfg.SelfUpdate.Enabled {
+		o, err := DefaultUpdaterOptions(cfg, version, b.ReleaseKey)
+		if err != nil {
+			return err
+		}
+		d.Updater = NewUpdater(o)
+		if st := d.Updater.Status(); st.State == "unavailable" {
+			slog.Warn("self_update is enabled but cannot work", "reason", st.Message)
+		} else if st.Last != nil {
+			slog.Info("self-update: last result", "ok", st.Last.OK, "message", st.Last.Message)
+		}
+		if o.StageDir != "" {
+			_ = clearDir(o.StageDir) // a stage left from the last update is not needed any more
+		}
+	}
 	if !relay.Empty() {
 		go relay.Run(ctx)
 	}
@@ -148,7 +170,8 @@ func Run(ctx context.Context, cfg *Config, version string) error {
 	var on []string
 	for name, ok := range map[string]bool{"processes": cfg.ProcessesEnabled(), "fan_control": d.Fan != nil,
 		"power_control": d.Power != nil, "wol_relay": d.WOL != nil, "ipmi": d.BMC != nil, "gpu": d.GPU != nil,
-		"coretemp": cfg.Sensors.CoreTemp} {
+		"self_update": d.Updater != nil,
+		"coretemp":    cfg.Sensors.CoreTemp} {
 		if ok {
 			on = append(on, name)
 		}

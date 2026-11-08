@@ -129,6 +129,9 @@ power_control:
 
 wol:
   enabled: false         # send Wake-on-LAN packets for the panel
+
+self_update:
+  enabled: false         # let the panel's Update button install the latest signed release (see AGENT.md)
 `
 
 func writeIfMissing(path string, data []byte) (bool, error) {
@@ -206,6 +209,9 @@ func install(cfgPath, account string) error {
 	if err := applyACL(logs, "D:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1301bf;;;"+sid.String()+")"); err != nil {
 		return fmt.Errorf("log folder permissions: %w", err)
 	}
+	if err := setupSelfUpdate(cfgPath); err != nil {
+		return fmt.Errorf("self-update permissions: %w", err)
+	}
 	if created, err := writeIfMissing(cfgPath, []byte(strings.ReplaceAll(starterConfig, "\n", "\r\n"))); err != nil {
 		return err
 	} else if created {
@@ -225,6 +231,82 @@ func install(cfgPath, account string) error {
 	}
 	fmt.Println(`installed the "fairy-agent" service (account: ` + account + `, starts automatically).
 Next: check config.yaml, add the firewall rule from AGENT.md, then: Start-Service fairy-agent`)
+	return nil
+}
+
+// grantACE adds (or widens) one allow entry for sid to an object's DACL, keeping everything else (inherited
+// entries included). Running it again changes nothing.
+func grantACE(name string, typ windows.SE_OBJECT_TYPE, handle windows.Handle, sid *windows.SID, mask windows.ACCESS_MASK, inherit uint32) error {
+	var sd *windows.SECURITY_DESCRIPTOR
+	var err error
+	if handle != 0 {
+		sd, err = windows.GetSecurityInfo(handle, typ, windows.DACL_SECURITY_INFORMATION)
+	} else {
+		sd, err = windows.GetNamedSecurityInfo(name, typ, windows.DACL_SECURITY_INFORMATION)
+	}
+	if err != nil {
+		return err
+	}
+	old, _, err := sd.DACL()
+	if err != nil {
+		return err
+	}
+	acl, err := windows.ACLFromEntries([]windows.EXPLICIT_ACCESS{{AccessPermissions: mask, AccessMode: windows.GRANT_ACCESS,
+		Inheritance: inherit, Trustee: windows.TRUSTEE{TrusteeForm: windows.TRUSTEE_IS_SID,
+			TrusteeType: windows.TRUSTEE_IS_WELL_KNOWN_GROUP, TrusteeValue: windows.TrusteeValueFromSID(sid)}}}, old)
+	if err != nil {
+		return err
+	}
+	if handle != 0 {
+		return windows.SetSecurityInfo(handle, typ, windows.DACL_SECURITY_INFORMATION, nil, nil, acl, nil)
+	}
+	return windows.SetNamedSecurityInfo(name, typ, windows.DACL_SECURITY_INFORMATION, nil, nil, acl, nil)
+}
+
+// setupSelfUpdate gives the service's own SID (NT SERVICE\fairy-agent; no other account or service) what the
+// self-update needs, idempotently:
+//   - modify on the program folder (C:\Program Files\Fairy), to rename the exe to .old and put the new one in;
+//   - an update folder under ProgramData it may write (stage + result), like logs\;
+//   - start / stop / query on its own service, so the installer it starts can restart it.
+//
+// The agent still installs only releases signed with the key built into it, and only when self_update is
+// enabled in config.yaml.
+func setupSelfUpdate(cfgPath string) error {
+	sid, _, _, err := windows.LookupSID("", `NT SERVICE\`+serviceName)
+	if err != nil {
+		return fmt.Errorf("the service account was not found (is the service installed?): %w", err)
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	exe, _ = filepath.Abs(exe)
+	const modify = 0x1301bf // read, write, execute, delete
+	if err := grantACE(filepath.Dir(exe), windows.SE_FILE_OBJECT, 0, sid, modify, windows.SUB_CONTAINERS_AND_OBJECTS_INHERIT); err != nil {
+		return fmt.Errorf("program folder %s: %w", filepath.Dir(exe), err)
+	}
+	upd := filepath.Join(filepath.Dir(cfgPath), "update")
+	if err := os.MkdirAll(upd, 0o700); err != nil {
+		return err
+	}
+	if err := applyACL(upd, "D:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1301bf;;;"+sid.String()+")"); err != nil {
+		return fmt.Errorf("update folder %s: %w", upd, err)
+	}
+	m, err := mgr.Connect()
+	if err != nil {
+		return fmt.Errorf("cannot reach the service manager (run PowerShell as Administrator): %w", err)
+	}
+	defer m.Disconnect()
+	s, err := m.OpenService(serviceName)
+	if err != nil {
+		return fmt.Errorf("the %s service is not installed: %w", serviceName, err)
+	}
+	defer s.Close()
+	const svcRights = windows.SERVICE_START | windows.SERVICE_STOP | windows.SERVICE_QUERY_STATUS | windows.SERVICE_INTERROGATE
+	if err := grantACE("", windows.SE_SERVICE, s.Handle, sid, svcRights, windows.NO_INHERITANCE); err != nil {
+		return fmt.Errorf("service permissions: %w", err)
+	}
+	fmt.Println("self-update permissions set (service account " + `NT SERVICE\` + serviceName + ")")
 	return nil
 }
 

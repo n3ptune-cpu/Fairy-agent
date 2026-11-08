@@ -5,6 +5,8 @@
 //	fairy-agent uninstall                  Windows: remove the service (config and tokens stay)
 //	fairy-agent check-config [--config path]
 //	fairy-agent gen-token                  print a new random token (for the token files)
+//	fairy-agent apply-update [--config path]  install the release the agent staged (run by the updater, see AGENT.md)
+//	fairy-agent setup-self-update          Windows: give the service the rights self-update needs
 //	fairy-agent version
 package main
 
@@ -21,11 +23,17 @@ import (
 	"runtime"
 	"runtime/debug"
 	"syscall"
+	"time"
 
 	"github.com/n3ptune-cpu/Fairy-agent/pkg/agent"
 )
 
-var version = "dev"
+// Set by the release workflow with -ldflags "-X main.version=... -X main.releaseKey=...". releaseKey is the
+// base64 ed25519 public key that signs releases; without it the agent refuses to update itself.
+var (
+	version    = "dev"
+	releaseKey = ""
+)
 
 const usage = `fairy-agent: reports this machine's metrics to the Fairy panel (see AGENT.md)
 
@@ -35,6 +43,9 @@ const usage = `fairy-agent: reports this machine's metrics to the Fairy panel (s
   fairy-agent uninstall                     Windows: remove the service (config and tokens are kept)
   fairy-agent check-config [--config PATH]  check config.yaml and the token files, then exit
   fairy-agent gen-token                     print a new random token
+  fairy-agent apply-update [--config PATH]  install the update the agent staged (started by the panel's
+                                            Update button through fairy-agent-update.service / the service)
+  fairy-agent setup-self-update             Windows: give the service the rights self-update needs
   fairy-agent version
 `
 
@@ -90,8 +101,21 @@ func main() {
 			os.Exit(1)
 		}
 		fmt.Println(tok)
+	case "apply-update":
+		_ = fs.Parse(args)
+		os.Exit(applyUpdate(*cfgPath))
+	case "setup-self-update":
+		_ = fs.Parse(args)
+		if err := setupSelfUpdate(*cfgPath); err != nil {
+			fmt.Fprintln(os.Stderr, "setup-self-update failed:", err)
+			os.Exit(1)
+		}
 	case "version", "--version", "-v":
-		fmt.Println("fairy-agent", version, runtime.GOOS+"/"+runtime.GOARCH)
+		signed := "signed-release key: none (local build, no self-update)"
+		if releaseKey != "" {
+			signed = "signed-release key: built in"
+		}
+		fmt.Println("fairy-agent", version, runtime.GOOS+"/"+runtime.GOARCH, "-", signed)
 	case "help", "--help", "-h":
 		fmt.Print(usage)
 	default:
@@ -150,7 +174,7 @@ func serve(ctx context.Context, cfgPath string, interactive bool) error {
 	if closer != nil {
 		defer closer.Close()
 	}
-	if err := agent.Run(ctx, cfg, version); err != nil {
+	if err := agent.Run(ctx, cfg, agent.Build{Version: version, ReleaseKey: releaseKey}); err != nil {
 		slog.Error("fairy-agent cannot run", "error", err.Error())
 		return err
 	}
@@ -162,6 +186,37 @@ func runForeground(cfgPath string) int {
 	defer stop()
 	if err := serve(ctx, cfgPath, true); err != nil {
 		fmt.Fprintln(os.Stderr, "fairy-agent:", err)
+		return 1
+	}
+	return 0
+}
+
+// applyUpdate installs the staged release: verify again, swap, restart, health-check, roll back on failure.
+func applyUpdate(cfgPath string) int {
+	if runtime.GOOS == "linux" && os.Geteuid() != 0 {
+		fmt.Fprintln(os.Stderr, "apply-update runs as root from fairy-agent-update.service (the agent starts it); see AGENT.md")
+		return 1
+	}
+	cfg, err := agent.Load(cfgPath)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "fairy-agent apply-update:", err)
+		return 1
+	}
+	closer, err := setupLogging(cfg, false)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "fairy-agent apply-update:", err)
+		return 1
+	}
+	if closer != nil {
+		defer closer.Close()
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Minute)
+	defer cancel()
+	slog.Warn("apply-update: starting", "installed", version)
+	if err := agent.ApplyUpdate(ctx, cfg, version, releaseKey); err != nil {
+		fmt.Fprintln(os.Stderr, "fairy-agent apply-update:", err)
 		return 1
 	}
 	return 0

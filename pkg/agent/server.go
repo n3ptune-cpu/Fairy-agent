@@ -72,6 +72,7 @@ type Deps struct {
 	Power     *Power    // nil unless power_control is enabled
 	WOL       *WOL      // nil unless wol is enabled
 	Relay     *Relay    // may be nil
+	Updater   *Updater  // nil unless self_update is enabled
 	Version   string
 }
 
@@ -231,6 +232,7 @@ func (a *Agent) Handler() http.Handler {
 		"/fan/duty":   {method: http.MethodPost, control: true, feature: func() bool { return a.d.Fan != nil }, code: "fan_control_disabled", h: a.fanDuty},
 		"/power":      {method: http.MethodPost, control: true, feature: func() bool { return a.d.Power != nil }, code: "power_control_disabled", h: a.power},
 		"/wol":        {method: http.MethodPost, control: true, feature: func() bool { return a.d.WOL != nil }, code: "wol_disabled", h: a.wol},
+		"/update":     {method: http.MethodPost, control: true, feature: func() bool { return a.d.Updater != nil }, code: "self_update_disabled", h: a.update},
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ip := clientIP(r)
@@ -341,7 +343,8 @@ func (a *Agent) Metrics(ctx context.Context) map[string]any {
 		}
 	}
 	feat := map[string]any{"processes": a.cfg.ProcessesEnabled(), "cmdline": a.cfg.ProcessesEnabled() && a.cfg.CmdlineEnabled(),
-		"fan_control": a.d.Fan != nil, "power_control": a.d.Power != nil, "wol_relay": a.d.WOL != nil}
+		"fan_control": a.d.Fan != nil, "power_control": a.d.Power != nil, "wol_relay": a.d.WOL != nil,
+		"self_update": a.d.Updater != nil}
 	ps, us := a.d.Relay.Rows()
 	m := map[string]any{
 		"agent_version": a.d.Version, "timestamp": collect.Round(float64(time.Now().UnixMilli())/1000, 3),
@@ -369,6 +372,9 @@ func (a *Agent) Metrics(ctx context.Context) map[string]any {
 	}
 	if a.d.Power != nil {
 		m["power_control"] = a.d.Power.State()
+	}
+	if a.d.Updater != nil {
+		m["self_update"] = a.d.Updater.Status()
 	}
 	return m
 }
@@ -570,6 +576,16 @@ func (a *Agent) wol(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	st, body := a.d.WOL.Handle(b)
+	writeJSON(w, st, body)
+}
+
+func (a *Agent) update(w http.ResponseWriter, r *http.Request) {
+	var b UpdateRequest
+	if err := decodeBody(r, &b); err != nil {
+		writeJSON(w, 400, map[string]any{"error": err.Error()})
+		return
+	}
+	st, body := a.d.Updater.Start(b)
 	writeJSON(w, st, body)
 }
 
