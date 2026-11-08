@@ -265,8 +265,17 @@ itself, and the agent:
 4. waits until the agent answers with the new version (about half a minute at most). If it does not, the
    installer puts the old program back and starts that again.
 
-The panel shows each step (downloading, applying, the result) on the Updates page. Programs you build yourself
-(without the release key) never update themselves and say so.
+The panel shows each step (downloading, applying, the result) on the Updates page and next to the version on
+the host's page. Programs you build yourself (without the release key) never update themselves and say so.
+
+**On the machine itself** (like `tailscale update`), as root on Linux or in an Administrator PowerShell on
+Windows; this works even without `self_update` switched on:
+
+```sh
+fairy-agent update --check   # installed vs latest release
+fairy-agent update           # asks, then downloads, verifies, swaps (keeps .old), restarts, rolls back if needed
+fairy-agent update --yes     # without the question
+```
 
 **Switch it on** in `config.yaml` (and `self_update: true` in the panel's agent entry, which needs the control
 token like power control):

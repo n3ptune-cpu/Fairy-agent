@@ -3,9 +3,11 @@
 After this setup:
 
 * every push to `main` in **Fairy-agent** and **Fairy-dashboard** makes a signed release on GitHub by itself;
-* agents update when an admin presses **Update** (or **Update all**) on the panel's **Updates** page. Each
-  agent downloads the release, checks its signature, installs it, restarts and goes back to the old version if
-  the new one does not come up;
+* the panel tells admins when there is something new (a banner at the top, an arrow next to the version of
+  each host that is behind, a dot on the Updates menu entry);
+* agents update when an admin presses **Start update** (on the host's page), **Update** or **Update all** (on
+  the **Updates** page), or when you run `fairy-agent update` on the machine. Each agent downloads the release,
+  checks its signature, installs it, restarts and goes back to the old version if the new one does not come up;
 * the panel updates when you run `fairy update` on its host.
 
 Nothing ever installs on its own. You do the steps below **once**. Part 1 is on your Windows PC (PowerShell),
@@ -277,6 +279,18 @@ systemctl restart fairy
 
 ## Using it
 
+### What admins see
+
+* A banner at the top when a newer Fairy-agent or Fairy-dashboard release exists ("Update available: 3 agents,
+  panel", with **Open Updates**). **Dismiss** hides it until the next release.
+* Next to a host's agent version (host list and the host's page) a small arrow in a circle when it is behind.
+  Click it (or Tab to it and press Enter): "Update available. Release ... is available.", a **Release notes**
+  link (the GitHub release lists the changes since the previous one) and **Start update**. For a host that
+  cannot update itself the box says what to switch on, or to run `fairy-agent update` on the machine.
+* A dot on **Updates** in the menu while anything is behind.
+
+Viewers see none of this.
+
 ### Agents: the Updates page
 
 Menu (top right) > **Updates** (admins only). Each agent shows its version (`build 3 (1a2b3c4)`), whether it is
@@ -286,7 +300,21 @@ you to confirm with Pocket ID (like power actions), writes it to the Audit log, 
 version did not come up, the agent is back on the old one and shows why ("rolled back").
 
 Linux details: `journalctl -u fairy-agent-update` (installer), `journalctl -u fairy-agent` (agent). Windows:
-`C:\ProgramData\fairy-agent\logs\agent.log`.
+`C:\ProgramData\fairy-agent\logs\agent.log`. The panel's own version is on the same page, with "Panel update
+available: run `fairy update` on the panel's host" when it is behind (the panel never updates itself from the
+web page).
+
+### Agents: on the machine (`fairy-agent update`)
+
+Like `tailscale update`. Linux as root, Windows in PowerShell as Administrator:
+
+```sh
+fairy-agent update --check   # installed vs latest
+fairy-agent update           # asks, then the same download, check, swap, restart and rollback
+fairy-agent update --yes     # no question
+```
+
+This works even where `self_update` is off (it is you at the machine, not the panel).
 
 ### The panel: `fairy update`
 
