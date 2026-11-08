@@ -1,0 +1,29 @@
+# Pull requests: vet, test and cross-build (no secrets, no release).
+name: ci
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - name: Vet, test, cross-build
+        run: |
+          test -z "$(gofmt -l .)" || { gofmt -l .; echo "::error::gofmt needed"; exit 1; }
+          go vet ./...
+          GOOS=windows go vet ./...
+          go test -race ./...
+          for target in windows/amd64 linux/amd64 linux/arm64; do
+            CGO_ENABLED=0 GOOS="${target%/*}" GOARCH="${target#*/}" go build -trimpath -o /dev/null ./cmd/fairy-agent
+          done

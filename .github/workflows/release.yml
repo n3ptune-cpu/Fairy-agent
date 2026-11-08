@@ -1,0 +1,87 @@
+# Every push to main (or a manual run) builds, signs and publishes a GitHub release that agents install when an
+# admin presses Update in the panel (see SETUP-UPDATES.md). Nothing installs it automatically.
+#
+# Release tag: build-<run number> (never vX.Y.Z: Go would read that as a version of this Go module).
+# Version in the binaries: <run number>-<short commit>, e.g. 42-1a2b3c4.
+# Needs the repository secret FAIRY_RELEASE_KEY (private key from `go run ./cmd/fairy-release-key gen`) and the
+# committed public key release/signing.pub.
+name: release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Check the signing key is set up
+        env:
+          FAIRY_RELEASE_KEY: ${{ secrets.FAIRY_RELEASE_KEY }}
+        run: |
+          if [ -z "$FAIRY_RELEASE_KEY" ]; then
+            echo "::error::The FAIRY_RELEASE_KEY secret is missing. Make the key with 'go run ./cmd/fairy-release-key gen' and add it under Settings > Secrets and variables > Actions (see SETUP-UPDATES.md)."
+            exit 1
+          fi
+          if [ ! -s release/signing.pub ]; then
+            echo "::error::release/signing.pub is missing. Commit the public key written by 'go run ./cmd/fairy-release-key gen' (see SETUP-UPDATES.md)."
+            exit 1
+          fi
+
+      - name: Vet and test
+        run: |
+          go vet ./...
+          GOOS=windows go vet ./...
+          go test ./...
+
+      - name: Build
+        run: |
+          set -eu
+          version="${GITHUB_RUN_NUMBER}-${GITHUB_SHA::7}"
+          pub="$(tr -d ' \r\n' < release/signing.pub)"
+          mkdir -p dist
+          for target in windows/amd64 linux/amd64 linux/arm64; do
+            goos="${target%/*}"; goarch="${target#*/}"
+            out="dist/fairy-agent-${goos}-${goarch}"
+            if [ "$goos" = windows ]; then out="${out}.exe"; fi
+            CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" go build -trimpath \
+              -ldflags "-s -w -X main.version=${version} -X main.releaseKey=${pub}" -o "$out" ./cmd/fairy-agent
+          done
+          printf 'fairy-agent %s\n' "$version" > dist/VERSION
+          (cd dist && sha256sum fairy-agent-* VERSION > SHA256SUMS)
+          cat dist/SHA256SUMS
+
+      - name: Sign
+        env:
+          FAIRY_RELEASE_KEY: ${{ secrets.FAIRY_RELEASE_KEY }}
+        run: |
+          go run ./cmd/fairy-release-key sign --pub release/signing.pub dist/SHA256SUMS
+          go run ./cmd/fairy-release-key verify --pub release/signing.pub dist/SHA256SUMS
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          tag="build-${GITHUB_RUN_NUMBER}"
+          gh release create "$tag" dist/* --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --latest \
+            --title "fairy-agent build ${GITHUB_RUN_NUMBER} (${GITHUB_SHA::7})" \
+            --notes "Built from ${GITHUB_SHA} by run ${GITHUB_RUN_ID}. Install with the panel's Update button (self_update) or by hand: see SETUP-UPDATES.md. SHA256SUMS is signed (SHA256SUMS.sig, ed25519, key release/signing.pub)."
