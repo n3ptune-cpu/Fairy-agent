@@ -1,0 +1,67 @@
+# /etc/systemd/system/fairy-agent.service  (Linux; on Windows fairy-agent installs itself as a service)
+#
+# Setup (AGENT.md has every step):
+#   useradd --system --no-create-home --shell /usr/sbin/nologin fairy-agent
+#   install -m 0755 fairy-agent-linux-amd64 /usr/local/bin/fairy-agent
+#   install -d -m 0750 -o root -g fairy-agent /etc/fairy-agent
+#   config.yaml 0640 root:fairy-agent; token (and control-token) 0640 root:fairy-agent
+#   systemctl daemon-reload && systemctl enable --now fairy-agent
+[Unit]
+Description=Fairy agent (metrics for the Fairy panel)
+Documentation=file:///usr/local/share/doc/fairy-agent/AGENT.md
+After=network-online.target tailscaled.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/fairy-agent run --config /etc/fairy-agent/config.yaml
+User=fairy-agent
+Group=fairy-agent
+Restart=on-failure
+RestartSec=10
+UMask=0077
+
+# Small and polite: low CPU and I/O priority, hard memory cap.
+Nice=10
+IOSchedulingClass=idle
+CPUWeight=20
+MemoryMax=64M
+TasksMax=64
+
+# Hardening. The agent only reads /proc and /sys, talks HTTP on its listen address and (only if enabled) runs
+# nvidia-smi, ipmitool and `systemctl poweroff|reboot`. It needs NO capabilities. AMD GPUs are read from plain
+# sysfs files (/sys/class/drm/card*/device), not device nodes: DevicePolicy below does not affect them and
+# ProtectKernelTunables leaves /sys readable.
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+# Devices: none except NVIDIA GPUs (nvidia-smi) and the IPMI device (ipmitool, only if ipmi is enabled).
+DevicePolicy=closed
+DeviceAllow=char-nvidia-frontend rw
+DeviceAllow=char-nvidia-uvm rw
+DeviceAllow=char-nvidia-caps r
+DeviceAllow=char-ipmidev rw
+# Not set on purpose: ProtectProc=invisible / ProcSubset=pid would hide the process list and /proc/stat.
+# In an unprivileged LXC without nesting, namespace options can fail with status=226/NAMESPACE: then comment
+# out PrivateTmp/Protect*/RestrictNamespaces.
+
+[Install]
+WantedBy=multi-user.target

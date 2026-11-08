@@ -1,0 +1,4 @@
+# /etc/udev/rules.d/60-fairy-agent-ipmi.rules  (optional; only with ipmi.enabled and the in-band ipmitool transport)
+# Lets the fairy-agent group use the BMC device /dev/ipmi0 (load it with: modprobe ipmi_devintf ipmi_si).
+# Apply with: udevadm control --reload && udevadm trigger --subsystem-match=ipmi
+KERNEL=="ipmi[0-9]*", GROUP="fairy-agent", MODE="0660"

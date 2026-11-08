@@ -1,0 +1,173 @@
+package agent
+
+import (
+	"context"
+	"log/slog"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/n3ptune-cpu/Fairy-agent/pkg/agent/collect"
+	"github.com/n3ptune-cpu/Fairy-agent/pkg/agent/ipmi"
+)
+
+// BMC reads the board's sensors over IPMI in the background: the sensor list (SDR) once, then the readings every
+// interval. Its readings feed /metrics (when enabled), the fan status and the fan watchdog.
+type BMC struct {
+	t        ipmi.Transport
+	interval time.Duration
+
+	mu       sync.Mutex
+	sensors  []ipmi.Sensor
+	sdrOK    bool
+	readings []ipmi.Reading
+	readAt   time.Time
+	lastErr  string
+}
+
+// NewBMC returns a BMC reader on this transport.
+func NewBMC(t ipmi.Transport, interval time.Duration) *BMC {
+	return &BMC{t: t, interval: interval}
+}
+
+// Run refreshes the readings until ctx ends.
+func (b *BMC) Run(ctx context.Context) {
+	for ctx.Err() == nil {
+		wait := b.interval
+		if err := b.refresh(ctx); err != nil {
+			b.mu.Lock()
+			first := b.lastErr != err.Error()
+			b.lastErr = err.Error()
+			b.mu.Unlock()
+			if first {
+				slog.Warn("BMC sensors unavailable", "error", err.Error())
+			}
+			wait = max(wait, time.Minute)
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(wait):
+		}
+	}
+}
+
+func (b *BMC) refresh(ctx context.Context) error {
+	b.mu.Lock()
+	ok := b.sdrOK
+	b.mu.Unlock()
+	if !ok {
+		cctx, cancel := context.WithTimeout(ctx, 3*time.Minute)
+		s, err := ipmi.ReadSDR(cctx, b.t)
+		cancel()
+		if err != nil {
+			return err
+		}
+		b.mu.Lock()
+		b.sensors, b.sdrOK = s, true
+		b.mu.Unlock()
+		slog.Info("BMC sensor list read", "sensors", len(s))
+	}
+	b.mu.Lock()
+	sensors := b.sensors
+	b.mu.Unlock()
+	cctx, cancel := context.WithTimeout(ctx, b.interval+30*time.Second)
+	r, err := ipmi.ReadSensors(cctx, b.t, sensors)
+	cancel()
+	if err != nil {
+		return err
+	}
+	b.mu.Lock()
+	b.readings, b.readAt, b.lastErr = r, time.Now(), ""
+	b.mu.Unlock()
+	return nil
+}
+
+// Readings returns the latest readings if they are fresh (three intervals).
+func (b *BMC) Readings() []ipmi.Reading {
+	if b == nil {
+		return nil
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if time.Since(b.readAt) > 3*b.interval+30*time.Second {
+		return nil
+	}
+	return b.readings
+}
+
+// Metrics converts the readings to the /metrics shapes (sensor "IPMI"; fans and voltages prefixed "IPMI").
+func (b *BMC) Metrics() ([]collect.Temp, []collect.Fan, []collect.Voltage) {
+	var temps []collect.Temp
+	var fans []collect.Fan
+	var volts []collect.Voltage
+	for _, r := range b.Readings() {
+		name := r.Sensor.Name
+		switch r.Sensor.Type {
+		case ipmi.TypeTemperature:
+			t := collect.Temp{Sensor: "IPMI", Label: collect.P(name), Current: collect.Round(r.Value, 1)}
+			if c := r.Sensor.UpperCritical(); c != nil && *c > 0 {
+				t.Critical = collect.P(collect.Round(*c, 1))
+			}
+			temps = append(temps, t)
+		case ipmi.TypeFan:
+			fans = append(fans, collect.Fan{Name: "IPMI " + name, RPM: r.Value})
+		case ipmi.TypeVoltage:
+			volts = append(volts, collect.Voltage{Name: "IPMI " + name, Volts: collect.Round(r.Value, 3)})
+		}
+	}
+	return temps, fans, volts
+}
+
+// FanList is the fans for /fan/status (names as the BMC calls them: FAN1, FANA ...).
+func (b *BMC) FanList() []collect.Fan {
+	fans := []collect.Fan{}
+	for _, r := range b.Readings() {
+		if r.Sensor.Type == ipmi.TypeFan {
+			fans = append(fans, collect.Fan{Name: r.Sensor.Name, RPM: r.Value})
+		}
+	}
+	return fans
+}
+
+// MaxCPUTemp returns the hottest CPU temperature among the BMC's and the OS's sensors (any temperature when
+// none is labelled as the CPU's). ok is false when there is no reading at all.
+func MaxCPUTemp(bmc []ipmi.Reading, local []collect.Temp) (float64, string, bool) {
+	type cand struct {
+		name string
+		v    float64
+		cpu  bool
+	}
+	var cs []cand
+	isCPU := func(s string) bool {
+		s = strings.ToLower(s)
+		return strings.Contains(s, "cpu") || strings.Contains(s, "package") || strings.Contains(s, "tctl") ||
+			strings.Contains(s, "tdie") || strings.Contains(s, "coretemp") || strings.Contains(s, "k10temp")
+	}
+	for _, r := range bmc {
+		if r.Sensor.Type == ipmi.TypeTemperature {
+			cs = append(cs, cand{r.Sensor.Name, r.Value, isCPU(r.Sensor.Name)})
+		}
+	}
+	for _, t := range local {
+		label := t.Sensor
+		if t.Label != nil {
+			label += " " + *t.Label
+		}
+		cs = append(cs, cand{label, t.Current, isCPU(label)})
+	}
+	anyCPU := false
+	for _, c := range cs {
+		anyCPU = anyCPU || c.cpu
+	}
+	best, name, ok := 0.0, "", false
+	for _, c := range cs {
+		if anyCPU && !c.cpu {
+			continue
+		}
+		if !ok || c.v > best {
+			best, name, ok = c.v, c.name, true
+		}
+	}
+	return best, name, ok
+}

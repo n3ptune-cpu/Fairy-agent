@@ -1,0 +1,70 @@
+# fairy-agent configuration: /etc/fairy-agent/config.yaml (Linux) or C:\ProgramData\fairy-agent\config.yaml
+# (Windows). Everything that can change the machine is OFF unless you turn it on here. Unknown keys are errors.
+# After a change: systemctl restart fairy-agent (Linux) / Restart-Service fairy-agent (Windows).
+
+# Where the panel connects. Empty = this machine's Tailscale address (100.x.y.z) on port 9101; the agent waits
+# up to 3 minutes for Tailscale at boot and refuses to start without one. 0.0.0.0 needs allow_all_interfaces.
+# listen: 100.64.0.10:9101
+
+# The panel's token for this machine (its token_env value), one line, at least 24 characters. Default: the file
+# "token" next to this config. FAIRY_AGENT_TOKEN in the environment wins over the file.
+# token_file: /etc/fairy-agent/token
+# A second, different token, only needed when fan_control, power_control or wol is enabled (the panel's
+# control_token_env value). Default: the file "control-token" next to this config.
+# control_token_file: /etc/fairy-agent/control-token
+
+# hide_host_details: true      # send no hostname, a generic OS name and no hardware model
+
+processes:
+  enabled: true                # the panel's Processes tab (false: the agent never looks at other programs)
+  cmdline: true                # Linux: command lines (passwords/tokens are blanked); Windows: program paths
+  never_open: []               # Windows: programs listed by name only, never opened, e.g. [VALORANT-Win64-Shipping.exe]
+
+gpu:
+  nvidia_smi: auto             # auto | off | absolute path of nvidia-smi
+  amdgpu: auto                 # Linux: auto (AMD GPUs via the amdgpu driver's /sys files, if any) | off
+  interval_s: 2
+
+# sensors:
+#   acpi_thermal: true         # Windows: ACPI thermal-zone temperatures (often the only CPU-ish temperature)
+#   coretemp: false            # Windows: CPU core temperatures and package watts from the Core Temp program, if
+#                              #   it is running with "Enable global shared memory (SNMP)"; see AGENT.md
+
+# The board's BMC (e.g. Supermicro X11SCA-F) over IPMI: temperatures, fans and voltages in the panel.
+ipmi:
+  enabled: false
+  # transport: wmi             # Windows default: Windows' own IPMI driver (service must run as LocalSystem)
+  # transport: ipmitool        # Linux default: ipmitool in-band (/dev/ipmi0; see AGENT.md for the udev rule)
+  # host: 192.168.1.5          # ipmitool over the network instead (IPMI-over-LAN, needs a BMC user):
+  # username: fairy            #   read-only BMC user is enough for sensors; fan control needs "Operator"/admin
+  # password_env: BMC_PASSWORD #   env var (or env_file entry) holding the BMC password
+  sensors: true
+  sensor_interval_s: 10
+
+# Supermicro fan control (panel: fan_control: {vendor: supermicro, control_token_env: ...}). Needs ipmi.
+fan_control:
+  enabled: false
+  min_duty: 30                 # never lower than 30 %
+  max_temp_c: 80               # watchdog: at this CPU temperature (or with no reading for 30 s) fans go to 100 %
+  auto_mode: optimal           # the BMC mode that counts as "not overridden"
+
+# Shutdown / reboot from the panel (panel: power_control: true). Delayed, cancellable, logged.
+power_control:
+  enabled: false
+  min_delay_s: 10
+
+# Wake-on-LAN relay for sleeping machines on this LAN (panel: wol_relay: true).
+wol:
+  enabled: false
+  allowed_macs: []             # empty = any MAC the panel asks for
+
+control_rate_per_min: 12       # fan / power / Wake-on-LAN requests per minute, all together
+
+# Devices on this machine's LAN that the panel cannot reach itself; the agent reads them and passes the readings
+# on (credentials stay here). Same entries as the panel's power_sources / ups. system_hint: self = this host.
+# env_file: /etc/fairy-agent/devices.env     # KEY=value lines for the *_env names below (0640 root:fairy-agent)
+power_sources: []
+  # - {id: desk-plug, type: tuya, name: "Desk plug", device_id: bf0123456789abcdef, ip: 192.168.1.60, local_key_env: TUYA_KEY_DESK, version: "3.4", system_hint: self}
+  # - {id: shelly-1, type: shelly, url: "http://192.168.1.61", password_env: SHELLY_PW}
+ups: []
+  # - {id: local, host: 127.0.0.1, username: monuser, password_env: NUT_PASSWORD}

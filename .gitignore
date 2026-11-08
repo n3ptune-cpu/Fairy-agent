@@ -1,0 +1,24 @@
+# build output
+/dist/
+/bin/
+*.exe
+*.zip
+/fairy-agent
+fairy-agent-linux-*
+fairy-agent-windows-*
+SHA256SUMS
+coverage.out
+*.test
+
+# local testing (never commit secrets or tokens)
+*.env
+/config.yaml
+/token
+/control-token
+*.log
+
+# editors / OS
+.idea/
+.vscode/
+*.swp
+.DS_Store

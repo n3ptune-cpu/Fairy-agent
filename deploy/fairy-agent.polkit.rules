@@ -1,0 +1,13 @@
+// /etc/polkit-1/rules.d/49-fairy-agent.rules
+// Only needed with power_control.enabled: lets the fairy-agent user (and nobody else) power off or reboot this
+// machine through systemd-logind, which is what `systemctl poweroff|reboot` asks for.
+polkit.addRule(function (action, subject) {
+    if (subject.user === "fairy-agent" && [
+        "org.freedesktop.login1.power-off",
+        "org.freedesktop.login1.power-off-multiple-sessions",
+        "org.freedesktop.login1.reboot",
+        "org.freedesktop.login1.reboot-multiple-sessions"
+    ].indexOf(action.id) >= 0) {
+        return polkit.Result.YES;
+    }
+});
