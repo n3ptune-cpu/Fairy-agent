@@ -24,13 +24,17 @@
 .PARAMETER PanelAddress
   The Tailscale address of the Fairy panel, e.g. 100.64.0.2. Default: any Tailscale address (100.64.0.0/10).
 
+.PARAMETER Quiet
+  Leave out the "next steps" at the end (install.ps1, the panel's Add host, pairs the tokens by itself).
+
 .EXAMPLE
   .\install-fairy-agent.ps1 -PanelAddress 100.64.0.2
 #>
 param(
     [switch]$LocalSystem,
     [string]$PanelAddress = '100.64.0.0/10',
-    [int]$Port = 9101
+    [int]$Port = 9101,
+    [switch]$Quiet
 )
 $ErrorActionPreference = 'Stop'
 
@@ -73,6 +77,7 @@ if ($LASTEXITCODE -ne 0) { throw 'fix C:\ProgramData\fairy-agent\config.yaml, th
 Start-Service -Name 'fairy-agent'
 Get-Service -Name 'fairy-agent' | Format-Table -AutoSize Name, Status, StartType
 
+if ($Quiet) { return }
 Write-Host ''
 Write-Host 'Done. Next: put this PC''s token into the panel (see AGENT.md, "Point the panel at it"):'
 Write-Host '  Get-Content C:\ProgramData\fairy-agent\token'
