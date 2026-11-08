@@ -6,7 +6,8 @@ Tailscale network. It is one file, needs nothing else installed, and uses very l
 well under 1 % of one CPU core while the panel watches it every second.
 
 Out of the box it only **reads**. It can also restart or shut down the machine, control a Supermicro server's
-fans, or wake other computers on the network, but only if you switch each of those on yourself.
+fans, wake other computers on the network, or update itself when you press Update in the panel, but only if you
+switch each of those on yourself.
 
 The panel itself is [Fairy-dashboard](https://github.com/n3ptune-cpu/Fairy-dashboard). How to build fairy-agent
 from source, and a map of the code, are in [README.md](README.md).
@@ -16,6 +17,7 @@ from source, and a map of the code, are in [README.md](README.md).
 * [Install on Linux](#install-on-linux)
 * [Point the panel at it](#point-the-panel-at-it)
 * [Optional features](#optional-features): fan control, shutdown / reboot, Wake-on-LAN, plugs and UPSes
+* [Updates (the panel's Update button)](#updates-the-panels-update-button)
 * [What it can and cannot show](#what-it-can-and-cannot-show)
 * [Core Temp (optional, Windows)](#core-temp-optional-windows): CPU core temperatures and watts on Windows
 * [Settings (config.yaml)](#settings-configyaml)
@@ -187,7 +189,8 @@ token travels in the `Authorization: Bearer` header.
 
 Everything below is **off** until you switch it on in the agent's `config.yaml` **and** in the panel's
 `agents:` entry. Each one uses the separate control token, is limited to 12 requests a minute, and is written
-to the agent's log. Restart the agent after changing `config.yaml`.
+to the agent's log. Restart the agent after changing `config.yaml`. (Self-update has its own section:
+[Updates](#updates-the-panels-update-button).)
 
 ### Fan control (Supermicro)
 
@@ -244,6 +247,55 @@ read it and pass the readings on. The entries are the same as in the panel's `po
 (Shelly, Tasmota, Tuya, Redfish, NUT); passwords go into a separate file named by `env_file:` as
 `NAME=value` lines and stay on that machine. `system_hint: self` links a plug to the agent's own machine. In the
 panel's agent entry use `power_links:` / `ups_powers:` / `ups_names:` as for any agent.
+
+## Updates (the panel's Update button)
+
+Nothing ever updates by itself. When an admin presses **Update** on the panel's Updates page (after confirming
+with a fresh Pocket ID sign-in; it is written to the panel's audit log), the panel asks this agent to update
+itself, and the agent:
+
+1. asks GitHub for the latest release of Fairy-agent (made automatically for every change, see
+   [SETUP-UPDATES.md](SETUP-UPDATES.md)) and checks its **signature** with the key built into this program.
+   Releases are signed with the owner's private key; anything else is refused. An older release than the one
+   running is refused too;
+2. downloads only the file for its own system (e.g. `fairy-agent-linux-arm64`) and checks its fingerprint
+   (SHA-256) against the signed list;
+3. hands it to a small installer that checks everything **again**, keeps the old program as
+   `fairy-agent.old` (Windows: `fairy-agent.exe.old`), puts the new one in place and restarts the service;
+4. waits until the agent answers with the new version (about half a minute at most). If it does not, the
+   installer puts the old program back and starts that again.
+
+The panel shows each step (downloading, applying, the result) on the Updates page. Programs you build yourself
+(without the release key) never update themselves and say so.
+
+**Switch it on** in `config.yaml` (and `self_update: true` in the panel's agent entry, which needs the control
+token like power control):
+
+```yaml
+self_update:
+  enabled: true
+```
+
+* **Linux** also needs, once (all three files are in `deploy/`): the current `fairy-agent.service` (it gives
+  the agent one folder it may write, `/var/lib/fairy-agent`, for the download), `fairy-agent-update.service`
+  (the installer; it runs as root only when the agent starts it, and may only change `/usr/local/bin`), and the
+  polkit rule `fairy-agent.polkit.rules` as `/etc/polkit-1/rules.d/49-fairy-agent.rules` (lets the agent's user
+  start exactly that one unit; Debian/Proxmox: `apt install polkitd` if `/etc/polkit-1/rules.d` does not
+  exist). Then `systemctl daemon-reload && systemctl restart fairy-agent`. On Fedora with SELinux the installer
+  runs `restorecon` on the new program. The installer's messages: `journalctl -u fairy-agent-update`.
+* **Windows**: run `install-fairy-agent.ps1` (again) as Administrator. It gives the service's own account
+  (`NT SERVICE\fairy-agent`, nothing else) the right to replace files in `C:\Program Files\Fairy`, to write
+  `C:\ProgramData\fairy-agent\update` and to stop and start its own service. The installer is
+  `fairy-agent.exe apply-update`, started by the service; it writes to the agent's log file. No driver, no
+  other programs touched.
+
+The very first program with self-update has to be installed by hand once per machine;
+[SETUP-UPDATES.md](SETUP-UPDATES.md) has the exact commands. `self_update.repo` can point at a fork (its
+releases must still carry the owner's signature).
+
+**Undo by hand**: Linux `mv /usr/local/bin/fairy-agent.old /usr/local/bin/fairy-agent && systemctl restart
+fairy-agent`; Windows `Stop-Service fairy-agent`, rename `fairy-agent.exe.old` back to `fairy-agent.exe`,
+`Start-Service fairy-agent`.
 
 ## What it can and cannot show
 
@@ -330,7 +382,8 @@ The file is `C:\ProgramData\fairy-agent\config.yaml` (Windows) or `/etc/fairy-ag
 | `gpu.amdgpu` | auto | Linux: AMD GPUs through the amdgpu driver's sysfs files; `off` to switch off |
 | `sensors.coretemp` | false | Windows: CPU core temperatures and watts from Core Temp (see [Core Temp](#core-temp-optional-windows)) |
 | `ipmi`, `fan_control`, `power_control`, `wol` | off | see [Optional features](#optional-features) |
-| `control_rate_per_min` | 12 | all control requests together |
+| `self_update.enabled`, `self_update.repo` | off, `n3ptune-cpu/Fairy-agent` | see [Updates](#updates-the-panels-update-button) |
+| `control_rate_per_min` | 12 | all control requests together (fan, power, Wake-on-LAN, update) |
 | `log_file` | Windows: `C:\ProgramData\fairy-agent\logs\agent.log` (5 MB, one old copy); Linux: the journal | |
 
 Unknown settings are an error (so a typo does not silently do nothing). `fairy-agent check-config` checks the
@@ -347,13 +400,16 @@ file and the tokens without starting anything.
 * **Panel shows the machine offline**: check the firewall rule, that Tailscale is up on both sides, and that the
   token in the panel's `fairy.env` is exactly the one in the agent's `token` file. A wrong token shows up in the
   agent's log as "rejected request".
-* **Update.** Windows: run `install-fairy-agent.ps1` again with the new exe (or `Stop-Service fairy-agent`, copy
+* **Update.** With self-update on: the panel's Update button (see [Updates](#updates-the-panels-update-button)).
+  By hand: Windows: run `install-fairy-agent.ps1` again with the new exe (or `Stop-Service fairy-agent`, copy
   the exe over, `Start-Service fairy-agent`). Linux: copy the new binary to `/usr/local/bin/fairy-agent`, then
-  `systemctl restart fairy-agent`. Settings and tokens stay.
+  `systemctl restart fairy-agent`. Settings and tokens stay. `fairy-agent version` shows the version and
+  whether the program carries the release key.
 * **Remove.** Windows: `& "C:\Program Files\Fairy\fairy-agent.exe" uninstall`, then
   `Remove-NetFirewallRule -DisplayName "Fairy agent (Tailscale only)"` and delete `C:\Program Files\Fairy` and
-  `C:\ProgramData\fairy-agent`. Linux: `systemctl disable --now fairy-agent`, delete the unit,
-  `/usr/local/bin/fairy-agent` and `/etc/fairy-agent`, and `userdel fairy-agent`.
+  `C:\ProgramData\fairy-agent`. Linux: `systemctl disable --now fairy-agent`, delete the units
+  (`fairy-agent.service`, `fairy-agent-update.service`), `/etc/polkit-1/rules.d/49-fairy-agent.rules`,
+  `/usr/local/bin/fairy-agent` (and `.old`), `/etc/fairy-agent`, `/var/lib/fairy-agent*`, and `userdel fairy-agent`.
 
 ## Security in short
 
@@ -362,6 +418,9 @@ file and the tokens without starting anything.
   timing. Reading uses one token, changing anything needs the second, separate one. Repeated wrong tokens
   block that address for a minute.
 * Read-only unless you switch features on; each control action is rate limited and logged with who asked.
+* Self-update installs only releases signed with the owner's key (checked twice: by the agent and by the
+  installer, which never trusts the downloaded copy), only files fetched over HTTPS from GitHub, never an older
+  version, and only when an admin asks for it.
 * Command lines are cleaned of passwords and tokens before they leave the machine (and again by the panel).
 * Time limits on every connection; requests are small and bounded.
 * Windows: settings folder readable only by administrators, SYSTEM and the service; the program lives in
@@ -385,4 +444,10 @@ on the first install and report anything odd:
   documentation and examples (first byte of the reply = completion code) and has not been seen on a real BMC
   yet. Try `ipmi: enabled: true` first (sensors only) and look at the panel and the log before enabling fan
   control;
-* the install script's firewall rule.
+* the install script's firewall rule;
+* self-update on Windows: the permissions `setup-self-update` sets (program folder, update folder, the
+  service's own start/stop right), the detached installer (`apply-update`) stopping and starting the service,
+  renaming the running exe, and rolling back.
+
+Self-update on Linux was tested with fakes (signature, download, swap, rollback) but not yet against a real
+GitHub release, a real polkit rule or SELinux: watch `journalctl -u fairy-agent-update` the first time.

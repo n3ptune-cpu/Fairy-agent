@@ -3,8 +3,8 @@
 `fairy-agent` is the small metrics agent for the Fairy homelab panel
 ([Fairy-dashboard](https://github.com/n3ptune-cpu/Fairy-dashboard)). It runs on each watched Windows or Linux
 machine and answers the panel over Tailscale: `/metrics`, `/processes`, and, only when the machine's owner turns
-them on, fan control, shutdown / reboot and Wake-on-LAN. It never installs a driver and never touches other
-programs' memory, so it is safe next to kernel anti-cheat.
+them on, fan control, shutdown / reboot, Wake-on-LAN and self-update from the panel's Update button. It never
+installs a driver and never touches other programs' memory, so it is safe next to kernel anti-cheat.
 
 **Installing and configuring it: see [AGENT.md](AGENT.md).**
 
@@ -22,14 +22,30 @@ CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -ldflags "-s -w -X main
 go test ./... && go vet ./...
 ```
 
+Builds like these carry no release key (`-X main.releaseKey=...`), so they never update themselves. The
+binaries that agents install come from the release workflow below.
+
+## Releases and self-update
+
+Every push to `main` runs `.github/workflows/release.yml`: vet, test, build the three binaries with the version
+`<run number>-<short commit>` and the public key from `release/signing.pub`, write `SHA256SUMS` and `VERSION`,
+sign `SHA256SUMS` with the `FAIRY_RELEASE_KEY` secret and publish the GitHub release `build-<run number>` as
+"latest". (Release tags are never `vX.Y.Z`: those are Go module versions, below.) Pull requests run
+`ci.yml` (tests only). Nothing is installed anywhere until an admin presses Update in the panel; see
+[SETUP-UPDATES.md](SETUP-UPDATES.md) for the one-time key setup and [AGENT.md](AGENT.md#updates-the-panels-update-button)
+for how an agent updates itself.
+
+`go run ./cmd/fairy-release-key gen` makes the key pair (once, on the owner's PC), `sign` / `verify` are used by
+the workflow. The same key signs Fairy-dashboard's releases (`fairy update` on the panel host).
+
 The panel <-> agent contract test lives in Fairy-dashboard (`internal/agentcontract`): it runs the panel's real
 poller and web API against this repository's agent handler.
 
 ## Versions
 
 Fairy-dashboard pins a tagged version of this module in its `go.mod` (and the hashes in its `go.sum`). A change
-to `pkg/` reaches the panel like this: commit and tag here (`git tag -a v0.1.1 -m v0.1.1`, push the commit and the
-tag), then in Fairy-dashboard run `go get github.com/n3ptune-cpu/Fairy-agent@v0.1.1 && go mod tidy`. Never move or
+to `pkg/` reaches the panel like this: commit and tag here (`git tag -a v0.2.1 -m v0.2.1`, push the commit and the
+tag), then in Fairy-dashboard run `go get github.com/n3ptune-cpu/Fairy-agent@v0.2.1 && go mod tidy`. Never move or
 re-create a tag that was pushed: Go's checksum database remembers the first contents it saw for each version.
 
 ## Map of the code
@@ -38,8 +54,10 @@ Each folder is one Go package; inside a package, files are named after what they
 
 | Folder | What it does |
 | --- | --- |
-| `cmd/fairy-agent` | The `fairy-agent` program: `main.go` (run, check-config, gen-token, version), `service_windows.go` (the Windows service: install, uninstall, run under the service manager). |
-| `pkg/agent` | The agent's HTTP server and the panel contract (`server.go`), settings and tokens (`config.go`), BMC sensors (`bmc.go`), Supermicro fan control and its watchdog (`fan.go`), shutdown / reboot (`power*.go`), Wake-on-LAN (`wol.go`), plugs and UPSes it relays (`relay.go`), Tailscale address (`listen.go`), start-up (`run.go`), log file (`logfile.go`). |
+| `cmd/fairy-agent` | The `fairy-agent` program: `main.go` (run, check-config, gen-token, apply-update, version), `service_windows.go` (the Windows service: install, uninstall, setup-self-update, run under the service manager). |
+| `cmd/fairy-release-key` | The release signing key: `gen` (owner, once), `sign` and `verify` (release workflow). |
+| `pkg/agent` | The agent's HTTP server and the panel contract (`server.go`), settings and tokens (`config.go`), BMC sensors (`bmc.go`), Supermicro fan control and its watchdog (`fan.go`), shutdown / reboot (`power*.go`), Wake-on-LAN (`wol.go`), plugs and UPSes it relays (`relay.go`), self-update and its installer (`update*.go`), Tailscale address (`listen.go`), start-up (`run.go`), log file (`logfile.go`). |
+| `pkg/release` | Signed releases, shared with the panel's `fairy update`: signature and SHA256SUMS checks, the GitHub download (fixed hosts, size and time limits), and the swap / restart / health check / rollback installer; `releasetest/` is a fake GitHub for tests. |
 | `pkg/agent/collect` | What the agent measures: Linux `/proc` and `/sys` (`procfs.go`, `linux.go`), Windows APIs, registry and PDH (`windows.go`, `pdh_windows.go`), NVIDIA GPUs via nvidia-smi (`nvidia.go`), AMD GPUs via amdgpu sysfs (`amdgpu.go`), laptop batteries (`battery.go`), Core Temp's shared memory on Windows (`coretemp*.go`). |
 | `pkg/agent/ipmi` | Raw IPMI to the BMC: sensor list and readings (`sdr.go`), Supermicro fan commands (`ipmi.go`), through ipmitool or Windows' IPMI WMI class (`ipmitool.go`, `wmi_windows.go`); `fakebmc/` for tests. |
 | `pkg/agent/agenttest` | A fake collector for tests (here and in the panel's contract test). |
@@ -49,7 +67,8 @@ Each folder is one Go package; inside a package, files are named after what they
 | `pkg/tuya` | The Tuya 3.3/3.4/3.5 local protocol (encryption, frames, one persistent connection per plug). |
 | `pkg/redact` | Removes passwords/tokens from process command lines (in the agent, and again in the panel). |
 | `pkg/configutil` | The id rule (`ValidID`) and secrets referenced by environment variable name (`EnvSecret`). |
-| `deploy/` | `fairy-agent.service` (systemd), `fairy-agent.config.example.yaml`, `install-fairy-agent.ps1` (Windows), and the optional polkit / tmpfiles / udev rules. |
+| `deploy/` | `fairy-agent.service` (systemd), `fairy-agent-update.service` (the self-update installer), `fairy-agent.config.example.yaml`, `install-fairy-agent.ps1` (Windows), and the optional polkit / tmpfiles / udev rules. |
+| `.github/workflows` | `release.yml` (signed release on every push to main), `ci.yml` (tests on pull requests). |
 
 ## Licence
 
