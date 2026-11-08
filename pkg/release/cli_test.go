@@ -22,6 +22,7 @@ type cliRig struct {
 	starts  int
 	healthy func(content, want string) bool
 	done    []string
+	steps   []string
 }
 
 func newCLIRig(t *testing.T) *cliRig {
@@ -52,6 +53,7 @@ func (r *cliRig) cli(current string, key ed25519.PublicKey) *release.CLI {
 					return nil
 				}}
 		},
+		Progress: func(state, to, _ string) { r.steps = append(r.steps, state) },
 		Done: func(from, to string, err error) {
 			r.done = append(r.done, from+">"+to+":"+map[bool]string{true: "ok", false: "fail"}[err == nil])
 		}}
@@ -74,8 +76,12 @@ func TestCLIUpdate(t *testing.T) {
 	if b, _ := os.ReadFile(r.target); string(b) != "binary 41-0000000" {
 		t.Fatal("changed without consent")
 	}
+	r.steps = nil
 	if err := r.cli("41-0000000", nil).Run(context.Background()); err != nil {
 		t.Fatal(err, r.out.String())
+	}
+	if got := strings.Join(r.steps, ","); got != "checking,downloading,staged,restarting,done" {
+		t.Fatal("progress:", got)
 	}
 	if b, _ := os.ReadFile(r.target); string(b) != "binary 42-1a2b3c4" {
 		t.Fatalf("%q", b)
@@ -87,8 +93,12 @@ func TestCLIUpdate(t *testing.T) {
 	if err := r.cli("42-1a2b3c4", nil).Run(context.Background()); err != nil || !strings.Contains(r.out.String(), "Already up to date") {
 		t.Fatal(err, r.out.String())
 	}
+	r.steps = nil
 	if err := r.cli("50-fffffff", nil).Run(context.Background()); err == nil || !strings.Contains(err.Error(), "not downgrading") {
 		t.Fatal(err)
+	}
+	if got := strings.Join(r.steps, ","); got != "checking,failed" {
+		t.Fatal("progress:", got)
 	}
 	if strings.Join(r.done, ",") != "41-0000000>42-1a2b3c4:ok" {
 		t.Fatal(r.done)
@@ -119,7 +129,11 @@ func TestCLIRefusesAndRollsBack(t *testing.T) {
 	// unhealthy after the restart: rolled back
 	r.gh.Publish("build-47", "fairy-agent", "47-1a2b3c4", map[string][]byte{"fairy-agent-linux-amd64": []byte("binary 47-1a2b3c4")}, nil)
 	r.healthy = func(c, _ string) bool { return c == "binary 41-0000000" }
+	r.steps = nil
 	err := r.cli("41-0", nil).Run(context.Background())
+	if r.steps[len(r.steps)-1] != "rolled_back" {
+		t.Fatal("progress:", r.steps)
+	}
 	var rb *release.RolledBackError
 	if !errors.As(err, &rb) || rb.RollbackErr != nil {
 		t.Fatal(err)

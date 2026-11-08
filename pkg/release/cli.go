@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"crypto/ed25519"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -32,13 +33,25 @@ type CLI struct {
 	RunNew func(path string) (string, error)
 	// Done is told the outcome of an install attempt (the agent writes its result file); may be nil.
 	Done func(from, to string, err error)
+	// Progress is told each step, for a status file (the panel's Update panel button); may be nil:
+	// "checking", "up_to_date", "downloading" (to = the new version), "staged" (downloaded and verified),
+	// "restarting" (swapped in, starting it), "done", "rolled_back", "failed".
+	Progress func(state, to, message string)
+}
+
+func (c *CLI) progress(state, to, msg string) {
+	if c.Progress != nil {
+		c.Progress(state, to, msg)
+	}
 }
 
 // Run checks the latest release and, unless Check is set, installs it.
 func (c *CLI) Run(ctx context.Context) error {
 	fmt.Fprintf(c.Out, "installed: %s %s (%s)\n", c.Program, c.Current, c.Target)
+	c.progress("checking", "", "asking GitHub for the latest release")
 	ch, err := c.Client.Check(ctx, c.Key, c.Program)
 	if err != nil {
+		c.progress("failed", "", err.Error())
 		return err
 	}
 	fmt.Fprintf(c.Out, "latest:    %s %s (release %s, signature OK)\n", c.Program, ch.Version, ch.Tag)
@@ -46,9 +59,12 @@ func (c *CLI) Run(ctx context.Context) error {
 	switch {
 	case cmp == 0 && !c.Force:
 		fmt.Fprintln(c.Out, "Already up to date.")
+		c.progress("up_to_date", ch.Version, "already up to date")
 		return nil
 	case cmp < 0 && !c.Force:
-		return fmt.Errorf("the latest release %s is older than the installed %s; not downgrading (--force installs it anyway)", ch.Version, c.Current)
+		err := fmt.Errorf("the latest release %s is older than the installed %s; not downgrading (--force installs it anyway)", ch.Version, c.Current)
+		c.progress("failed", ch.Version, err.Error())
+		return err
 	case !known:
 		fmt.Fprintln(c.Out, "(the installed version is not a release build, so it cannot be compared)")
 	}
@@ -68,6 +84,15 @@ func (c *CLI) Run(ctx context.Context) error {
 	if c.Done != nil {
 		c.Done(c.Current, ch.Version, err)
 	}
+	var rb *RolledBackError
+	switch {
+	case errors.As(err, &rb) && rb.RollbackErr == nil:
+		c.progress("rolled_back", ch.Version, err.Error())
+	case err != nil:
+		c.progress("failed", ch.Version, err.Error())
+	default:
+		c.progress("done", ch.Version, c.Program+" "+ch.Version+" is running")
+	}
 	if err != nil {
 		return err
 	}
@@ -77,6 +102,7 @@ func (c *CLI) Run(ctx context.Context) error {
 
 func (c *CLI) install(ctx context.Context, ch *Checked) error {
 	fmt.Fprintf(c.Out, "downloading %s ...\n", c.Asset)
+	c.progress("downloading", ch.Version, "downloading "+c.Asset)
 	newPath, err := c.Client.FetchAsset(ctx, ch, c.Asset, filepath.Dir(c.Target))
 	if err != nil {
 		return err
@@ -89,7 +115,9 @@ func (c *CLI) install(ctx context.Context, ch *Checked) error {
 		os.Remove(newPath)
 		return fmt.Errorf("the downloaded binary does not run here or reports another version (%q, %v)", strings.TrimSpace(out), err)
 	}
+	c.progress("staged", ch.Version, "downloaded and verified")
 	fmt.Fprintf(c.Out, "verified; installing (the old binary stays as %s.old) and restarting ...\n", c.Target)
+	c.progress("restarting", ch.Version, "installing and restarting")
 	in := c.Installer(c.Target, ch.Version)
 	in.Logf = func(f string, a ...any) { fmt.Fprintf(c.Out, "  "+f+"\n", a...) }
 	return in.Install(ctx, newPath)
