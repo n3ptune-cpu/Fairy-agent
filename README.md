@@ -29,7 +29,8 @@ binaries that agents install come from the release workflow below.
 
 Every push to `main` runs `.github/workflows/release.yml`: vet, test, build the three binaries with the version
 `<run number>-<short commit>` and the public key from `release/signing.pub`, write `SHA256SUMS` and `VERSION`,
-sign `SHA256SUMS` with the `FAIRY_RELEASE_KEY` secret and publish the GitHub release `build-<run number>` as
+add the Add host installers (`install.sh`, `install.ps1`) and the files they install, sign `SHA256SUMS` (which
+lists all of them) with the `FAIRY_RELEASE_KEY` secret and publish the GitHub release `build-<run number>` as
 "latest". (Release tags are never `vX.Y.Z`: those are Go module versions, below.) Pull requests run
 `ci.yml` (tests only). Nothing is installed anywhere until an admin presses Update in the panel; see
 [SETUP-UPDATES.md](SETUP-UPDATES.md) for the one-time key setup and [AGENT.md](AGENT.md#updates-the-panels-update-button)
@@ -54,9 +55,10 @@ Each folder is one Go package; inside a package, files are named after what they
 
 | Folder | What it does |
 | --- | --- |
-| `cmd/fairy-agent` | The `fairy-agent` program: `main.go` (run, check-config, gen-token, apply-update, version), `config_cmd.go` (`config get/set/show`), `service_windows.go` (the Windows service: install, uninstall, setup-self-update, run under the service manager). |
+| `cmd/fairy-agent` | The `fairy-agent` program: `main.go` (run, check-config, gen-token, apply-update, version), `config_cmd.go` (`config get/set/show`), `join.go` (`join`, `pair-status`, `verify-release`: the machine side of the panel's Add host), `service_windows.go` (the Windows service: install, uninstall, setup-self-update, run under the service manager). |
 | `cmd/fairy-release-key` | The release signing key: `gen` (owner, once), `sign` and `verify` (release workflow). |
-| `pkg/agent` | The agent's HTTP server and the panel contract (`server.go`), settings and tokens (`config.go`), BMC sensors (`bmc.go`), Supermicro fan control and its watchdog (`fan.go`), shutdown / reboot (`power*.go`), Wake-on-LAN (`wol.go`), plugs and UPSes it relays (`relay.go`), self-update and its installer (`update*.go`), Tailscale address (`listen.go`), start-up (`run.go`), log file (`logfile.go`). |
+| `pkg/agent` | The agent's HTTP server and the panel contract (`server.go`), settings and tokens (`config.go`), BMC sensors (`bmc.go`), Supermicro fan control and its watchdog (`fan.go`), shutdown / reboot (`power*.go`), Wake-on-LAN (`wol.go`), plugs and UPSes it relays (`relay.go`), self-update and its installer (`update*.go`), Tailscale address (`listen.go`), start-up (`run.go`), log file (`logfile.go`), the one-time `POST /pair` of Add host (`pairing.go`). |
+| `pkg/enroll` | Add host's join codes, shared with the panel: the code, the proof the panel sends, the verifier the agent stores, the pairing state file. |
 | `pkg/release` | Signed releases, shared with the panel's `fairy update`: signature and SHA256SUMS checks, the GitHub download (fixed hosts, size and time limits), and the swap / restart / health check / rollback installer; `releasetest/` is a fake GitHub for tests. |
 | `pkg/agent/collect` | What the agent measures: Linux `/proc` and `/sys` (`procfs.go`, `linux.go`), Windows APIs, registry and PDH (`windows.go`, `pdh_windows.go`), NVIDIA GPUs via nvidia-smi (`nvidia.go`), AMD GPUs via amdgpu sysfs (`amdgpu.go`), laptop batteries (`battery.go`), Core Temp's shared memory on Windows (`coretemp*.go`). |
 | `pkg/agent/ipmi` | Raw IPMI to the BMC: sensor list and readings (`sdr.go`), Supermicro fan commands (`ipmi.go`), through ipmitool or Windows' IPMI WMI class (`ipmitool.go`, `wmi_windows.go`); `fakebmc/` for tests. |
@@ -68,7 +70,7 @@ Each folder is one Go package; inside a package, files are named after what they
 | `pkg/tuya` | The Tuya 3.3/3.4/3.5 local protocol (encryption, frames, one persistent connection per plug). |
 | `pkg/redact` | Removes passwords/tokens from process command lines (in the agent, and again in the panel). |
 | `pkg/configutil` | The id rule (`ValidID`) and secrets referenced by environment variable name (`EnvSecret`). |
-| `deploy/` | `fairy-agent.service` (systemd), `fairy-agent-update.service` (the self-update installer), `fairy-agent.config.example.yaml`, `install-fairy-agent.ps1` (Windows), and the optional polkit / tmpfiles / udev rules. |
+| `deploy/` | `install.sh` / `install.ps1` (the one-line Add host installers, published with every release), `fairy-agent.service` (systemd), `fairy-agent-update.service` (the self-update installer), `fairy-agent.config.example.yaml`, `install-fairy-agent.ps1` (Windows), and the optional polkit / tmpfiles / udev rules. |
 | `.github/workflows` | `release.yml` (signed release on every push to main), `ci.yml` (tests on pull requests). |
 
 ## Licence

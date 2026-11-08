@@ -13,6 +13,7 @@ The panel itself is [Fairy-dashboard](https://github.com/n3ptune-cpu/Fairy-dashb
 from source, and a map of the code, are in [README.md](README.md).
 
 * [What it never touches (anti-cheat safety)](#what-it-never-touches-anti-cheat-safety)
+* [Add a host from the panel (one command)](#add-a-host-from-the-panel-one-command): the easy way
 * [Install on Windows](#install-on-windows)
 * [Install on Linux](#install-on-linux)
 * [Point the panel at it](#point-the-panel-at-it)
@@ -52,6 +53,43 @@ BattlEye, FACEIT...) without looking like a cheat:
   [Core Temp](#core-temp-optional-windows)). Fan control talks to the server's management chip (BMC) through Windows' own built-in IPMI support.
 
 What it does **not** do on Windows as a result: see [What it can and cannot show](#what-it-can-and-cannot-show).
+
+## Add a host from the panel (one command)
+
+Like adding a machine to Tailscale: no editor, no token copying.
+
+1. In the panel (admins): **Add host** on the Overview page. Fill in the machine's **Tailscale name** (as in
+   the Tailscale admin console, e.g. `nsx-furina`; the panel reaches it at `http://<name>:9101`, or give its
+   100.x address), its site, Linux or Windows, and tick what the agent may do: shutdown / reboot,
+   self-update, Wake-on-LAN relay, reading the UPS of a local NUT server, Core Temp (Windows), attaching it to
+   a Proxmox node, and the MAC addresses to wake it with.
+2. The panel asks you to confirm it's you (Pocket ID), then shows **one command** with a one-time code
+   (valid 15 minutes, works once). Copy it.
+3. Run it on the machine:
+   * **Linux** (as a user with sudo; on a Proxmox node, as root, the panel leaves out `sudo`):
+     `curl -fsSL https://github.com/n3ptune-cpu/Fairy-agent/releases/latest/download/install.sh | sudo sh -s -- --join CODE --panel 100.88.109.47 ...`
+   * **Windows** (PowerShell as Administrator, one line):
+     `iwr https://github.com/n3ptune-cpu/Fairy-agent/releases/latest/download/install.ps1 -OutFile $env:TEMP\fairy-install.ps1; powershell -ExecutionPolicy Bypass -File $env:TEMP\fairy-install.ps1 -Join CODE -PanelAddress 100.88.109.47 ...`
+4. The dialog goes from *waiting for the machine* to *paired* to *online*, and the host appears.
+
+What the command does: it downloads the latest release, checks every file against the signed `SHA256SUMS`
+(with the release key built into fairy-agent: the installed agent's on a re-run), installs exactly as described
+in [Install on Windows](#install-on-windows) / [Install on Linux](#install-on-linux) (user, program, service,
+polkit / tmpfiles rules when needed, firewall rule for the panel only, LocalSystem on Windows when Core Temp or
+IPMI is chosen), then runs `fairy-agent join`: it makes the tokens on the machine, switches on the chosen
+features with the same checked edit as `fairy-agent config set`, and stores the code (only a hash of it) with its
+expiry and the panel's address. The panel then asks the agent `POST /pair` with proof of the code; the agent
+answers **once**, only to the panel's address, with its tokens, and closes pairing for good (`fairy-agent
+pair-status` shows it). The agent still never connects to the panel; the panel keeps the tokens in its own state
+folder, not in `config.yaml`.
+
+* **Lost the panel's copy of the tokens**, or the code expired before the machine ran it: **Re-pair** on the
+  host's page makes a new code and the same command; running it again keeps the machine's tokens and settings.
+* **Remove host** (hosts added this way) forgets the host and its tokens in the panel. On the machine, remove
+  the agent as in [Checking, logs, updating, removing](#checking-logs-updating-removing).
+* Hosts written by hand into the panel's `config.yaml` keep working exactly as before.
+* Proxmox nodes themselves (the API token for the cluster view) are not added this way yet: see the panel's
+  README. An agent *on* a Proxmox node is (tick "attach to Proxmox node").
 
 ## Install on Windows
 
@@ -252,8 +290,11 @@ private (192.168.x.x / 10.x / 172.16-31.x) address, on port 7 or 9.
 When the panel cannot reach a smart plug or UPS itself (for example at a friend's place), the agent there can
 read it and pass the readings on. The entries are the same as in the panel's `power_sources:` and `ups:`
 (Shelly, Tasmota, Tuya, Redfish, NUT); passwords go into a separate file named by `env_file:` as
-`NAME=value` lines and stay on that machine. `system_hint: self` links a plug to the agent's own machine. In the
-panel's agent entry use `power_links:` / `ups_powers:` / `ups_names:` as for any agent.
+`NAME=value` lines and stay on that machine. `system_hint: self` links a plug to the agent's own machine, but
+only for an agent that is a host of its own: for an agent merged into a Proxmox node (`node:` in the panel) it
+does not work, because the panel shows that machine under the node's id. There, and whenever the panel should
+decide, use `power_links:` in the panel's agent entry (`power_links: {<device id>: <system id>}`, e.g.
+`{asus-i7-ups: straw-node-asus-i7}`), plus `ups_powers:` / `ups_names:` for UPSes, as for any agent.
 
 ## Updates (the panel's Update button)
 
@@ -446,6 +487,10 @@ are lists of devices: edit those in the file.
   the exe over, `Start-Service fairy-agent`). Linux: copy the new binary to `/usr/local/bin/fairy-agent`, then
   `systemctl restart fairy-agent`. Settings and tokens stay. `fairy-agent version` shows the version and
   whether the program carries the release key.
+* **Pairing (Add host).** `fairy-agent pair-status` says whether the panel has paired, is still expected (and
+  until when), or the code expired. The agent's log says "paired with panel" (with the panel's address, never a
+  token). The state file is `/var/lib/fairy-agent/pairing.json` (Linux) or
+  `C:\ProgramData\fairy-agent\state\pairing.json` (Windows); it never holds the code itself.
 * **Remove.** Windows: `& "C:\Program Files\Fairy\fairy-agent.exe" uninstall`, then
   `Remove-NetFirewallRule -DisplayName "Fairy agent (Tailscale only)"` and delete `C:\Program Files\Fairy` and
   `C:\ProgramData\fairy-agent`. Linux: `systemctl disable --now fairy-agent`, delete the units
@@ -455,7 +500,10 @@ are lists of devices: edit those in the file.
 ## Security in short
 
 * Listens only on the Tailscale address (or the address you set), never on every network by default.
-* Every request needs a token; tokens are compared in a way that does not leak their length or content through
+* Every request needs a token, except `POST /pair`: it answers only while a one-time join code from the panel's
+  Add host is waiting (15 minutes, the code stored only as a hash), only to the panel's address, 5 times a minute
+  at most, hands out the tokens once and is closed for good after that (or after 10 wrong codes).
+* Tokens are compared in a way that does not leak their length or content through
   timing. Reading uses one token, changing anything needs the second, separate one. Repeated wrong tokens
   block that address for a minute.
 * Read-only unless you switch features on; each control action is rate limited and logged with who asked.

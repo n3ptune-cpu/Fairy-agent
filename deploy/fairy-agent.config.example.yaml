@@ -69,7 +69,8 @@ self_update:
 control_rate_per_min: 12       # fan / power / Wake-on-LAN / update requests per minute, all together
 
 # Devices on this machine's LAN that the panel cannot reach itself; the agent reads them and passes the readings
-# on (credentials stay here). Same entries as the panel's power_sources / ups. system_hint: self = this host.
+# on (credentials stay here). Same entries as the panel's power_sources / ups. system_hint: self = this host
+# (not for an agent merged into a Proxmox node: use power_links in the panel's agent entry instead).
 # env_file: /etc/fairy-agent/devices.env     # KEY=value lines for the *_env names below (0640 root:fairy-agent)
 power_sources: []
   # - {id: desk-plug, type: tuya, name: "Desk plug", device_id: bf0123456789abcdef, ip: 192.168.1.60, local_key_env: TUYA_KEY_DESK, version: "3.4", system_hint: self}
