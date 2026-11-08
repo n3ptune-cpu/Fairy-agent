@@ -23,6 +23,7 @@ processes:
 gpu:
   nvidia_smi: auto             # auto | off | absolute path of nvidia-smi
   amdgpu: auto                 # Linux: auto (AMD GPUs via the amdgpu driver's /sys files, if any) | off
+  windows: auto                # Windows: auto (AMD / Intel / other GPUs from Windows' own GPU counters) | off
   interval_s: 2
 
 # sensors:

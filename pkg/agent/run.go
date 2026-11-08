@@ -122,6 +122,13 @@ func Run(ctx context.Context, cfg *Config, b Build) error {
 			slog.Info("AMD GPUs via amdgpu sysfs", "cards", amd.Cards())
 		}
 	}
+	if cfg.GPU.Windows == "auto" && runtime.GOOS == "windows" {
+		// AMD, Intel and other cards from Windows' own GPU counters (NVIDIA ones stay with nvidia-smi)
+		if wg := collect.NewWinGPU(time.Duration(cfg.GPU.IntervalS*float64(time.Second)), d.GPU != nil); wg != nil {
+			d.GPU = CombineGPUs(d.GPU, wg)
+			slog.Info("GPUs via Windows (DXGI + GPU counters)", "adapters", wg.Names())
+		}
+	}
 	var a *Agent
 	if cfg.IPMI.Enabled {
 		t, err := IPMITransport(cfg.IPMI)

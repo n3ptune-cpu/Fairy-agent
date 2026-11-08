@@ -78,6 +78,9 @@ type GPU struct {
 	VRAMTotal   *int64   `json:"vram_total"`
 	TempC       *float64 `json:"temp_c"`
 	PowerW      *float64 `json:"power_w"`
+	// Source is where the readings come from when it is not the vendor's own tool: "windows" (the GPU
+	// counters Windows itself keeps, as in Task Manager: no temperature or watts).
+	Source string `json:"source,omitempty"`
 }
 
 // PowerSensor is one named component power reading (e.g. "rapl package-0").
