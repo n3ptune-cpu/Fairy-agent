@@ -136,6 +136,44 @@ func CounterLUIDs(names ...[]string) map[string]bool {
 	return out
 }
 
+// DropGhosts removes DXGI entries that Windows does not really drive: an adapter without a
+// `\GPU Adapter Memory` instance, when another adapter with the same vendor, device and dedicated VRAM has one.
+// `\GPU Engine` instances do not tell: every process with a Direct3D device (dwm.exe, browsers, games) gets
+// engine instances on every adapter DXGI lists, leftover ones included, so a leftover entry looked "live" and
+// showed up as a second card (2x RX 5600 XT on a one-GPU PC, 2x Intel UHD). Two identical cards that both have
+// memory instances are both kept. memLUIDs nil (the memory counter not read or not available): nothing is dropped.
+func DropGhosts(all []WinAdapter, memLUIDs map[string]bool) []WinAdapter {
+	if memLUIDs == nil {
+		return all
+	}
+	key := func(a WinAdapter) string { return fmt.Sprintf("%04x:%04x:%d", a.VendorID, a.DeviceID, a.VRAMTotal) }
+	live := map[string]bool{}
+	for _, a := range all {
+		if memLUIDs[a.LUID] {
+			live[key(a)] = true
+		}
+	}
+	out := make([]WinAdapter, 0, len(all))
+	for _, a := range all {
+		if !memLUIDs[a.LUID] && live[key(a)] {
+			continue
+		}
+		out = append(out, a)
+	}
+	return out
+}
+
+// MemoryLUIDs is the set of adapter LUIDs that have a `\GPU Adapter Memory` instance.
+func MemoryLUIDs(names []string) map[string]bool {
+	out := map[string]bool{}
+	for _, n := range names {
+		if m := memRe.FindStringSubmatch(n); m != nil {
+			out[normLUID(m[1])] = true
+		}
+	}
+	return out
+}
+
 // PhysicalAdapters lists each physical card once. Entries with the same PCI ids (vendor, device, subsystem,
 // revision) are the same card when they sit at the same PCI location, or when the location of either is unknown;
 // of these the one with GPU counters (present; nil: not read yet) is kept, else the first. Two identical cards at

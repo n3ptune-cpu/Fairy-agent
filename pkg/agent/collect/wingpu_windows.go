@@ -180,13 +180,11 @@ func (w *WinGPU) AMDCards() []string {
 	return w.amd.Cards()
 }
 
-// Names lists the reported adapters (for the start-up log).
+// Names lists the reported adapters (for the start-up log): what GPUs reports, leftover DXGI entries dropped.
 func (w *WinGPU) Names() []string {
-	w.mu.Lock()
-	defer w.mu.Unlock()
 	var n []string
-	for _, a := range PhysicalAdapters(w.adapters, nil) {
-		n = append(n, a.Name)
+	for _, g := range w.GPUs() {
+		n = append(n, g.Name)
 	}
 	return n
 }
@@ -216,7 +214,7 @@ func (w *WinGPU) GPUs() []GPU {
 	}
 	var util map[string]float64
 	var mem map[string]int64
-	var present map[string]bool
+	var present, memLUIDs map[string]bool
 	if w.eng != nil {
 		if v, err := w.eng.values(); err == nil {
 			names, values := split(v)
@@ -228,16 +226,16 @@ func (w *WinGPU) GPUs() []GPU {
 	if w.mem != nil {
 		if v, err := w.mem.values(); err == nil {
 			names, values := split(v)
-			mem = AdapterMemory(names, values)
+			mem, memLUIDs = AdapterMemory(names, values), MemoryLUIDs(names)
 			if present == nil {
 				present = map[string]bool{}
 			}
-			for k := range CounterLUIDs(names) {
+			for k := range memLUIDs {
 				present[k] = true
 			}
 		}
 	}
-	w.gpus, w.at = WinGPUs(PhysicalAdapters(w.adapters, present), util, mem), time.Now()
+	w.gpus, w.at = WinGPUs(PhysicalAdapters(DropGhosts(w.adapters, memLUIDs), present), util, mem), time.Now()
 	if w.amd != nil {
 		w.amd.Attach(w.gpus)
 	}

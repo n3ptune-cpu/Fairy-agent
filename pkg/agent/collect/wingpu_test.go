@@ -122,3 +122,63 @@ func TestPhysicalAdaptersOneCardThreeDXGIEntries(t *testing.T) {
 		t.Fatal("AMD + Intel", got)
 	}
 }
+
+// A one-GPU PC with a leftover DXGI entry for the same RX 5600 XT: dwm.exe and the game have GPU Engine instances
+// on both LUIDs (so both looked "live"), only the real one has a GPU Adapter Memory instance. Before: two RX
+// 5600 XT and no Radeon temperature (ADL is matched to the only AMD GPU). Now: one card, with temperature.
+func TestDropGhostsOneRadeonTwoLiveLUIDs(t *testing.T) {
+	live, ghost := "0x00000000_0x0001A2B3", "0x00000000_0x0000C001"
+	rx := func(luid string, sub uint32) WinAdapter {
+		return WinAdapter{Name: "AMD Radeon RX 5600 XT", VendorID: 0x1002, DeviceID: 0x731f, SubSysID: sub, VRAMTotal: 6 << 30, LUID: luid}
+	}
+	all := []WinAdapter{rx(ghost, 0), rx(live, 0x04e41da2)} // the leftover even reports other subsystem ids
+	eng := []string{
+		"pid_812_luid_0x00000000_0x0000C001_phys_0_eng_0_engtype_3D", // dwm.exe on the leftover LUID
+		"pid_812_luid_0x00000000_0x0001A2B3_phys_0_eng_0_engtype_3D",
+		"pid_4400_luid_0x00000000_0x0001A2B3_phys_0_eng_0_engtype_3D",
+	}
+	memNames := []string{"luid_0x00000000_0x0001A2B3_phys_0"}
+	present := CounterLUIDs(eng, memNames)
+	if got := PhysicalAdapters(all, present); len(got) != 2 {
+		t.Fatalf("precondition: engine instances alone keep the ghost: %+v", got)
+	}
+	shown := PhysicalAdapters(DropGhosts(all, MemoryLUIDs(memNames)), present)
+	if len(shown) != 1 || shown[0].LUID != live {
+		t.Fatalf("%+v", shown)
+	}
+	gpus := WinGPUs(shown, EngineUtil(eng, []float64{1, 20, 30}), AdapterMemory(memNames, []float64{1 << 30}))
+	f := &fakeADL{adapters: []ADLAdapter{{Index: 0, Bus: 0x0b, VendorID: 0x1002, Name: "AMD Radeon RX 5600 XT"}},
+		version: map[int]int{0: 8}, pmlog: map[int][]ADLSensor{0: sensors(map[int]int32{pmlogTempEdge: 57, pmlogBoardPower: 120})}}
+	NewAMDSensors(f).Attach(gpus) // the leftover had no PCI location: matched as the only AMD GPU
+	if len(gpus) != 1 || gpus[0].TempC == nil || *gpus[0].TempC != 57 || gpus[0].Source != "amd" || *gpus[0].UtilPercent != 50 {
+		t.Fatalf("%+v", gpus)
+	}
+	// counter not read (or not available): nothing is dropped
+	if got := DropGhosts(all, nil); len(got) != 2 {
+		t.Fatal(got)
+	}
+}
+
+func TestDropGhostsIntelUHDAndTwins(t *testing.T) {
+	uhd := func(luid string) WinAdapter {
+		return WinAdapter{Name: "Intel(R) UHD Graphics 770", VendorID: 0x8086, DeviceID: 0x4680, VRAMTotal: 128 << 20, LUID: luid}
+	}
+	a, b := "0x00000000_0x00001111", "0x00000000_0x00002222"
+	if got := DropGhosts([]WinAdapter{uhd(a), uhd(b)}, MemoryLUIDs([]string{"luid_0x00000000_0x00002222_phys_0"})); len(got) != 1 || got[0].LUID != b {
+		t.Fatal("2x Intel UHD", got)
+	}
+	// two real identical cards: both have memory instances, both stay (also through PhysicalAdapters)
+	twin := func(luid string, bus uint32) WinAdapter {
+		return WinAdapter{Name: "AMD Radeon RX 7900 XTX", VendorID: 0x1002, DeviceID: 0x744c, VRAMTotal: 24 << 30, LUID: luid, Loc: &PCILoc{Bus: bus}}
+	}
+	mem := []string{"luid_0x00000000_0x00001111_phys_0", "luid_0x00000000_0x00002222_phys_0"}
+	twins := []WinAdapter{twin(a, 3), twin(b, 4)}
+	if got := PhysicalAdapters(DropGhosts(twins, MemoryLUIDs(mem)), CounterLUIDs(mem)); len(got) != 2 {
+		t.Fatal("twins", got)
+	}
+	// a different card without a memory instance is not a ghost of another model
+	other := WinAdapter{Name: "Intel(R) UHD Graphics 770", VendorID: 0x8086, DeviceID: 0x4680, VRAMTotal: 128 << 20, LUID: "0x00000000_0x00003333"}
+	if got := DropGhosts([]WinAdapter{twin(a, 3), other}, MemoryLUIDs(mem[:1])); len(got) != 2 {
+		t.Fatal("different model", got)
+	}
+}

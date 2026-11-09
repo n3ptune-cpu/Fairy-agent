@@ -211,7 +211,10 @@ nvidia-smi (they are not listed twice) and the Microsoft Basic Render Driver is 
 even when DXGI reports it several times (some Windows 10 LTSC machines list one Radeon three times, with
 leftover adapter ids): entries with the same PCI ids at the same PCI location (read from the adapter id through
 D3DKMT) are one card, and the entry the GPU counters know is kept; two identical cards in two slots stay two.
-Nothing to install; `gpu: windows: off` switches it off.
+A DXGI entry without a "GPU Adapter Memory" counter is left out when another entry of the same card model
+(vendor, device and VRAM) has one: such leftovers still get "GPU Engine" counters from every program that draws
+(e.g. dwm.exe), which made one Radeon or one Intel UHD show up twice. Two identical real cards both have memory
+counters and both stay. Nothing to install; `gpu: windows: off` switches it off.
 
 Radeon temperature and watts on Windows come from AMD's own library, ADL (`atiadlxx.dll` in System32, installed
 with the Adrenalin driver), read only: per card by its Overdrive version, the PMLog sensors on Navi and newer
@@ -635,6 +638,8 @@ on the first install and report anything odd:
   yet. Try `ipmi: enabled: true` first (sensors only) and look at the panel and the log before enabling fan
   control;
 * the install script's firewall rule;
+* leaving out leftover GPU entries ("GPU Adapter Memory" counter per adapter), checked against unit tests built
+  from the RX 5600 XT and Intel UHD reports, not yet on those PCs;
 * self-update on Windows: the permissions `setup-self-update` sets (program folder, update folder, the
   service's own start/stop right), the detached installer (`apply-update`) stopping and starting the service,
   renaming the running exe, and rolling back.
