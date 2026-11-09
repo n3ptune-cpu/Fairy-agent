@@ -88,8 +88,22 @@ folder, not in `config.yaml`.
 * **Remove host** (hosts added this way) forgets the host and its tokens in the panel. On the machine, remove
   the agent as in [Checking, logs, updating, removing](#checking-logs-updating-removing).
 * Hosts written by hand into the panel's `config.yaml` keep working exactly as before.
-* Proxmox nodes themselves (the API token for the cluster view) are not added this way yet: see the panel's
-  README. An agent *on* a Proxmox node is (tick "attach to Proxmox node").
+* **A new Proxmox VE node** ("Is it a Proxmox node? Yes: a new node", panel and agent v0.4.2): the Linux
+  command gets `--proxmox`, and `fairy-agent join` (as root on the node) also makes the panel a **read-only**
+  API token, idempotently: `pveum user add fairy@pve --comment "Fairy panel, read-only"` (an existing user is
+  fine), `pveum aclmod / --users fairy@pve --roles PVEAuditor`, and `pveum user token add fairy@pve
+  panel-<node> --privsep 0 --output-format json` (a token of that same name is removed first; no other token is
+  touched). The secret is read from pveum's JSON, never printed, and kept with the node's CA
+  (`/etc/pve/pve-root-ca.pem`), its name and `https://<Tailscale name>:8006` in the pairing state (0600, only
+  root and the agent), which hands it to the panel **once** with the agent's tokens and drops it at the same
+  moment (also when the code expires). The panel then polls the node through the Proxmox API (verifying the
+  certificate against that CA, for the node's name, which Proxmox's own certificate lists) and attaches the
+  agent to it. If the node's certificate does not list its name, join warns: `pvecm updatecerts --force`, then
+  `systemctl restart pveproxy`. With a custom (e.g. ACME) certificate the panel checks it against the public
+  CAs. **Standalone nodes only**: in a cluster of more than one node join says so and skips the token (the agent
+  still installs; add the cluster by hand under the panel's `proxmox:`). To withdraw the token later:
+  `pveum user token remove fairy@pve panel-<node>` on the node.
+* An agent *on* a Proxmox node the panel already polls: tick "attach to Proxmox node" (Yes: <that node>).
 
 ## Install on Windows
 

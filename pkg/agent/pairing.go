@@ -79,6 +79,12 @@ func (p *Pairer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if err != nil && !errors.Is(err, os.ErrNotExist) {
 			slog.Warn("pairing state unreadable", "error", err.Error())
 		}
+		if err == nil && st.Proxmox != nil { // an expired code: the Proxmox token secret does not stay behind
+			st.Proxmox = nil
+			if werr := enroll.WriteState(p.Path, st); werr != nil {
+				slog.Error("cannot write the pairing state", "error", werr.Error())
+			}
+		}
 		pairErr(w, 404, "pairing_inactive", "pairing is not active on this agent")
 		return
 	}
@@ -90,7 +96,7 @@ func (p *Pairer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if !enroll.Check(req.Proof, st.Verifier) {
 		st.Failures++
 		if st.Failures >= enroll.MaxFailures {
-			st.Closed, st.Verifier = "too many wrong codes", ""
+			st.Closed, st.Verifier, st.Proxmox = "too many wrong codes", "", nil
 			slog.Warn("pairing closed after too many wrong codes", "remote", ip)
 		} else {
 			slog.Warn("pairing request with a wrong code", "remote", ip, "failures", st.Failures)
@@ -107,15 +113,17 @@ func (p *Pairer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		pairErr(w, 500, "tokens_unreadable", "the agent cannot read its own tokens; see its log")
 		return
 	}
-	// Close pairing on disk BEFORE the tokens leave: if that fails, nothing is handed out.
-	st.Closed, st.Verifier, st.PairedAt, st.PairedBy = "paired", "", now.Unix(), ip
+	// Close pairing on disk BEFORE the tokens leave: if that fails, nothing is handed out. The Proxmox token
+	// secret leaves the file at the same moment (it is sent exactly once).
+	grant := st.Proxmox
+	st.Closed, st.Verifier, st.PairedAt, st.PairedBy, st.Proxmox = "paired", "", now.Unix(), ip, nil
 	if err := enroll.WriteState(p.Path, st); err != nil {
 		slog.Error("pairing: cannot close the join code, tokens not sent", "error", err.Error())
 		pairErr(w, 500, "state_unwritable", "the agent cannot record the pairing; see its log")
 		return
 	}
 	resp := p.Info()
-	resp.Token, resp.ControlToken = tok.Read, tok.Control
-	slog.Info("paired with panel", "remote", ip, "control_token", tok.Control != "")
+	resp.Token, resp.ControlToken, resp.Proxmox = tok.Read, tok.Control, grant
+	slog.Info("paired with panel", "remote", ip, "control_token", tok.Control != "", "proxmox_token", grant != nil)
 	writeJSON(w, 200, resp)
 }

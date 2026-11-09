@@ -110,6 +110,20 @@ type Response struct {
 	Features     map[string]bool `json:"features"`
 	Token        string          `json:"token"`
 	ControlToken string          `json:"control_token,omitempty"` // only when a control feature is on
+	// Proxmox is the read-only API token a Proxmox VE node made for the panel during `install.sh --proxmox`;
+	// sent once, with the tokens, then gone from the machine's pairing state.
+	Proxmox *ProxmoxGrant `json:"proxmox,omitempty"`
+}
+
+// ProxmoxGrant is what the panel needs to poll a standalone Proxmox VE node: a PVEAuditor API token and how to
+// verify the node's certificate (its own CA, and the name the certificate is issued for).
+type ProxmoxGrant struct {
+	TokenID     string `json:"token_id"`     // fairy@pve!panel-<node>
+	TokenSecret string `json:"token_secret"` // the token's UUID secret
+	CAPEM       string `json:"ca_pem"`       // /etc/pve/pve-root-ca.pem ("" when the node uses a publicly trusted certificate)
+	Node        string `json:"node"`         // the node's name (hostname)
+	URL         string `json:"url"`          // https://<Tailscale name>:8006
+	ServerName  string `json:"server_name"`  // the name to check the certificate against (in its SAN)
 }
 
 // State is the agent's pairing state file (written by `fairy-agent join`, closed by the agent).
@@ -123,6 +137,9 @@ type State struct {
 	PairedAt  int64  `json:"paired_at,omitempty"`
 	PairedBy  string `json:"paired_by,omitempty"`
 	Closed    string `json:"closed,omitempty"` // why pairing is over: "paired", "too many wrong codes"
+	// Proxmox: the node's API token for the panel (install.sh --proxmox), handed out once with the tokens and
+	// removed from this file before it leaves.
+	Proxmox *ProxmoxGrant `json:"proxmox,omitempty"`
 }
 
 // Active reports whether /pair may answer.

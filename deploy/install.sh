@@ -3,6 +3,7 @@
 #
 #   curl -fsSL https://github.com/n3ptune-cpu/Fairy-agent/releases/latest/download/install.sh | sudo sh -s -- \
 #     --join CODE --panel 100.x.y.z [--power-control] [--self-update] [--wol] [--ups] [--ups-name NAME] [--ipmi]
+#     [--proxmox]
 #
 # It downloads the latest release (binary, SHA256SUMS + signature, the systemd units and rules), checks every
 # file against SHA256SUMS and the signature with fairy-agent's built-in release key, then installs exactly what
@@ -10,7 +11,9 @@
 # 0640 root:fairy-agent), fairy-agent.service (+ fairy-agent-update.service and the polkit rule when needed,
 # the RAPL tmpfiles rule when the machine has RAPL), a firewall rule for the panel when ufw / firewalld is on.
 # `fairy-agent join` then writes the tokens and the chosen settings (no editor, nothing to copy) and stores the
-# one-time join code; the panel picks the tokens up by itself within a few seconds.
+# one-time join code; the panel picks the tokens up by itself within a few seconds. With --proxmox (a standalone
+# Proxmox VE node), join also makes the panel a read-only API token (user fairy@pve, role PVEAuditor, token
+# fairy@pve!panel-<node>) that the panel picks up once with the agent's tokens; nothing to copy.
 #
 # Safe to run again (with a new code from the panel's "Re-pair"): tokens and settings are kept, the binary and
 # units are brought up to date. Nothing secret is printed.
@@ -26,7 +29,7 @@ say() { printf '%s\n' "fairy: $*"; }
 die() { printf '%s\n' "fairy: ERROR: $*" >&2; exit 1; }
 
 CODE="" PANEL="" UPSNAME=""
-POWER=0 UPDATE=0 WOL=0 UPS=0 IPMI=0
+POWER=0 UPDATE=0 WOL=0 UPS=0 IPMI=0 PVE=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --join) [ $# -ge 2 ] || die "--join needs the code"; CODE="$2"; shift ;;
@@ -38,7 +41,8 @@ while [ $# -gt 0 ]; do
     --ups-name) [ $# -ge 2 ] || die "--ups-name needs a name"; UPS=1; UPSNAME="$2"; shift ;;
     --ups=*) UPS=1; UPSNAME="${1#--ups=}" ;;
     --ipmi) IPMI=1 ;;
-    -h|--help) sed -n '2,17p' "$0" 2>/dev/null || true; exit 0 ;;
+    --proxmox) PVE=1 ;;
+    -h|--help) sed -n '2,20p' "$0" 2>/dev/null || true; exit 0 ;;
     *) die "unknown option $1 (copy the whole command from the panel's Add host dialog)" ;;
   esac
   shift
@@ -144,6 +148,7 @@ set -- --code "$CODE" --panel "$PANEL"
 [ "$UPDATE" -eq 1 ] && set -- "$@" --self-update
 [ "$WOL" -eq 1 ] && set -- "$@" --wol
 [ "$IPMI" -eq 1 ] && set -- "$@" --ipmi
+[ "$PVE" -eq 1 ] && set -- "$@" --proxmox
 if [ "$UPS" -eq 1 ]; then
   if [ -n "$UPSNAME" ]; then set -- "$@" --ups-name "$UPSNAME"; else set -- "$@" --ups; fi
 fi

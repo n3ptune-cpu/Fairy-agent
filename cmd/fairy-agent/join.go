@@ -31,6 +31,8 @@ type joinOpts struct {
 	code, panel, cfgPath, stateDir, upsName string
 	powerControl, selfUpdate, wol, ups      bool
 	coreTemp, ipmi                          bool
+	proxmox                                 bool
+	pve                                     *pveHost // nil: the real machine
 }
 
 var upsNameRe = regexp.MustCompile(`^[A-Za-z0-9_.-]{1,64}$`)
@@ -50,6 +52,7 @@ func parseJoin(args []string, stderr io.Writer) (joinOpts, error) {
 	fs.StringVar(&o.upsName, "ups-name", "", "only this UPS of the local NUT server (implies --ups)")
 	fs.BoolVar(&o.coreTemp, "coretemp", false, "Windows: CPU core temperatures and watts from Core Temp")
 	fs.BoolVar(&o.ipmi, "ipmi", false, "BMC sensors over IPMI (Supermicro)")
+	fs.BoolVar(&o.proxmox, "proxmox", false, "Proxmox VE node: make a read-only API token for the panel (standalone nodes)")
 	if err := fs.Parse(args); err != nil {
 		return o, err
 	}
@@ -168,6 +171,22 @@ func join(o joinOpts, out io.Writer) error {
 	now := time.Now()
 	st := enroll.State{Version: 1, Verifier: enroll.Verifier(proof), Panel: o.panel, CreatedAt: now.Unix(),
 		ExpiresAt: now.Add(enroll.TTL).Unix()}
+	if o.proxmox {
+		h := realPVEHost()
+		if o.pve != nil {
+			h = *o.pve
+		}
+		g, err := proxmoxGrant(h, out)
+		var skip errSkipProxmox
+		switch {
+		case errors.As(err, &skip):
+			fmt.Fprintln(out, "proxmox:", skip.why)
+		case err != nil:
+			fmt.Fprintln(out, "proxmox: FAILED, the agent is installed without the node's API token:", err)
+		default:
+			st.Proxmox = g
+		}
+	}
 	path := filepath.Join(o.stateDir, "pairing.json")
 	if err := enroll.WriteState(path, st); err != nil {
 		return err

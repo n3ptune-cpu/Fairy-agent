@@ -57,7 +57,7 @@ const usage = `fairy-agent: reports this machine's metrics to the Fairy panel (s
   fairy-agent bmc-relay add --id ID --host IP --username USER --password-env NAME [--cipher-suite N] ...
                                             add a BMC power-on relay target (see AGENT.md)
   fairy-agent join --code CODE --panel IP [--power-control] [--self-update] [--wol] [--ups] [--ups-name NAME]
-                   [--coretemp] [--ipmi]     the machine side of the panel's "Add host" (install.sh / install.ps1
+                   [--coretemp] [--ipmi] [--proxmox]  the machine side of the panel's "Add host" (install.sh / install.ps1
                                             run it): tokens, the chosen features, the one-time join code
   fairy-agent pair-status                   has the panel paired yet (exit 0 yes, 3 still waiting, 1 no)
   fairy-agent verify-release DIR            check SHA256SUMS' signature and the files in DIR (installers)

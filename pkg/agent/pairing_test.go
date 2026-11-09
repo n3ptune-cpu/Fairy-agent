@@ -202,3 +202,42 @@ func TestListenAddrWaitsForTailscale(t *testing.T) {
 		t.Fatal("countTailnet")
 	}
 }
+
+// A Proxmox VE node's token (install.sh --proxmox) goes to the panel exactly once, with the agent's tokens, and
+// is gone from the pairing state before it leaves; an expired code takes it away too.
+func TestPairHandsTheProxmoxTokenOutOnce(t *testing.T) {
+	grant := &enroll.ProxmoxGrant{TokenID: "fairy@pve!panel-asus-i7", TokenSecret: "0b7c4e2a-1111-2222-3333-444455556666",
+		CAPEM: "-----BEGIN CERTIFICATE-----\n...\n", Node: "asus-i7", URL: "https://asus-i7.ts.net:8006", ServerName: "asus-i7"}
+	addGrant := func(r *pairRig) {
+		s, _ := enroll.ReadState(r.path)
+		s.Proxmox = grant
+		if err := enroll.WriteState(r.path, s); err != nil {
+			t.Fatal(err)
+		}
+	}
+	r := newPairRig(t, "", "127.0.0.1")
+	addGrant(r)
+	st, body := r.pair(t, r.proof)
+	px, _ := body["proxmox"].(map[string]any)
+	if st != 200 || px["token_secret"] != grant.TokenSecret || px["token_id"] != grant.TokenID || px["node"] != "asus-i7" || px["server_name"] != "asus-i7" {
+		t.Fatalf("%d %v", st, body)
+	}
+	if s, _ := enroll.ReadState(r.path); s.Proxmox != nil || s.Closed != "paired" {
+		t.Fatalf("the token stayed on disk: %+v", s)
+	}
+	// without a grant: no proxmox key at all
+	r2 := newPairRig(t, "", "127.0.0.1")
+	if _, body := r2.pair(t, r2.proof); body["proxmox"] != nil {
+		t.Fatal(body)
+	}
+	// expired: wiped on the next request
+	r3 := newPairRig(t, "", "127.0.0.1")
+	addGrant(r3)
+	r3.now = r3.now.Add(enroll.TTL + time.Minute)
+	if st, _ := r3.pair(t, r3.proof); st != 404 {
+		t.Fatal(st)
+	}
+	if s, _ := enroll.ReadState(r3.path); s.Proxmox != nil {
+		t.Fatal("expired grant kept")
+	}
+}
