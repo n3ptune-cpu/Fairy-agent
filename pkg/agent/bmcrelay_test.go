@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -39,6 +40,12 @@ func fakeIpmitool(mode string, args []string) int {
 		fmt.Fprintln(os.Stderr, "Error: Unable to establish IPMI v2 / RMCP+ session\\nRAKP 2 HMAC is invalid")
 		return 1
 	case "down":
+		fmt.Fprintln(os.Stderr, "Error: Unable to establish IPMI v2 / RMCP+ session")
+		return 1
+	case "role":
+		fmt.Fprintln(os.Stderr, "IANA PEN registry open failed: No such file or directory")
+		fmt.Fprintln(os.Stderr, "Error in open session response message : invalid role")
+		fmt.Fprintln(os.Stderr, "")
 		fmt.Fprintln(os.Stderr, "Error: Unable to establish IPMI v2 / RMCP+ session")
 		return 1
 	}
@@ -87,6 +94,11 @@ func TestBMCRelayIpmitool(t *testing.T) {
 	t.Setenv("FAKE_IPMITOOL_MODE", "down")
 	if st, b := r.do(t, "POST", "/bmc/power", ctlTok, map[string]any{"target": "cyrene-bmc", "action": "on"}); st != 502 || b["code"] != "bmc_unreachable" ||
 		!strings.Contains(b["error"].(string), "cabled") {
+		t.Fatal(st, b)
+	}
+	t.Setenv("FAKE_IPMITOOL_MODE", "role") // was reported as "not reachable (is the relay cabled to it?)"
+	if st, b := r.do(t, "POST", "/bmc/power", ctlTok, map[string]any{"target": "cyrene-bmc", "action": "on"}); st != 502 || b["code"] != "bmc_privilege" ||
+		strings.Contains(b["error"].(string), "cabled") || strings.Contains(b["error"].(string), "IANA") || !strings.Contains(b["error"].(string), "Administrator") {
 		t.Fatal(st, b)
 	}
 	if st, b := r.do(t, "POST", "/bmc/power", ctlTok, map[string]any{"target": "nope", "action": "on"}); st != 404 || b["code"] != "unknown_target" {
@@ -193,5 +205,47 @@ func TestBMCRelayRedfish(t *testing.T) {
 	t.Setenv("BMC_PW", "hunter2")
 	if st, out := b3.Handle(ctx, BMCRequest{Target: "x11", Action: "on"}); st != 502 || out["code"] != "bmc_unreachable" {
 		t.Fatal(st, out)
+	}
+}
+
+// ipmitool's messages as real BMCs produce them (lanplus): the line before "Unable to establish IPMI v2 / RMCP+
+// session" decides; the IANA PEN warning is noise.
+func TestClassifyIpmitool(t *testing.T) {
+	cs := 17
+	tg := BMCTarget{ID: "x", Host: "192.168.254.254", Username: "fairy", PasswordEnv: "BMC_PW", CipherSuite: &cs}
+	pen := "IANA PEN registry open failed: No such file or directory\n"
+	for out, code := range map[string]string{
+		pen + "Error in open session response message : invalid role\nError: Unable to establish IPMI v2 / RMCP+ session":                                      "bmc_privilege",
+		"Set Session Privilege Level to ADMINISTRATOR failed: Insufficient privilege level\nError: Unable to establish IPMI v2 / RMCP+ session":                "bmc_privilege",
+		"RAKP 2 message indicates an error : unauthorized role or privilege level requested":                                                                   "bmc_privilege",
+		"Error in open session response message : no cipher suite match with proposed security algorithms\nError: Unable to establish IPMI v2 / RMCP+ session": "bmc_cipher",
+		"Unsupported cipher suite ID : 18":                                                                                      "bmc_cipher",
+		"Error in open session response message : invalid integrity algorithm":                                                  "bmc_cipher",
+		"RAKP 2 message indicates an error : unauthorized name\nError: Unable to establish IPMI v2 / RMCP+ session":             "bmc_refused",
+		pen + "RAKP 2 HMAC is invalid\nError: Unable to establish IPMI v2 / RMCP+ session":                                      "bmc_refused",
+		"Error in open session response message : insufficient resources to create a session":                                   "bmc_busy",
+		"RAKP 4 message indicates an error : invalid session ID in request\nError: Unable to establish IPMI v2 / RMCP+ session": "bmc_session",
+		pen + "Error: Unable to establish IPMI v2 / RMCP+ session":                                                              "bmc_unreachable",
+		"Address lookup for 192.168.254.254 failed":                                                                             "bmc_unreachable",
+		"Error: something new": "bmc_error",
+	} {
+		err := classifyIpmitool(tg, cleanIpmitoolOutput(out, "hunter2"))
+		var be *bmcError
+		if !errors.As(err, &be) || be.code != code {
+			t.Errorf("%q: got %v, want %s", out, err, code)
+			continue
+		}
+		if strings.Contains(be.msg, "IANA") {
+			t.Errorf("%q: the PEN warning was kept: %s", out, be.msg)
+		}
+		if code != "bmc_unreachable" && strings.Contains(be.msg, "cabled") {
+			t.Errorf("%q: blamed the cable: %s", out, be.msg)
+		}
+	}
+	if got := cleanIpmitoolOutput("IANA PEN registry open failed: No such file or directory\r\nChassis Power is on\r\n", ""); got != "Chassis Power is on" {
+		t.Fatal(got)
+	}
+	if got := cleanIpmitoolOutput("Error: password hunter2 rejected", "hunter2"); strings.Contains(got, "hunter2") {
+		t.Fatal(got)
 	}
 }

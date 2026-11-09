@@ -288,10 +288,7 @@ func (b *BMCRelay) ipmitool(ctx context.Context, t BMCTarget, action string) (st
 	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 	out, err := b.Run(ctx, path, IpmitoolArgs(t, action), []string{"IPMI_PASSWORD=" + pw})
-	text := strings.TrimSpace(strings.ReplaceAll(string(out), pw, "***"))
-	if len(text) > 300 {
-		text = text[:300]
-	}
+	text := cleanIpmitoolOutput(string(out), pw)
 	switch {
 	case ctx.Err() != nil:
 		return "", bmcErr(504, "bmc_unreachable", "the BMC at %s did not answer within 15 s (is the relay cabled to it?)", t.Host)
@@ -302,16 +299,84 @@ func (b *BMCRelay) ipmitool(ctx context.Context, t BMCTarget, action string) (st
 	case err == nil:
 		return "", bmcErr(502, "bmc_error", "unexpected answer from ipmitool: %s", text)
 	}
-	l := strings.ToLower(text)
-	switch {
-	case strings.Contains(l, "unauthorized") || strings.Contains(l, "rakp") || strings.Contains(l, "password") ||
-		strings.Contains(l, "invalid user") || strings.Contains(l, "authentication"):
-		return "", bmcErr(502, "bmc_refused", "the BMC at %s refused the login (user, password or cipher_suite): %s", t.Host, text)
-	case strings.Contains(l, "unable to establish") || strings.Contains(l, "timeout") || strings.Contains(l, "no route") ||
-		strings.Contains(l, "unreachable"):
-		return "", bmcErr(502, "bmc_unreachable", "the BMC at %s is not reachable (is the relay cabled to it?): %s", t.Host, text)
+	return "", classifyIpmitool(t, text)
+}
+
+// ianaPENRe matches ipmitool's warning that it cannot read the IANA enterprise numbers file (newer ipmitool on
+// systems without /usr/share/misc/enterprise-numbers, and every Windows build). It says nothing about the BMC.
+var ianaPENRe = regexp.MustCompile(`(?i)\biana\b.*\b(pen|enterprise)\b|enterprise-numbers`)
+
+// cleanIpmitoolOutput drops the IANA PEN warning lines and empty lines, hides the password, and keeps at most
+// 300 characters.
+func cleanIpmitoolOutput(out, pw string) string {
+	if pw != "" {
+		out = strings.ReplaceAll(out, pw, "***")
 	}
-	return "", bmcErr(502, "bmc_error", "ipmitool failed: %s", text)
+	var keep []string
+	for _, l := range strings.Split(strings.ReplaceAll(out, "\r\n", "\n"), "\n") {
+		l = strings.TrimSpace(l)
+		if l == "" || ianaPENRe.MatchString(l) {
+			continue
+		}
+		keep = append(keep, l)
+	}
+	text := strings.Join(keep, "; ")
+	if len(text) > 300 {
+		text = text[:300]
+	}
+	return text
+}
+
+func containsAny(s string, subs ...string) bool {
+	for _, x := range subs {
+		if strings.Contains(s, x) {
+			return true
+		}
+	}
+	return false
+}
+
+// classifyIpmitool turns a failed ipmitool run into an error the panel can show. "Unable to establish IPMI v2 /
+// RMCP+ session" is ipmitool's last line for almost every failure, so the specific line before it decides:
+// a refused role / privilege, a cipher suite the BMC does not offer, a wrong user or password, a BMC out of
+// sessions. Only when nothing more specific is there (or ipmitool says so) is the BMC called unreachable.
+func classifyIpmitool(t BMCTarget, text string) error {
+	l := strings.ToLower(text)
+	suite := "ipmitool's default"
+	if t.CipherSuite != nil {
+		suite = strconv.Itoa(*t.CipherSuite)
+	}
+	switch {
+	case containsAny(l, "invalid role", "unauthorized role", "privilege level", "insufficient privilege"):
+		return bmcErr(502, "bmc_privilege",
+			"the BMC at %s accepted the login but refused the privilege level: ipmitool asks for ADMINISTRATOR; give the BMC user %q the Administrator role (or an Operator user allowed chassis power control). ipmitool said: %s",
+			t.Host, t.Username, text)
+	case containsAny(l, "cipher suite", "no matching", "invalid authentication algorithm", "invalid integrity algorithm",
+		"invalid confidentiality algorithm", "unsupported cipher"):
+		return bmcErr(502, "bmc_cipher",
+			"the BMC at %s does not accept cipher suite %s: set cipher_suite to one it offers (Supermicro: 3 or 17). ipmitool said: %s",
+			t.Host, suite, text)
+	case containsAny(l, "unauthorized name", "invalid name length", "invalid user", "hmac is invalid",
+		"password", "unauthorized", "authentication", "invalid integrity check value", "unknown user"):
+		return bmcErr(502, "bmc_refused",
+			"the BMC at %s refused the login: check the user name %q and the password in %s. ipmitool said: %s",
+			t.Host, t.Username, t.PasswordEnv, text)
+	case containsAny(l, "insufficient resources", "no session slot", "session limit"):
+		return bmcErr(502, "bmc_busy",
+			"the BMC at %s has no free session (too many open logins): try again in a minute. ipmitool said: %s", t.Host, text)
+	case containsAny(l, "invalid session", "inactive session", "session id", "session challenge", "activate session"):
+		return bmcErr(502, "bmc_session",
+			"the BMC at %s dropped the IPMI session (it answered, so it is reachable): try again; if it repeats, reset the BMC or try another cipher_suite. ipmitool said: %s",
+			t.Host, text)
+	case containsAny(l, "no route", "unreachable", "timeout", "timed out", "no response", "connection refused",
+		"address lookup", "unknown host", "get auth capabilities"):
+		return bmcErr(502, "bmc_unreachable", "the BMC at %s is not reachable (is the relay cabled to it?): %s", t.Host, text)
+	case strings.Contains(l, "unable to establish"):
+		return bmcErr(502, "bmc_unreachable",
+			"no IPMI session with the BMC at %s: either it does not answer (is the relay cabled to it?) or it silently refused the login (user, password, cipher_suite). ipmitool said: %s",
+			t.Host, text)
+	}
+	return bmcErr(502, "bmc_error", "ipmitool failed: %s", text)
 }
 
 // ---- Redfish

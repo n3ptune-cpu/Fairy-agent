@@ -352,6 +352,13 @@ BMC addresses are accepted. Two backends per target:
   certificate is pinned by SHA-256: `tls_fingerprint` if given, else learned on the first successful call
   ("trust on first use", logged with the fingerprint) and kept in the agent's state folder (`bmc-pins.json`).
 
+When ipmitool fails, the panel shows what went wrong (the `code` in the answer): `bmc_refused` (wrong user name
+or password), `bmc_privilege` (the login worked but the BMC refused the ADMINISTRATOR privilege ipmitool asks
+for, "invalid role": give the BMC user the Administrator role), `bmc_cipher` (the BMC does not offer that
+`cipher_suite`), `bmc_busy` (no free session on the BMC), `bmc_session` (the session broke off) and
+`bmc_unreachable` (no answer: is the relay cabled to it?). ipmitool's "IANA PEN registry open failed" warning is
+left out of the message; it says nothing about the BMC.
+
 ```yaml
 bmc_relay:
   enabled: true
