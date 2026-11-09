@@ -420,15 +420,23 @@ start (busy % and VRAM in use showed "–"), and the start-up log lists every DX
 and location. Nothing to install; `gpu: windows: off` switches it off.
 
 Radeon temperature and watts on Windows come from AMD's own library, ADL (`atiadlxx.dll` in System32, installed
-with the Adrenalin driver), read only: per card by its Overdrive version, the PMLog sensors on Navi and newer
-(edge temperature, board or ASIC power: e.g. RX 5600 XT), OverdriveN / Overdrive 6 / 5 calls on older cards.
-Only "Get" functions are called (no overclocking or fan settings are touched), no driver of our own is loaded
-and nothing is read from other processes. Cards are matched to the DXGI list by PCI location; the panel then
-shows them "via AMD". Without the DLL, or when a call fails, the card keeps load and VRAM only. agent.log has
-one line at start, `AMD GPU sensors (ADL)`, with what ADL answered: the DLL and `ADL2_Main_Control_Create`'s
-return code (or why no DLL could be used), the number of ADL adapters (or the error code), per adapter its
-index, PCI location, vendor, present / exist and the Overdrive answer (version or ADL error code), and how many
-cards are read. `gpu: amd_adl: off` switches it off. Untested on real AMD hardware so far.
+with the Adrenalin driver), read only: per card the temperature calls its Overdrive version suggests, the first
+that answers is remembered: the PMLog sensors on Navi and newer (edge temperature, board or ASIC power: e.g.
+RX 5600 XT), then OverdriveN / Overdrive 6; OverdriveN / Overdrive 6 / 5 calls on older cards; all of them
+when `ADL2_Overdrive_Caps` does not answer. Only "Get" functions are called (no overclocking or fan settings
+are touched), no driver of our own is loaded and nothing is read from other processes. ADL is opened for all
+adapters, not only those driving a display: the agent runs as a service in session 0, where ADL reports the
+Radeon `present=false` (it is still used when `exist=true`). ADL writes AMD's vendor id as decimal 1002
+(0.5.2 logged it as `vendor=03ea` and skipped the card; fixed in 0.5.3). ADL lists one entry per display output
+or logical adapter; they are grouped by PCI location, and the card is matched to the DXGI GPU by that location
+(from D3DKMT; a GPU whose location Windows does not give gets the one ADL card left over, if it is the only
+such GPU). The panel then shows it "via AMD". Without the DLL, or when no call answers, the card keeps load and
+VRAM only. agent.log has one line at start, `AMD GPU sensors (ADL)`, with what ADL answered: the DLL and
+`ADL2_Main_Control_Create`'s return code (or why no DLL could be used), the number of ADL adapters (or the
+error code), per adapter its index, PCI location, vendor, present / exist, the Overdrive answer (version or ADL
+error code) and which temperature call answered with what (`temp=PMLog 52.0C`, or `temp=none (...)` with each
+call's error), "same card" for further entries of a card, the number of cards read and `temp_api` per card.
+`gpu: amd_adl: off` switches it off. Untested on real AMD hardware so far.
 
 If the firewall on the machine is on (nftables/ufw), allow TCP 9101 only on `tailscale0`, e.g.
 `ufw allow in on tailscale0 to any port 9101 proto tcp`.

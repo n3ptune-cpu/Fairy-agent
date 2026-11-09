@@ -207,6 +207,19 @@ and the `AMD GPU sensors (ADL)` line (send it: it says why there is no Radeon te
 LocalService PCs (ESCOFFIER, VARESA): `& "C:\Program Files\Fairy\fairy-agent.exe" setup-self-update` as
 Administrator moves them and adds the group in one go. `uninstall` removes the membership again.
 
+## 11. Radeon temperature through ADL (0.5.3, build 14)
+
+On STWS-VARESA (RX 5600 XT, `NT SERVICE\fairy-agent`): press **Update**, then
+
+```powershell
+Get-Content C:\ProgramData\fairy-agent\logs\agent.log | Select-String "ADL"
+```
+
+Expected: `opened="atiadlxx.dll, ADL2_Main_Control_Create=0 (all adapters)"`, per adapter `vendor=1002` (0.5.2
+said `03ea` and `skipped`), the first `2d:00.0` entry with `overdrive=8 temp=PMLog <n>C` (or `temp=OverdriveN`),
+the others `same card`, `cards=1` and `temp_api="[2d:00.0 PMLog]"`. The panel shows the card "via AMD" with a
+temperature (and watts with PMLog). If it says `temp=none (...)`, send the line: it holds each call's ADL error.
+
 ## Rollback (back to build 10 / v0.4.4)
 
 0.4.4 does not know the helper or the new account, so remove 0.5's services first. Config and tokens stay, the
