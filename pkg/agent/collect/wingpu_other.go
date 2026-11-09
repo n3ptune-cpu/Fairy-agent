@@ -11,7 +11,10 @@ import (
 type WinGPU struct{}
 
 // NewWinGPU is nil off Windows.
-func NewWinGPU(time.Duration, bool) *WinGPU { return nil }
+func NewWinGPU(time.Duration, bool, bool) *WinGPU { return nil }
+
+// AMDCards lists nothing.
+func (*WinGPU) AMDCards() []string { return nil }
 
 // Names lists nothing.
 func (*WinGPU) Names() []string { return nil }

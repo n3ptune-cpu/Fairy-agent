@@ -73,3 +73,52 @@ func TestWinGPUs(t *testing.T) {
 		t.Fatal(LUIDKey(0, 0xc1a3))
 	}
 }
+
+// STWS-VARESA (Windows 10 IoT LTSC 21H2, one RX 5600 XT): DXGI lists the card three times with three LUIDs, the
+// GPU counters know only one of them. The card is shown once, with the live readings.
+func TestPhysicalAdaptersOneCardThreeDXGIEntries(t *testing.T) {
+	rx := func(luid string, loc *PCILoc) WinAdapter {
+		return WinAdapter{Name: "AMD Radeon RX 5600 XT", VendorID: 0x1002, DeviceID: 0x731f, SubSysID: 0x04e41da2, Revision: 0xca,
+			VRAMTotal: 6 << 30, LUID: luid, Loc: loc}
+	}
+	live := "0x00000000_0x0001A2B3"
+	pdhNames := []string{"pid_1200_luid_0x00000000_0x0001a2b3_phys_0_eng_0_engtype_3D", "luid_0x00000000_0x0001A2B3_phys_0"}
+	present := CounterLUIDs(pdhNames)
+	at := &PCILoc{Bus: 0x0b}
+	for _, tc := range []struct {
+		name string
+		all  []WinAdapter
+	}{
+		{"same PCI location", []WinAdapter{rx("0x00000000_0x0000C001", at), rx("0x00000000_0x0000C002", at), rx(live, at)}},
+		{"leftover LUIDs Windows cannot open (no location)", []WinAdapter{rx("0x00000000_0x0000C001", nil), rx("0x00000000_0x0000C002", nil), rx(live, at)}},
+		{"no location at all", []WinAdapter{rx("0x00000000_0x0000C001", nil), rx("0x00000000_0x0000C002", nil), rx(live, nil)}},
+	} {
+		got := PhysicalAdapters(tc.all, present)
+		if len(got) != 1 || got[0].LUID != live {
+			t.Fatalf("%s: %+v", tc.name, got)
+		}
+		g := WinGPUs(got, EngineUtil(pdhNames, []float64{43, 0}), AdapterMemory(pdhNames, []float64{0, 1.7 * (1 << 30)}))
+		if len(g) != 1 || *g[0].UtilPercent != 43 || g[0].VRAMUsed == nil || g[0].Index != 0 {
+			t.Fatalf("%s: %+v", tc.name, g)
+		}
+	}
+	// before the counters are read: one entry per PCI location
+	if got := PhysicalAdapters([]WinAdapter{rx("0x00000000_0x0000C001", at), rx(live, at)}, nil); len(got) != 1 {
+		t.Fatal("not read yet", got)
+	}
+	// two identical cards in two slots stay two, and so do two that both have counters
+	other := &PCILoc{Bus: 0x0c}
+	second := "0x00000000_0x0002B3C4"
+	both := map[string]bool{live: true, second: true}
+	if got := PhysicalAdapters([]WinAdapter{rx(live, at), rx(second, other)}, both); len(got) != 2 {
+		t.Fatal("two cards", got)
+	}
+	if got := PhysicalAdapters([]WinAdapter{rx(live, nil), rx(second, nil), rx("0x00000000_0x0000C001", nil)}, both); len(got) != 2 {
+		t.Fatal("two live cards without locations", got)
+	}
+	// different cards are never merged
+	intel := WinAdapter{Name: "Intel(R) UHD Graphics 770", VendorID: 0x8086, DeviceID: 0x4680, LUID: "0x00000000_0x00001111"}
+	if got := PhysicalAdapters([]WinAdapter{rx(live, at), intel}, present); len(got) != 2 {
+		t.Fatal("AMD + Intel", got)
+	}
+}

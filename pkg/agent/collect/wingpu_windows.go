@@ -10,6 +10,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"slices"
 	"sync"
 	"syscall"
 	"time"
@@ -22,7 +23,50 @@ var (
 	dxgi                   = windows.NewLazySystemDLL("dxgi.dll")
 	procCreateDXGIFactory1 = dxgi.NewProc("CreateDXGIFactory1")
 	iidIDXGIFactory1       = windows.GUID{Data1: 0x770aae78, Data2: 0xf26f, Data3: 0x4dba, Data4: [8]byte{0xa8, 0x29, 0x25, 0x3c, 0x83, 0xd1, 0xb3, 0x87}}
+
+	// D3DKMT (gdi32, documented in d3dkmthk.h): only to read an adapter's PCI location from its LUID.
+	gdi32                         = windows.NewLazySystemDLL("gdi32.dll")
+	procD3DKMTOpenAdapterFromLuid = gdi32.NewProc("D3DKMTOpenAdapterFromLuid")
+	procD3DKMTQueryAdapterInfo    = gdi32.NewProc("D3DKMTQueryAdapterInfo")
+	procD3DKMTCloseAdapter        = gdi32.NewProc("D3DKMTCloseAdapter")
 )
+
+const kmtqaiAdapterAddress = 6 // KMTQAITYPE_ADAPTERADDRESS -> D3DKMT_ADAPTERADDRESS
+
+type d3dkmtOpenAdapterFromLUID struct {
+	LUIDLow  uint32
+	LUIDHigh int32
+	Adapter  uint32
+}
+
+type d3dkmtQueryAdapterInfo struct {
+	Adapter  uint32
+	Type     uint32
+	Data     uintptr
+	DataSize uint32
+	_        uint32
+}
+
+type d3dkmtAdapterAddress struct{ Bus, Device, Function uint32 }
+
+// adapterLocation is the PCI bus / device / function of the adapter with this LUID (nil when Windows cannot
+// open it, e.g. a leftover LUID).
+func adapterLocation(high int32, low uint32) *PCILoc {
+	if procD3DKMTOpenAdapterFromLuid.Find() != nil || procD3DKMTQueryAdapterInfo.Find() != nil || procD3DKMTCloseAdapter.Find() != nil {
+		return nil
+	}
+	o := d3dkmtOpenAdapterFromLUID{LUIDLow: low, LUIDHigh: high}
+	if r, _, _ := procD3DKMTOpenAdapterFromLuid.Call(uintptr(unsafe.Pointer(&o))); r != 0 {
+		return nil
+	}
+	defer procD3DKMTCloseAdapter.Call(uintptr(unsafe.Pointer(&o.Adapter)))
+	var addr d3dkmtAdapterAddress
+	q := d3dkmtQueryAdapterInfo{Adapter: o.Adapter, Type: kmtqaiAdapterAddress, Data: uintptr(unsafe.Pointer(&addr)), DataSize: uint32(unsafe.Sizeof(addr))}
+	if r, _, _ := procD3DKMTQueryAdapterInfo.Call(uintptr(unsafe.Pointer(&q))); r != 0 {
+		return nil
+	}
+	return &PCILoc{Bus: addr.Bus, Device: addr.Device, Function: addr.Function}
+}
 
 const (
 	dxgiErrorNotFound       = 0x887A0002
@@ -79,7 +123,9 @@ func DXGIAdapters() ([]WinAdapter, error) {
 			continue
 		}
 		out = append(out, WinAdapter{Name: windows.UTF16ToString(d.Description[:]), VendorID: d.VendorID,
-			VRAMTotal: int64(d.DedicatedVideoMemory), LUID: LUIDKey(d.LUIDHigh, d.LUIDLow), Software: d.Flags&dxgiAdapterFlagSoftware != 0})
+			DeviceID: d.DeviceID, SubSysID: d.SubSysID, Revision: d.Revision,
+			VRAMTotal: int64(d.DedicatedVideoMemory), LUID: LUIDKey(d.LUIDHigh, d.LUIDLow), Software: d.Flags&dxgiAdapterFlagSoftware != 0,
+			Loc: adapterLocation(d.LUIDHigh, d.LUIDLow)})
 	}
 	return out, nil
 }
@@ -95,11 +141,12 @@ type WinGPU struct {
 	eng, mem *pdhQuery
 	gpus     []GPU
 	at       time.Time
+	amd      *AMDSensors // Radeon temperature / watts through ADL (nil: off, not installed or no Overdrive)
 }
 
 // NewWinGPU returns the reader, or nil when there is no adapter to report (none, only the Basic Render Driver,
-// or only NVIDIA cards that nvidia-smi reports).
-func NewWinGPU(interval time.Duration, nvidiaSMI bool) *WinGPU {
+// or only NVIDIA cards that nvidia-smi reports). amdADL adds Radeon temperature / watts from AMD's ADL.
+func NewWinGPU(interval time.Duration, nvidiaSMI, amdADL bool) *WinGPU {
 	all, err := DXGIAdapters()
 	if err != nil {
 		slog.Info("GPUs via Windows: adapters not readable", "error", err)
@@ -115,7 +162,22 @@ func NewWinGPU(interval time.Duration, nvidiaSMI bool) *WinGPU {
 	w := &WinGPU{interval: interval, nvidiaSMI: nvidiaSMI, adapters: shown, listedAt: time.Now()}
 	w.eng, _ = newPDHQuery(`\GPU Engine(*)\Utilization Percentage`)
 	w.mem, _ = newPDHQuery(`\GPU Adapter Memory(*)\Dedicated Usage`)
+	if amdADL && slices.ContainsFunc(shown, func(a WinAdapter) bool { return a.VendorID == 0x1002 }) {
+		if lib, err := OpenADL(); err != nil {
+			slog.Debug("AMD GPU sensors (ADL): not available; showing load and VRAM only", "error", err)
+		} else {
+			w.amd = NewAMDSensors(lib)
+		}
+	}
 	return w
+}
+
+// AMDCards lists the Radeon cards read through ADL (for the start-up log).
+func (w *WinGPU) AMDCards() []string {
+	if w.amd == nil {
+		return nil
+	}
+	return w.amd.Cards()
 }
 
 // Names lists the reported adapters (for the start-up log).
@@ -123,7 +185,7 @@ func (w *WinGPU) Names() []string {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	var n []string
-	for _, a := range w.adapters {
+	for _, a := range PhysicalAdapters(w.adapters, nil) {
 		n = append(n, a.Name)
 	}
 	return n
@@ -154,19 +216,31 @@ func (w *WinGPU) GPUs() []GPU {
 	}
 	var util map[string]float64
 	var mem map[string]int64
+	var present map[string]bool
 	if w.eng != nil {
 		if v, err := w.eng.values(); err == nil {
-			util = EngineUtil(split(v))
+			names, values := split(v)
+			util, present = EngineUtil(names, values), CounterLUIDs(names)
 		} else if w.gpus != nil {
 			util = map[string]float64{} // collected before, no busy engine now
 		}
 	}
 	if w.mem != nil {
 		if v, err := w.mem.values(); err == nil {
-			mem = AdapterMemory(split(v))
+			names, values := split(v)
+			mem = AdapterMemory(names, values)
+			if present == nil {
+				present = map[string]bool{}
+			}
+			for k := range CounterLUIDs(names) {
+				present[k] = true
+			}
 		}
 	}
-	w.gpus, w.at = WinGPUs(w.adapters, util, mem), time.Now()
+	w.gpus, w.at = WinGPUs(PhysicalAdapters(w.adapters, present), util, mem), time.Now()
+	if w.amd != nil {
+		w.amd.Attach(w.gpus)
+	}
 	return w.gpus
 }
 

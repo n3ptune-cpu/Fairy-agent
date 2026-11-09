@@ -192,10 +192,20 @@ that Linux has put to sleep is shown as idle and not woken up just to read it.
 On Windows, AMD, Intel and other graphics (cards and built-in) come from what Windows itself reports, the
 same numbers as Task Manager: the adapter's name and dedicated VRAM from DXGI, and its busy % and VRAM in use
 from the "GPU Engine" and "GPU Adapter Memory" performance counters. Busy % is Task Manager's: the busiest
-engine (3D, compute, video, copy...). There is no temperature or watts (that would need AMD's or Intel's own
-libraries); the panel shows these cards "via Windows". NVIDIA cards stay with nvidia-smi (they are not listed
-twice) and the Microsoft Basic Render Driver is left out. Nothing to install; `gpu: windows: off` switches it
-off.
+engine (3D, compute, video, copy...). The panel shows these cards "via Windows". NVIDIA cards stay with
+nvidia-smi (they are not listed twice) and the Microsoft Basic Render Driver is left out. A card is listed once
+even when DXGI reports it several times (some Windows 10 LTSC machines list one Radeon three times, with
+leftover adapter ids): entries with the same PCI ids at the same PCI location (read from the adapter id through
+D3DKMT) are one card, and the entry the GPU counters know is kept; two identical cards in two slots stay two.
+Nothing to install; `gpu: windows: off` switches it off.
+
+Radeon temperature and watts on Windows come from AMD's own library, ADL (`atiadlxx.dll` in System32, installed
+with the Adrenalin driver), read only: per card by its Overdrive version, the PMLog sensors on Navi and newer
+(edge temperature, board or ASIC power: e.g. RX 5600 XT), OverdriveN / Overdrive 6 / 5 calls on older cards.
+Only "Get" functions are called (no overclocking or fan settings are touched), no driver of our own is loaded
+and nothing is read from other processes. Cards are matched to the DXGI list by PCI location; the panel then
+shows them "via AMD". Without the DLL, or when a call fails, the card keeps load and VRAM only (logged once at
+debug level). `gpu: amd_adl: off` switches it off. Untested on real AMD hardware so far.
 
 If the firewall on the machine is on (nftables/ufw), allow TCP 9101 only on `tailscale0`, e.g.
 `ufw allow in on tailscale0 to any port 9101 proto tcp`.
@@ -449,6 +459,7 @@ The file is `C:\ProgramData\fairy-agent\config.yaml` (Windows) or `/etc/fairy-ag
 | `gpu.nvidia_smi` | auto | `off` or a full path |
 | `gpu.amdgpu` | auto | Linux: AMD GPUs through the amdgpu driver's sysfs files; `off` to switch off |
 | `gpu.windows` | auto | Windows: AMD / Intel / other GPUs from Windows' GPU counters; `off` to switch off |
+| `gpu.amd_adl` | auto | Windows: Radeon temperature and watts from AMD's ADL (Adrenalin driver), read only; `off` to switch off |
 | `sensors.coretemp` | false | Windows: CPU core temperatures and watts from Core Temp (see [Core Temp](#core-temp-optional-windows)) |
 | `ipmi`, `fan_control`, `power_control`, `wol` | off | see [Optional features](#optional-features) |
 | `self_update.enabled`, `self_update.repo` | off, `n3ptune-cpu/Fairy-agent` | see [Updates](#updates-the-panels-update-button) |

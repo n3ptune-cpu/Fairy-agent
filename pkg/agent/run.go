@@ -124,9 +124,9 @@ func Run(ctx context.Context, cfg *Config, b Build) error {
 	}
 	if cfg.GPU.Windows == "auto" && runtime.GOOS == "windows" {
 		// AMD, Intel and other cards from Windows' own GPU counters (NVIDIA ones stay with nvidia-smi)
-		if wg := collect.NewWinGPU(time.Duration(cfg.GPU.IntervalS*float64(time.Second)), d.GPU != nil); wg != nil {
+		if wg := collect.NewWinGPU(time.Duration(cfg.GPU.IntervalS*float64(time.Second)), d.GPU != nil, cfg.GPU.AMDADL == "auto"); wg != nil {
 			d.GPU = CombineGPUs(d.GPU, wg)
-			slog.Info("GPUs via Windows (DXGI + GPU counters)", "adapters", wg.Names())
+			slog.Info("GPUs via Windows (DXGI + GPU counters)", "adapters", wg.Names(), "amd_adl", wg.AMDCards())
 		}
 	}
 	var a *Agent

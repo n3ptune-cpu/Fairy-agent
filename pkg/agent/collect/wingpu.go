@@ -19,11 +19,23 @@ import (
 
 // WinAdapter is one display adapter as DXGI describes it.
 type WinAdapter struct {
-	Name      string
-	VendorID  uint32
-	VRAMTotal int64  // dedicated video memory, bytes (0: none / shared only)
-	LUID      string // "0x<hi>_0x<lo>", upper-case hex, as in PDH instance names
-	Software  bool   // Microsoft Basic Render Driver and other software adapters
+	Name                         string
+	VendorID                     uint32
+	DeviceID, SubSysID, Revision uint32
+	VRAMTotal                    int64  // dedicated video memory, bytes (0: none / shared only)
+	LUID                         string // "0x<hi>_0x<lo>", upper-case hex, as in PDH instance names
+	Software                     bool   // Microsoft Basic Render Driver and other software adapters
+	Loc                          *PCILoc
+}
+
+// PCILoc is where a card sits on the PCI bus (from the adapter's LUID; nil when Windows would not say).
+type PCILoc struct{ Bus, Device, Function uint32 }
+
+func (l *PCILoc) String() string {
+	if l == nil {
+		return ""
+	}
+	return fmt.Sprintf("%02x:%02x.%x", l.Bus, l.Device, l.Function)
 }
 
 // normLUID writes a LUID from a counter name like LUIDKey does (hex digits upper-case, "0x" prefixes).
@@ -107,6 +119,67 @@ func ShownAdapters(all []WinAdapter, nvidiaSMI bool) []WinAdapter {
 	return out
 }
 
+// CounterLUIDs is the set of adapter LUIDs that have instances in the GPU counters (engine or adapter memory):
+// what Windows really drives. An adapter DXGI lists without any is a leftover entry (seen on Windows 10 LTSC with
+// an RX 5600 XT: three DXGI entries, one card, counters for one LUID only).
+func CounterLUIDs(names ...[]string) map[string]bool {
+	out := map[string]bool{}
+	for _, list := range names {
+		for _, n := range list {
+			if m := engineRe.FindStringSubmatch(n); m != nil {
+				out[normLUID(m[1])] = true
+			} else if m := memRe.FindStringSubmatch(n); m != nil {
+				out[normLUID(m[1])] = true
+			}
+		}
+	}
+	return out
+}
+
+// PhysicalAdapters lists each physical card once. Entries with the same PCI ids (vendor, device, subsystem,
+// revision) are the same card when they sit at the same PCI location, or when the location of either is unknown;
+// of these the one with GPU counters (present; nil: not read yet) is kept, else the first. Two identical cards at
+// different PCI locations both stay, and so does any entry that has counters of its own.
+func PhysicalAdapters(all []WinAdapter, present map[string]bool) []WinAdapter {
+	type group struct {
+		ids  string
+		loc  string // "" unknown
+		pick int    // index in out
+	}
+	var out []WinAdapter
+	var groups []group
+	has := func(a WinAdapter) bool { return present != nil && present[a.LUID] }
+	for _, a := range all {
+		ids := fmt.Sprintf("%04x:%04x:%08x:%02x", a.VendorID, a.DeviceID, a.SubSysID, a.Revision)
+		loc := a.Loc.String()
+		matched := -1
+		for gi, g := range groups {
+			if g.ids != ids || (loc != "" && g.loc != "" && g.loc != loc) {
+				continue
+			}
+			kept := out[g.pick]
+			if has(a) && has(kept) && kept.LUID != a.LUID && (loc == "" || g.loc == "") {
+				continue // both really driven by Windows: two cards whose location is unknown
+			}
+			matched = gi
+			break
+		}
+		if matched < 0 {
+			groups = append(groups, group{ids: ids, loc: loc, pick: len(out)})
+			out = append(out, a)
+			continue
+		}
+		g := &groups[matched]
+		if has(a) && !has(out[g.pick]) { // the entry Windows really drives replaces a leftover
+			out[g.pick] = a
+		}
+		if g.loc == "" && loc != "" && out[g.pick].LUID == a.LUID {
+			g.loc = loc
+		}
+	}
+	return out
+}
+
 // WinGPUs builds the GPU list from the adapters and the latest counter values (nil maps: not read yet).
 func WinGPUs(adapters []WinAdapter, util map[string]float64, mem map[string]int64) []GPU {
 	gpus := make([]GPU, 0, len(adapters))
@@ -119,6 +192,7 @@ func WinGPUs(adapters []WinAdapter, util map[string]float64, mem map[string]int6
 			v := Round(util[a.LUID], 1) // an adapter without busy engines has no instances: 0 %
 			g.UtilPercent = &v
 		}
+		g.loc = a.Loc
 		if b, ok := mem[a.LUID]; ok {
 			g.VRAMUsed = P(b)
 		}

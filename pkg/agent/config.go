@@ -85,6 +85,7 @@ type GPUConfig struct {
 	NvidiaSMI string  `yaml:"nvidia_smi"` // "auto" (default), "off", or the path to nvidia-smi
 	AMDGPU    string  `yaml:"amdgpu"`     // Linux: "auto" (default: on when an amdgpu card exists) or "off"
 	Windows   string  `yaml:"windows"`    // Windows: "auto" (default: AMD / Intel / other GPUs from Windows' own counters) or "off"
+	AMDADL    string  `yaml:"amd_adl"`    // Windows: "auto" (default: Radeon temperature / watts from AMD's ADL, if installed) or "off"
 	IntervalS float64 `yaml:"interval_s"` // default 2
 }
 
@@ -230,6 +231,9 @@ func (c *Config) defaults() {
 	if c.GPU.AMDGPU == "" {
 		c.GPU.AMDGPU = "auto"
 	}
+	if c.GPU.AMDADL == "" {
+		c.GPU.AMDADL = "auto"
+	}
 	if c.GPU.Windows == "" {
 		c.GPU.Windows = "auto"
 	}
@@ -293,6 +297,9 @@ func (c *Config) Validate() error {
 	}
 	if c.GPU.Windows != "auto" && c.GPU.Windows != "off" {
 		add("gpu.windows must be auto or off")
+	}
+	if c.GPU.AMDADL != "auto" && c.GPU.AMDADL != "off" {
+		add("gpu.amd_adl must be auto or off")
 	}
 	if c.GPU.IntervalS < 1 || c.GPU.IntervalS > 60 {
 		add("gpu.interval_s must be 1-60")
