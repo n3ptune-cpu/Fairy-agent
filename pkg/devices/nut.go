@@ -3,11 +3,42 @@ package devices
 import (
 	"bufio"
 	"context"
+	"errors"
+	"io"
 	"net"
 	"strconv"
 	"strings"
 	"time"
 )
+
+// Limits on what an upsd may send (a broken or hostile one must not exhaust the agent's or the panel's memory):
+// upsd's own lines are a few hundred bytes, a full LIST VAR a few kilobytes.
+const (
+	NUTMaxLine  = 4096    // one reply line
+	NUTMaxReply = 1 << 20 // everything read over one connection
+	NUTMaxUPS   = 64      // UPSes taken from LIST UPS
+	NUTMaxLines = 5000    // lines in one LIST reply
+)
+
+var errNUTTooLarge = errors.New("nut: reply too large")
+
+// capReader fails once more than n bytes have been read.
+type capReader struct {
+	r io.Reader
+	n int64
+}
+
+func (c *capReader) Read(p []byte) (int, error) {
+	if c.n <= 0 {
+		return 0, errNUTTooLarge
+	}
+	if int64(len(p)) > c.n {
+		p = p[:c.n]
+	}
+	k, err := c.r.Read(p)
+	c.n -= int64(k)
+	return k, err
+}
 
 func nutUnescape(v string) string {
 	return strings.ReplaceAll(strings.ReplaceAll(v, `\"`, `"`), `\\`, `\`)
@@ -57,13 +88,16 @@ func (n *nutConn) cmd(line string) error {
 }
 
 func (n *nutConn) readline() (string, error) {
-	raw, err := n.r.ReadString('\n')
-	if err != nil {
-		if raw == "" {
-			return "", Errf("nut: connection closed")
-		}
+	b, err := n.r.ReadSlice('\n')
+	switch {
+	case errors.Is(err, bufio.ErrBufferFull):
+		return "", Errf("nut: reply line longer than %d bytes", NUTMaxLine)
+	case errors.Is(err, errNUTTooLarge):
+		return "", Errf("nut: reply larger than %d bytes", NUTMaxReply)
+	case err != nil && len(b) == 0:
+		return "", Errf("nut: connection closed")
 	}
-	text := strings.TrimRight(raw, "\r\n")
+	text := strings.TrimRight(string(b), "\r\n")
 	if strings.HasPrefix(text, "ERR") {
 		return "", Errf("nut: %s", text)
 	}
@@ -91,7 +125,7 @@ func (n *nutConn) listing(what string) ([]string, error) {
 			return lines, nil
 		}
 		lines = append(lines, l)
-		if len(lines) > 5000 {
+		if len(lines) > NUTMaxLines {
 			return nil, Errf("nut: reply too long")
 		}
 	}
@@ -107,7 +141,7 @@ func NUTReadAll(ctx context.Context, host string, port int, username, password s
 	}
 	defer c.Close()
 	_ = c.SetDeadline(time.Now().Add(timeout + 2*time.Second))
-	n := &nutConn{c: c, r: bufio.NewReaderSize(c, 8192)}
+	n := &nutConn{c: c, r: bufio.NewReaderSize(&capReader{r: c, n: NUTMaxReply}, NUTMaxLine)}
 	if username != "" {
 		if err := n.cmd("USERNAME " + username); err != nil {
 			return nil, Errf("connection failed")
@@ -134,7 +168,7 @@ func NUTReadAll(ctx context.Context, host string, port int, username, password s
 			return nil, err
 		}
 		for _, l := range lines {
-			if nm, desc, ok := ParseNUTUPSLine(l); ok {
+			if nm, desc, ok := ParseNUTUPSLine(l); ok && len(upses) < NUTMaxUPS {
 				upses = append(upses, pair{nm, desc})
 			}
 		}

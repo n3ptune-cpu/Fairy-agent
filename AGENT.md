@@ -636,7 +636,10 @@ are lists of devices: edit those in the file.
 * Command lines are cleaned of passwords and tokens before they leave the machine (and again by the panel).
 * The BMC relay reaches private addresses only, passes the BMC password to ipmitool only through its
   environment, pins the Redfish certificate and never logs passwords.
-* Time limits on every connection; requests are small and bounded.
+* Time limits on every connection; requests are small and bounded. What a UPS server (NUT) sends is bounded too
+  (4 KiB per line, 1 MiB per poll, 64 UPSes), so a broken or hostile upsd cannot exhaust memory.
+* The log cannot fill the disk: the log file is rotated at 5 MB (one old file kept), and the same message is
+  written at most 30 times a minute (the rest are counted: `suppressed=N` on the next one).
 * Windows: settings folder readable only by administrators, SYSTEM and the service; the program lives in
   `C:\Program Files` and only administrators / SYSTEM can change it (self-update goes through the separate
   LocalSystem updater service, which checks the signature itself). The install scripts check the program's

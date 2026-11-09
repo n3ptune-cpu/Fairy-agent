@@ -193,7 +193,8 @@ func setupLogging(cfg *agent.Config, interactive bool) (io.Closer, error) {
 			w = io.MultiWriter(f, os.Stderr)
 		}
 	}
-	slog.SetDefault(slog.New(slog.NewTextHandler(w, &slog.HandlerOptions{Level: slog.LevelInfo})))
+	// one message at most 30 times a minute (repeats are counted, not written): nothing can flood the log
+	slog.SetDefault(slog.New(agent.RateLimitLog(slog.NewTextHandler(w, &slog.HandlerOptions{Level: slog.LevelInfo}), 30)))
 	return closer, nil
 }
 
