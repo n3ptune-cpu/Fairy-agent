@@ -20,6 +20,19 @@ type FanEvent struct {
 	Detail string  `json:"detail"`
 }
 
+// FanControl is what the HTTP API needs from fan control: the in-process Fan, or (Windows) the elevated
+// helper's Fan reached over its pipe.
+type FanControl interface {
+	Status(ctx context.Context) map[string]any
+	SetMode(ctx context.Context, mode, who string) (int, map[string]any)
+	SetDuty(ctx context.Context, zone, percent int, who string) (int, map[string]any)
+}
+
+// SensorSource feeds the BMC's readings into /metrics: the in-process BMC, or (Windows) the helper's.
+type SensorSource interface {
+	Metrics() ([]collect.Temp, []collect.Fan, []collect.Voltage)
+}
+
 // Fan is Supermicro BMC fan control: read and set the fan mode, set a zone's duty in "full" mode (never below
 // MinDuty), and a watchdog that puts the fans back to 100 % when the CPU reaches MaxTempC (or when no temperature
 // can be read) while a manual duty is in effect.
@@ -167,6 +180,35 @@ func (f *Fan) SetDuty(ctx context.Context, zone, percent int, who string) (int, 
 	}
 	f.event(fmt.Sprintf("duty zone %d=%d%%", zone, percent), who)
 	return 200, map[string]any{"zone": zone, "percent": percent}
+}
+
+// Auto hands the fans back to the BMC's automatic mode: auto_mode, or "standard" when the board refuses that.
+// With force false it does so only while a fixed duty can be in effect (mode "full", or the mode cannot be
+// read); a mode the owner chose (standard, optimal, heavyio) is left alone. The Windows helper calls it when it
+// stops, so fans never keep a fixed duty without the watchdog. It returns the mode the fans are in afterwards.
+func (f *Fan) Auto(ctx context.Context, who string, force bool) (string, error) {
+	ctx, cancel := ctxTimeout(ctx)
+	defer cancel()
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	mode, err := ipmi.GetFanMode(ctx, f.t)
+	if err == nil && !force && mode != "full" {
+		return mode, nil
+	}
+	f.noTemp = 0
+	want := f.cfg.AutoMode
+	err = ipmi.SetFanMode(ctx, f.t, want)
+	if err != nil && modeUnsupported(err) && want != "standard" {
+		f.unsupported[want] = true
+		want = "standard"
+		err = ipmi.SetFanMode(ctx, f.t, want)
+	}
+	if err != nil {
+		f.event("auto failed", who+": "+safeErr(err))
+		return "", err
+	}
+	f.event("mode="+want+" (BMC automatic)", who)
+	return want, nil
 }
 
 // WatchdogInterval is how often the watchdog looks at the temperature while a manual duty is set.

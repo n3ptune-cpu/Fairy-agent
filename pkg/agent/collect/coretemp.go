@@ -43,6 +43,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/n3ptune-cpu/Fairy-agent/pkg/agent/api"
 )
 
 // Core Temp shared-memory layout (see above).
@@ -212,11 +214,24 @@ func MergeCoreTemp(s *Sample, d CoreTempData) {
 	}
 }
 
-// Errors of the platform's shared-memory reader.
+// Errors of the platform's shared-memory reader (and of the Windows helper, which reads it for the agent).
 var (
 	errCoreTempAbsent = errors.New("core temp shared memory not found")
 	errCoreTempDenied = errors.New("access denied to core temp shared memory")
+
+	// ErrCoreTempAbsent: Core Temp is not running (or its global shared memory is off).
+	ErrCoreTempAbsent = errCoreTempAbsent
+	// ErrCoreTempDenied: the shared memory exists but this account may not read it.
+	ErrCoreTempDenied = errCoreTempDenied
 )
+
+// ReadCoreTemp copies Core Temp's shared memory (Windows; an error elsewhere). The Windows helper uses it.
+func ReadCoreTemp() ([]byte, string, error) {
+	if coreTempRead == nil {
+		return nil, "", errCoreTempAbsent
+	}
+	return coreTempRead()
+}
 
 // coreTempCollector adds Core Temp's readings to another collector's samples.
 type coreTempCollector struct {
@@ -237,6 +252,16 @@ func WithCoreTemp(c Collector) Collector {
 		return c
 	}
 	return &coreTempCollector{Collector: c, read: coreTempRead}
+}
+
+// WithCoreTempReader is WithCoreTemp with another reader: on Windows the agent's low-rights account cannot
+// open Core Temp's memory, so the elevated helper copies it and read fetches that copy over the helper's pipe.
+// read returns api.ErrHelperStopped while the helper is stopped (logged once, not as a problem).
+func WithCoreTempReader(c Collector, read func() ([]byte, string, error)) Collector {
+	if read == nil {
+		return c
+	}
+	return &coreTempCollector{Collector: c, read: read}
 }
 
 // Sample reads the wrapped collector, then adds Core Temp's latest readings.
@@ -274,8 +299,10 @@ func (c *coreTempCollector) current(now time.Time) *CoreTempData {
 	switch {
 	case errors.Is(err, errCoreTempAbsent):
 		c.note("absent", slog.LevelInfo, "Core Temp is not running (or its global shared memory is off): no CPU core temperatures or package watts from it")
+	case errors.Is(err, api.ErrHelperStopped):
+		c.note("helper", slog.LevelInfo, "Core Temp readings: helper stopped (fairy-agent-helper is not running)")
 	case errors.Is(err, errCoreTempDenied):
-		c.note("denied", slog.LevelWarn, "Core Temp's shared memory exists but this account may not read it: run the service as LocalSystem (see AGENT.md, Core Temp)", "shared_memory", name)
+		c.note("denied", slog.LevelWarn, "Core Temp's shared memory exists but this account may not read it: install the helper (see AGENT.md, Core Temp)", "shared_memory", name)
 	default:
 		c.note("error", slog.LevelWarn, "Core Temp's shared memory could not be used", "error", err.Error())
 	}

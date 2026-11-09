@@ -1,5 +1,6 @@
 // Package agenttest has fakes for the agent's tests and the panel contract test: a collector that describes the
-// owner's Windows PC (Supermicro X11SCA-F, RTX 2080 SUPER), a GPU reader and a power executor.
+// owner's Windows PC (Supermicro X11SCA-F, RTX 2080 SUPER), a GPU reader, a power executor and the Windows
+// elevated helper.
 package agenttest
 
 import (
@@ -7,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/n3ptune-cpu/Fairy-agent/pkg/agent/api"
 	"github.com/n3ptune-cpu/Fairy-agent/pkg/agent/collect"
 )
 
@@ -116,4 +118,61 @@ func (p *PowerExec) Cancel() error {
 	defer p.mu.Unlock()
 	p.Cancels++
 	return nil
+}
+
+// Helper is a fake Windows elevated helper (fairy-agent-helper) for the panel's contract test: it starts
+// running; Stop and Start switch its state (NotInstalled makes both answer api.ErrHelperNotInstalled).
+type Helper struct {
+	mu           sync.Mutex
+	State        string
+	NotInstalled bool
+	Stops        int
+	Starts       int
+}
+
+// NewHelper returns a running fake helper serving Core Temp, IPMI, fans and power.
+func NewHelper() *Helper { return &Helper{State: api.HelperRunning} }
+
+// Status is the /metrics "helper" block.
+func (h *Helper) Status(context.Context) api.HelperStatus {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.status()
+}
+
+func (h *Helper) status() api.HelperStatus {
+	if h.NotInstalled {
+		return api.HelperStatus{State: api.HelperNotInstalled, Needed: true, Since: "2026-11-09T12:00:00Z"}
+	}
+	st := api.HelperStatus{State: h.State, Needed: true, Since: "2026-11-09T12:00:00Z"}
+	if h.State == api.HelperRunning {
+		wd := true
+		st.Version, st.Watchdog = "0.5.0", &wd
+		st.Features = []string{api.FeatureCoreTemp, api.FeatureIPMI, api.FeatureFans, api.FeaturePower}
+	}
+	return st
+}
+
+// Stop stops the fake.
+func (h *Helper) Stop(context.Context, string) (api.HelperStatus, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.NotInstalled {
+		return h.status(), api.ErrHelperNotInstalled
+	}
+	h.State = api.HelperStopped
+	h.Stops++
+	return h.status(), nil
+}
+
+// Start starts the fake.
+func (h *Helper) Start(context.Context, string) (api.HelperStatus, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.NotInstalled {
+		return h.status(), api.ErrHelperNotInstalled
+	}
+	h.State = api.HelperRunning
+	h.Starts++
+	return h.status(), nil
 }

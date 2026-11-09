@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"crypto/subtle"
@@ -11,12 +12,14 @@ import (
 	"net"
 	"net/http"
 	"runtime"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/n3ptune-cpu/Fairy-agent/pkg/agent/api"
 	"github.com/n3ptune-cpu/Fairy-agent/pkg/agent/collect"
 	"github.com/n3ptune-cpu/Fairy-agent/pkg/enroll"
 	"github.com/n3ptune-cpu/Fairy-agent/pkg/redact"
@@ -112,16 +115,22 @@ func (w withProcMem) ComputeApps(ctx context.Context) map[int][]int64 {
 // Deps are the parts the agent is built from (real ones in cmd/fairy-agent, fakes in tests).
 type Deps struct {
 	Collector collect.Collector
-	GPU       GPUSource // may be nil
-	BMC       *BMC      // nil unless ipmi is enabled
-	Fan       *Fan      // nil unless fan_control is enabled
-	Power     *Power    // nil unless power_control is enabled
-	WOL       *WOL      // nil unless wol is enabled
-	Relay     *Relay    // may be nil
-	Updater   *Updater  // nil unless self_update is enabled
-	BMCRelay  *BMCRelay // nil unless bmc_relay is enabled
-	Pairer    *Pairer   // POST /pair ("Add host" in the panel); nil = never answers
-	Version   string
+	GPU       GPUSource    // may be nil
+	BMC       SensorSource // nil unless ipmi is enabled (*BMC, or the Windows helper's sensors)
+	Fan       FanControl   // nil unless fan_control is enabled (*Fan, or the Windows helper's)
+	Power     *Power       // nil unless power_control is enabled
+	WOL       *WOL         // nil unless wol is enabled
+	Relay     *Relay       // may be nil
+	Updater   *Updater     // nil unless self_update is enabled
+	BMCRelay  *BMCRelay    // nil unless bmc_relay is enabled
+	Pairer    *Pairer      // POST /pair ("Add host" in the panel); nil = never answers
+	// Helper is the Windows elevated helper (fairy-agent-helper); nil on Linux. Its state goes into /metrics
+	// and /helper/stop, /helper/start control it.
+	Helper HelperControl
+	// HelperSources are the readings and actions this agent gets through the helper (api.FeatureCoreTemp ...):
+	// while the helper is not running they are listed in /metrics "unavailable".
+	HelperSources []string
+	Version       string
 }
 
 // Agent answers the panel.
@@ -273,15 +282,17 @@ type route struct {
 // Handler is the agent's HTTP handler.
 func (a *Agent) Handler() http.Handler {
 	routes := map[string]route{
-		"/metrics":    {method: http.MethodGet, h: a.metrics},
-		"/processes":  {method: http.MethodGet, h: a.processes},
-		"/fan/status": {method: http.MethodGet, h: a.fanStatus},
-		"/fan/mode":   {method: http.MethodPost, control: true, feature: func() bool { return a.d.Fan != nil }, code: "fan_control_disabled", h: a.fanMode},
-		"/fan/duty":   {method: http.MethodPost, control: true, feature: func() bool { return a.d.Fan != nil }, code: "fan_control_disabled", h: a.fanDuty},
-		"/power":      {method: http.MethodPost, control: true, feature: func() bool { return a.d.Power != nil }, code: "power_control_disabled", h: a.power},
-		"/wol":        {method: http.MethodPost, control: true, feature: func() bool { return a.d.WOL != nil }, code: "wol_disabled", h: a.wol},
-		"/update":     {method: http.MethodPost, control: true, feature: func() bool { return a.d.Updater != nil }, code: "self_update_disabled", h: a.update},
-		"/bmc/power":  {method: http.MethodPost, control: true, feature: func() bool { return a.d.BMCRelay != nil }, code: "bmc_relay_disabled", h: a.bmcPower},
+		"/metrics":          {method: http.MethodGet, h: a.metrics},
+		"/processes":        {method: http.MethodGet, h: a.processes},
+		"/fan/status":       {method: http.MethodGet, h: a.fanStatus},
+		"/fan/mode":         {method: http.MethodPost, control: true, feature: func() bool { return a.d.Fan != nil }, code: "fan_control_disabled", h: a.fanMode},
+		"/fan/duty":         {method: http.MethodPost, control: true, feature: func() bool { return a.d.Fan != nil }, code: "fan_control_disabled", h: a.fanDuty},
+		"/power":            {method: http.MethodPost, control: true, feature: func() bool { return a.d.Power != nil }, code: "power_control_disabled", h: a.power},
+		"/wol":              {method: http.MethodPost, control: true, feature: func() bool { return a.d.WOL != nil }, code: "wol_disabled", h: a.wol},
+		"/update":           {method: http.MethodPost, control: true, feature: func() bool { return a.d.Updater != nil }, code: "self_update_disabled", h: a.update},
+		"/bmc/power":        {method: http.MethodPost, control: true, feature: func() bool { return a.d.BMCRelay != nil }, code: "bmc_relay_disabled", h: a.bmcPower},
+		api.PathHelperStop:  {method: http.MethodPost, control: true, feature: a.hasHelper, h: a.helperStop},
+		api.PathHelperStart: {method: http.MethodPost, control: true, feature: a.hasHelper, h: a.helperStart},
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ip := clientIP(r)
@@ -307,6 +318,10 @@ func (a *Agent) Handler() http.Handler {
 		switch {
 		case rt.control && rt.feature():
 			authed = a.hasCtl && tokenIs(r, a.ctlH)
+		case rt.control && rt.code == "":
+			// the helper endpoints: no helper service on this machine (always so on Linux)
+			writeJSON(w, 409, map[string]any{"error": "not_installed", "code": "not_installed"})
+			return
 		case rt.control:
 			// Feature off: nothing can happen, so say so (also to a panel whose control token this agent does
 			// not know, so the panel shows "disabled" instead of "wrong token").
@@ -433,7 +448,74 @@ func (a *Agent) Metrics(ctx context.Context) map[string]any {
 	if a.d.Updater != nil {
 		m["self_update"] = a.d.Updater.Status()
 	}
+	if a.d.Helper != nil {
+		hs := a.d.Helper.Status(ctx)
+		m["helper"] = hs
+		if un := unavailable(hs, a.d.HelperSources); len(un) > 0 {
+			m["unavailable"] = un
+			if pc, ok := m["power_control"].(map[string]any); ok && slices.Contains(a.d.HelperSources, api.FeaturePower) {
+				pc["available"], pc["reason"] = false, un[0].Reason
+			}
+		}
+	}
 	return m
+}
+
+// unavailable lists the helper-backed sources while the helper is not running.
+func unavailable(hs api.HelperStatus, sources []string) []api.Unavailable {
+	if hs.Running() || len(sources) == 0 {
+		return nil
+	}
+	reason := api.ReasonHelperStopped
+	if hs.State == api.HelperError {
+		reason = api.ReasonHelperError
+	}
+	out := make([]api.Unavailable, 0, len(sources))
+	for _, s := range sources {
+		out = append(out, api.Unavailable{Source: s, Reason: reason})
+	}
+	return out
+}
+
+func (a *Agent) hasHelper() bool { return a.d.Helper != nil }
+
+// helperStop is POST /helper/stop: fans back to the BMC's automatic mode, then the helper service stops.
+func (a *Agent) helperStop(w http.ResponseWriter, r *http.Request) { a.helperControl(w, r, false) }
+
+// helperStart is POST /helper/start.
+func (a *Agent) helperStart(w http.ResponseWriter, r *http.Request) { a.helperControl(w, r, true) }
+
+func (a *Agent) helperControl(w http.ResponseWriter, r *http.Request, start bool) {
+	b, err := io.ReadAll(r.Body)
+	if err != nil {
+		writeJSON(w, 400, map[string]any{"error": "request body too large"})
+		return
+	}
+	if len(bytes.TrimSpace(b)) > 0 {
+		var v map[string]json.RawMessage
+		if json.Unmarshal(b, &v) != nil {
+			writeJSON(w, 400, map[string]any{"error": "invalid JSON body"})
+			return
+		}
+	}
+	who := "panel " + clientIP(r)
+	var st api.HelperStatus
+	if start {
+		st, err = a.d.Helper.Start(r.Context(), who)
+	} else {
+		st, err = a.d.Helper.Stop(r.Context(), who)
+	}
+	action := map[bool]string{true: "start", false: "stop"}[start]
+	switch {
+	case errors.Is(err, api.ErrHelperNotInstalled):
+		writeJSON(w, 409, map[string]any{"error": "not_installed", "code": "not_installed"})
+	case err != nil:
+		slog.Error("helper: "+action+" failed", "requested_by", who, "error", safeErr(err))
+		writeJSON(w, 502, map[string]any{"error": "could not " + action + " the helper: " + safeErr(err), "state": st.State})
+	default:
+		slog.Warn("helper: "+action, "requested_by", who, "state", st.State)
+		writeJSON(w, 200, st)
+	}
 }
 
 // Features are the panel-visible switches (the "features" block of /metrics and the /pair answer).

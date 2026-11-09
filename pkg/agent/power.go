@@ -1,12 +1,14 @@
 package agent
 
 import (
+	"errors"
 	"fmt"
 	"log/slog"
 	"regexp"
 	"sync"
 	"time"
 
+	"github.com/n3ptune-cpu/Fairy-agent/pkg/agent/api"
 	"github.com/n3ptune-cpu/Fairy-agent/pkg/agent/collect"
 )
 
@@ -19,6 +21,12 @@ type PowerExec interface {
 	Cancel() error
 	// CanSleep reports whether this machine can be put to sleep (suspend to RAM), and why not.
 	CanSleep() (ok bool, why string)
+}
+
+// powerBy is a PowerExec that wants the (cleaned) requester instead of a ready message: the Windows helper,
+// which takes no free text.
+type powerBy interface {
+	ScheduleBy(action string, delay time.Duration, who string) error
 }
 
 // Pending is the scheduled power action as /metrics and /power report it.
@@ -46,6 +54,9 @@ type Power struct {
 
 // canSleep is CanSleep, asked at most every 10 minutes. Caller holds p.mu.
 func (p *Power) canSleep() (bool, string) {
+	if _, live := p.exec.(interface{ LiveSleep() }); live {
+		return p.exec.CanSleep()
+	}
 	if now := p.now(); now.After(p.sleep.until) {
 		p.sleep.ok, p.sleep.why = p.exec.CanSleep()
 		p.sleep.until = now.Add(10 * time.Minute)
@@ -115,7 +126,9 @@ func (p *Power) Handle(req PowerRequest) (int, map[string]any) {
 		if p.current() == nil {
 			return 200, map[string]any{"action": "cancel", "pending": nil}
 		}
-		if err := p.exec.Cancel(); err != nil {
+		if err := p.exec.Cancel(); errors.Is(err, api.ErrHelperStopped) {
+			return 503, map[string]any{"error": "helper stopped: cannot cancel", "code": api.ReasonHelperStopped}
+		} else if err != nil {
 			slog.Error("power: cancel failed", "error", err.Error(), "requested_by", who)
 			return 500, map[string]any{"error": "could not cancel: " + safeErr(err)}
 		}
@@ -141,7 +154,16 @@ func (p *Power) Handle(req PowerRequest) (int, map[string]any) {
 		return 409, map[string]any{"error": fmt.Sprintf("a %s is already pending; cancel it first", c.Action)}
 	}
 	msg := fmt.Sprintf("Fairy: %s requested by %s in %d seconds.", req.Action, who, delay)
-	if err := p.exec.Schedule(req.Action, time.Duration(delay)*time.Second, msg); err != nil {
+	var err error
+	if by, ok := p.exec.(powerBy); ok { // the Windows helper builds the message itself from who
+		err = by.ScheduleBy(req.Action, time.Duration(delay)*time.Second, who)
+	} else {
+		err = p.exec.Schedule(req.Action, time.Duration(delay)*time.Second, msg)
+	}
+	if errors.Is(err, api.ErrHelperStopped) {
+		return 503, map[string]any{"error": "helper stopped: start fairy-agent-helper to " + req.Action + " this machine", "code": api.ReasonHelperStopped}
+	}
+	if err != nil {
 		slog.Error("power: could not schedule", "action", req.Action, "error", err.Error(), "requested_by", who)
 		return 500, map[string]any{"error": "could not schedule the " + req.Action + ": " + safeErr(err)}
 	}

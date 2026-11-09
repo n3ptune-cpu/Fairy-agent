@@ -40,6 +40,7 @@ type rig struct {
 	srv   *httptest.Server
 	bmc   *fakebmc.BMC
 	power *agenttest.PowerExec
+	fan   *Fan
 	sent  []string
 }
 
@@ -52,15 +53,18 @@ func newRig(t *testing.T, y string) *rig {
 	if cfg.ControlEnabled() {
 		tok.Control = ctlTok
 	}
+	var bmc *BMC
 	if cfg.IPMI.Enabled {
-		d.BMC = NewBMC(r.bmc, 10*time.Second)
-		if err := d.BMC.refresh(context.Background()); err != nil {
+		bmc = NewBMC(r.bmc, 10*time.Second)
+		if err := bmc.refresh(context.Background()); err != nil {
 			t.Fatal(err)
 		}
+		d.BMC = bmc
 	}
 	var a *Agent
 	if cfg.FanControl.Enabled {
-		d.Fan = NewFan(r.bmc, d.BMC, cfg.FanControl, func() []collect.Temp { return a.LocalTemps() })
+		r.fan = NewFan(r.bmc, bmc, cfg.FanControl, func() []collect.Temp { return a.LocalTemps() })
+		d.Fan = r.fan
 	}
 	if cfg.PowerControl.Enabled {
 		d.Power = NewPower(r.power, cfg.PowerControl.MinDelayS)
@@ -384,15 +388,15 @@ func TestFanControl(t *testing.T) {
 		t.Fatal(d)
 	}
 	// watchdog: below the limit nothing happens; at 80 °C both zones go to 100 %
-	r.a.d.Fan.WatchdogOnce(context.Background())
+	r.fan.WatchdogOnce(context.Background())
 	if _, d := r.bmc.State(); d[0] != 40 {
 		t.Fatal("cool: unchanged", d)
 	}
 	r.bmc.SetRaw(0x01, 81)
-	if err := r.a.d.BMC.refresh(context.Background()); err != nil {
+	if err := r.a.d.BMC.(*BMC).refresh(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	r.a.d.Fan.WatchdogOnce(context.Background())
+	r.fan.WatchdogOnce(context.Background())
 	if _, d := r.bmc.State(); d != [2]byte{100, 100} {
 		t.Fatal("hot: 100 %", d)
 	}
@@ -415,19 +419,19 @@ func TestFanControl(t *testing.T) {
 func TestWatchdogWithoutTemperature(t *testing.T) {
 	r := newRig(t, "ipmi: {enabled: true}\nfan_control: {enabled: true}\n")
 	ctx := context.Background()
-	r.a.d.Fan.SetMode(ctx, "full", "test")
-	r.a.d.Fan.SetDuty(ctx, 0, 35, "test")
-	r.a.d.BMC.mu.Lock()
-	r.a.d.BMC.readings = nil // BMC sensors gone, and the OS has no temperature either
-	r.a.d.BMC.mu.Unlock()
-	r.a.d.Fan.localTemps = func() []collect.Temp { return nil }
+	r.fan.SetMode(ctx, "full", "test")
+	r.fan.SetDuty(ctx, 0, 35, "test")
+	r.a.d.BMC.(*BMC).mu.Lock()
+	r.a.d.BMC.(*BMC).readings = nil // BMC sensors gone, and the OS has no temperature either
+	r.a.d.BMC.(*BMC).mu.Unlock()
+	r.fan.localTemps = func() []collect.Temp { return nil }
 	for i := 0; i < 2; i++ {
-		r.a.d.Fan.WatchdogOnce(ctx)
+		r.fan.WatchdogOnce(ctx)
 		if _, d := r.bmc.State(); d[0] != 35 {
 			t.Fatal("waits for three misses", d)
 		}
 	}
-	r.a.d.Fan.WatchdogOnce(ctx)
+	r.fan.WatchdogOnce(ctx)
 	if _, d := r.bmc.State(); d[0] != 100 {
 		t.Fatal("no temperature for 30 s: 100 %", d)
 	}

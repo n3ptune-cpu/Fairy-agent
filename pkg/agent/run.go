@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/n3ptune-cpu/Fairy-agent/pkg/agent/api"
 	"github.com/n3ptune-cpu/Fairy-agent/pkg/agent/collect"
 	"github.com/n3ptune-cpu/Fairy-agent/pkg/agent/ipmi"
 	"github.com/n3ptune-cpu/Fairy-agent/pkg/enroll"
@@ -109,8 +110,31 @@ func Run(ctx context.Context, cfg *Config, b Build) error {
 	defer cancel()
 
 	d := Deps{Collector: collect.NewSystem(), Relay: relay, Version: version}
+	// Windows: the elevated helper (fairy-agent-helper) does what this low-rights account may not. When it is
+	// installed, Core Temp, IPMI through Windows, fans and power go through it; when it is not, the agent tries
+	// them itself as before (an installation not yet moved to NT SERVICE\fairy-agent still has its old rights).
+	helper := systemHelper(cfg)
+	viaHelper := helper != nil && helper.Installed()
+	if helper != nil {
+		d.Helper = helper
+		go helper.Run(ctx)
+		if viaHelper && tokens.Control == "" {
+			// /helper/stop and /helper/start use the control token even when no other control feature is on
+			if v, err := readSecretFile(cfg.ControlTokenFile); err == nil && len(v) >= MinTokenLen && v != tokens.Read {
+				tokens.Control = v
+			}
+		}
+		if !viaHelper && NeedsHelper(cfg) {
+			slog.Warn("config.yaml uses Core Temp, IPMI or power control, which need the fairy-agent-helper service; it is not installed, so the agent tries them with its own rights. Install it: " + HelperSetupHint)
+		}
+	}
 	if cfg.Sensors.CoreTemp {
-		d.Collector = collect.WithCoreTemp(d.Collector)
+		if viaHelper {
+			d.Collector = collect.WithCoreTempReader(d.Collector, helper.CoreTempRead)
+			d.HelperSources = append(d.HelperSources, api.FeatureCoreTemp)
+		} else {
+			d.Collector = collect.WithCoreTemp(d.Collector)
+		}
 	}
 	if p, err := nvidiaPath(cfg.GPU); err != nil {
 		return err
@@ -140,21 +164,39 @@ func Run(ctx context.Context, cfg *Config, b Build) error {
 		}
 	}
 	var a *Agent
-	if cfg.IPMI.Enabled {
+	interval := time.Duration(cfg.IPMI.SensorIntervalS * float64(time.Second))
+	switch {
+	case cfg.IPMI.Enabled && viaHelper && cfg.IPMI.Transport == "wmi":
+		hs := helper.Sensors(interval)
+		go hs.Run(ctx)
+		d.BMC = hs
+		d.HelperSources = append(d.HelperSources, api.FeatureIPMI)
+		if cfg.FanControl.Enabled { // the helper runs the watchdog itself
+			d.Fan = helper.Fan(cfg.FanControl)
+			d.HelperSources = append(d.HelperSources, api.FeatureFans)
+		}
+	case cfg.IPMI.Enabled:
 		t, err := IPMITransport(cfg.IPMI)
 		if err != nil {
 			return err
 		}
 		defer t.Close()
-		d.BMC = NewBMC(t, time.Duration(cfg.IPMI.SensorIntervalS*float64(time.Second)))
-		go d.BMC.Run(ctx)
+		bmc := NewBMC(t, interval)
+		go bmc.Run(ctx)
+		d.BMC = bmc
 		if cfg.FanControl.Enabled {
-			d.Fan = NewFan(t, d.BMC, cfg.FanControl, func() []collect.Temp { return a.LocalTemps() })
-			go d.Fan.RunWatchdog(ctx)
+			fan := NewFan(t, bmc, cfg.FanControl, func() []collect.Temp { return a.LocalTemps() })
+			go fan.RunWatchdog(ctx)
+			d.Fan = fan
 		}
 	}
 	if cfg.PowerControl.Enabled {
-		d.Power = NewPower(SystemPower(), cfg.PowerControl.MinDelayS)
+		if viaHelper {
+			d.Power = NewPower(helper.Power(), cfg.PowerControl.MinDelayS)
+			d.HelperSources = append(d.HelperSources, api.FeaturePower)
+		} else {
+			d.Power = NewPower(SystemPower(), cfg.PowerControl.MinDelayS)
+		}
 	}
 	if cfg.WOL.Enabled {
 		d.WOL = NewWOL(cfg.WOL.AllowedMACs)
@@ -167,6 +209,18 @@ func Run(ctx context.Context, cfg *Config, b Build) error {
 		o, err := DefaultUpdaterOptions(cfg, version, b.ReleaseKey)
 		if err != nil {
 			return err
+		}
+		if viaHelper { // the helper may start the updater when this account's own start right is missing
+			apply := o.Apply
+			o.Apply = func(ctx context.Context) error {
+				err := apply(ctx)
+				if err != nil && isAccessDenied(err) {
+					if herr := helper.ApplyUpdate(ctx); herr == nil {
+						return nil
+					}
+				}
+				return err
+			}
 		}
 		d.Updater = NewUpdater(o)
 		if st := d.Updater.Status(); st.State == "unavailable" {
@@ -199,8 +253,8 @@ func Run(ctx context.Context, cfg *Config, b Build) error {
 	var on []string
 	for name, ok := range map[string]bool{"processes": cfg.ProcessesEnabled(), "fan_control": d.Fan != nil,
 		"power_control": d.Power != nil, "wol_relay": d.WOL != nil, "ipmi": d.BMC != nil, "gpu": d.GPU != nil,
-		"self_update": d.Updater != nil,
-		"coretemp":    cfg.Sensors.CoreTemp} {
+		"self_update": d.Updater != nil, "helper": viaHelper,
+		"coretemp": cfg.Sensors.CoreTemp} {
 		if ok {
 			on = append(on, name)
 		}

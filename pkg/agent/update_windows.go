@@ -13,10 +13,12 @@ import (
 
 	"golang.org/x/sys/windows"
 
+	"github.com/n3ptune-cpu/Fairy-agent/pkg/agent/api"
+	"github.com/n3ptune-cpu/Fairy-agent/pkg/helper/proto"
 	"github.com/n3ptune-cpu/Fairy-agent/pkg/release"
 )
 
-// Windows: the agent's service (LocalService or LocalSystem, SID NT SERVICE\fairy-agent) downloads and stages
+// Windows: the agent's service (virtual account NT SERVICE\fairy-agent; LocalService or LocalSystem before 0.5) downloads and stages
 // the release into C:\ProgramData\fairy-agent\update\stage, the only update folder it may write, and starts the
 // installer service "fairy-agent-update": LocalSystem, started on demand, running the INSTALLED
 // C:\Program Files\Fairy\fairy-agent.exe apply-update. The agent's account may only start and query that
@@ -200,9 +202,34 @@ func startService(ctx context.Context) error {
 	return waitState(ctx, s, windows.SERVICE_RUNNING, 30*time.Second)
 }
 
+// installerFor swaps the program. fairy-agent-helper runs the same exe, so it is stopped with the agent (it
+// hands the fans back to the BMC first) and started again with the new program, if it was running.
 func installerFor(exe string) *release.Installer {
+	helperWasRunning := false
+	stop := func(ctx context.Context) error {
+		if err := stopService(ctx); err != nil {
+			return err
+		}
+		if st, err := (scmHelper{}).State(); err == nil && st == api.HelperRunning {
+			helperWasRunning = true
+		}
+		if helperWasRunning {
+			if err := (scmHelper{}).Stop(ctx); err != nil {
+				return fmt.Errorf("stopping %s: %w", proto.ServiceName, err)
+			}
+		}
+		return nil
+	}
+	start := func(ctx context.Context) error {
+		if helperWasRunning {
+			if err := (scmHelper{}).Start(ctx); err != nil {
+				return fmt.Errorf("starting %s: %w", proto.ServiceName, err)
+			}
+		}
+		return startService(ctx)
+	}
 	return &release.Installer{Target: exe, RenameSwap: true, HealthTimeout: 60 * time.Second, HealthPasses: 2,
-		Stop: stopService, Start: startService}
+		Stop: stop, Start: start}
 }
 
 func serviceRunning(context.Context) error {

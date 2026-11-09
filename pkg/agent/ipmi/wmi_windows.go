@@ -19,7 +19,8 @@ import (
 
 // WMI sends raw IPMI requests through Windows' built-in IPMI driver, using the documented Microsoft_IPMI WMI
 // class from one long-lived powershell.exe (started on first use, stopped after IdleStop without requests).
-// It needs the service to run as LocalSystem (the class is restricted to administrators).
+// It needs administrator rights (the class is restricted to administrators): the fairy-agent-helper service
+// (LocalSystem) runs it for the agent.
 type WMI struct {
 	IdleStop time.Duration
 

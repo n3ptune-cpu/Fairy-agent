@@ -97,3 +97,34 @@ func FindIpmitool() (string, error) {
 	}
 	return "", fmt.Errorf("ipmitool not found in %s: install it there or set its full path", filepath.Join(pf, "ipmitool"))
 }
+
+// TrustedFolder checks that dir is a plain local folder (no junction) that only Administrators, SYSTEM or
+// TrustedInstaller can change, with every folder above it: a folder a LocalSystem process may write files in
+// (the helper's log) without another account planting a link there first.
+func TrustedFolder(dir string) error {
+	if p := ExecPathProblem(dir, true); p != "" {
+		return fmt.Errorf("%s %s", dir, p)
+	}
+	dir = filepath.Clean(dir)
+	st, err := os.Lstat(dir)
+	if err != nil {
+		return err
+	}
+	if !st.IsDir() || isReparse(st) {
+		return fmt.Errorf("%s is not a plain folder", dir)
+	}
+	kind := ObjParent
+	for p := dir; ; {
+		parent := filepath.Dir(p)
+		if parent == p && kind == ObjAncestor {
+			kind = ObjRoot
+		}
+		if err := checkACL(p, kind); err != nil {
+			return err
+		}
+		if parent == p {
+			return nil
+		}
+		p, kind = parent, ObjAncestor
+	}
+}

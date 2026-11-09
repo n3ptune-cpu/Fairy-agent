@@ -7,6 +7,8 @@ import (
 	"math"
 	"testing"
 	"time"
+
+	"github.com/n3ptune-cpu/Fairy-agent/pkg/agent/api"
 )
 
 type ctBlock struct {
@@ -267,5 +269,29 @@ func TestCoreTempCollector(t *testing.T) {
 	block = make([]byte, 10) // malformed
 	if d := c.current(now.Add(36 * time.Second)); d != nil || c.state != "error" {
 		t.Fatal("malformed block accepted")
+	}
+}
+
+// Through the Windows helper: while it is stopped the readings are simply absent (state "helper", logged at
+// info level), and they come back when it answers again.
+func TestCoreTempCollectorHelperStopped(t *testing.T) {
+	err := api.ErrHelperStopped
+	block := ctBlock{cores: 1, cpus: 1, tjmax: []uint32{100}, temps: []float32{55}}.bytes()
+	c := WithCoreTempReader(fixedCollector{}, func() ([]byte, string, error) {
+		if err != nil {
+			return nil, "", err
+		}
+		return block, "helper", nil
+	}).(*coreTempCollector)
+	now := time.Now()
+	if d := c.current(now); d != nil || c.state != "helper" {
+		t.Fatal(c.state)
+	}
+	err = nil
+	if d := c.current(now.Add(11 * time.Second)); d == nil || d.TempsC[0] != 55 {
+		t.Fatal("no reading once the helper answers")
+	}
+	if _, wrapped := WithCoreTempReader(fixedCollector{}, nil).(*coreTempCollector); wrapped {
+		t.Fatal("nil reader wrapped")
 	}
 }

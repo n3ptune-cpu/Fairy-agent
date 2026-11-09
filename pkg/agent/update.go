@@ -661,3 +661,7 @@ func NewUpdateCLI(ctx context.Context, cfg *Config, version, releaseKey string) 
 	}
 	return cli, nil
 }
+
+// StartUpdaterService starts the installer (Windows: the fairy-agent-update service; the helper calls this
+// for apply_update when the agent may not start it itself).
+func StartUpdaterService(ctx context.Context) error { return startInstaller(ctx, "") }
