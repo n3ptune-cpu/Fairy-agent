@@ -3,8 +3,9 @@
 #
 # Release tag: build-<run number> (never vX.Y.Z: Go would read that as a version of this Go module).
 # Version in the binaries: <run number>-<short commit>, e.g. 42-1a2b3c4.
-# Needs the repository secret FAIRY_RELEASE_KEY (private key from `go run ./cmd/fairy-release-key gen`) and the
-# committed public key release/signing.pub.
+# Needs the secret FAIRY_RELEASE_KEY (private key from `go run ./cmd/fairy-release-key gen`) stored in the GitHub
+# Environment "release" (Settings > Environments > release; with Neptune as required reviewer, every release waits
+# for approval before the job can read the key), and the committed public key release/signing.pub.
 name: release
 
 on:
@@ -22,6 +23,7 @@ concurrency:
 jobs:
   release:
     runs-on: ubuntu-latest
+    environment: release # the signing key is an environment secret: the job waits for the required reviewer
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -39,7 +41,7 @@ jobs:
           FAIRY_RELEASE_KEY: ${{ secrets.FAIRY_RELEASE_KEY }}
         run: |
           if [ -z "$FAIRY_RELEASE_KEY" ]; then
-            echo "::error::The FAIRY_RELEASE_KEY secret is missing. Make the key with 'go run ./cmd/fairy-release-key gen' and add it under Settings > Secrets and variables > Actions (see SETUP-UPDATES.md)."
+            echo "::error::The FAIRY_RELEASE_KEY secret is missing. Make the key with 'go run ./cmd/fairy-release-key gen' and add it to the environment \"release\" under Settings > Environments (see SETUP-UPDATES.md)."
             exit 1
           fi
           if [ ! -s release/signing.pub ]; then

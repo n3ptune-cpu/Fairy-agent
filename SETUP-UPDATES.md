@@ -82,12 +82,22 @@ Copy the key to the clipboard:
 Get-Content "$HOME\fairy-release-key.txt" | Set-Clipboard
 ```
 
-Then in your browser, for **Fairy-agent** and again for **Fairy-dashboard**:
+Then in your browser, for **Fairy-agent** (its release job reads the key only from the GitHub Environment
+`release`, so every release waits for your approval):
 
 1. open the repository on github.com, click **Settings** (top right of the repository, not your account
    settings);
-2. in the left menu: **Secrets and variables** > **Actions**;
-3. **New repository secret**; Name: `FAIRY_RELEASE_KEY`; Secret: paste (Ctrl+V); **Add secret**.
+2. in the left menu: **Environments** > **New environment**; Name: `release`; **Configure environment**;
+3. tick **Required reviewers**, type your own GitHub name, pick yourself; **Save protection rules**. (Optional,
+   same page: **Deployment branches and tags** > **Selected branches and tags** > **Add deployment branch or
+   tag rule** > `main`.) Leave "Prevent self-review" off: you are the only reviewer;
+4. on the same page under **Environment secrets**: **Add environment secret**; Name: `FAIRY_RELEASE_KEY`; Value:
+   paste (Ctrl+V); **Add secret**;
+5. if the key was already a repository secret (before 0.4.3): **Secrets and variables** > **Actions**, and under
+   **Repository secrets** delete `FAIRY_RELEASE_KEY` (the trash icon), so only the environment has it.
+
+For **Fairy-dashboard** (until its release workflow uses the environment too): **Settings** > **Secrets and
+variables** > **Actions** > **New repository secret**; Name: `FAIRY_RELEASE_KEY`; Secret: paste; **Add secret**.
 
 Afterwards you can clear the clipboard (copy something else) and move `fairy-release-key.txt` to a USB stick or
 your password manager, or delete it. If it is ever lost, make a new key (1.2 to 1.4 again); machines then need
@@ -112,13 +122,15 @@ git push origin main
 
 ### 1.5 Wait for the first releases
 
-On GitHub open each repository's **Actions** tab: the "release" run takes a few minutes. When it is green, the
+On GitHub open each repository's **Actions** tab. Fairy-agent's "release" run first shows **Waiting** (review
+required): open it, **Review deployments**, tick `release`, **Approve and deploy**. Then it takes a few minutes. When it is green, the
 repository's **Releases** (right side of the repository page) shows `build-1` (or a higher number) marked
 **Latest**, with the binaries, `VERSION`, `SHA256SUMS` and `SHA256SUMS.sig`.
 
 If a run is red:
 
-* "The FAIRY_RELEASE_KEY secret is missing": step 1.3 for that repository.
+* "The FAIRY_RELEASE_KEY secret is missing": step 1.3 for that repository (Fairy-agent: the secret must be in
+  the environment `release`, and the environment must be named exactly `release`).
 * "release/signing.pub is missing": step 1.4.
 * "the private key does not belong to release/signing.pub": the secret and the committed file come from
   different `gen` runs; paste the right key again (1.3).
