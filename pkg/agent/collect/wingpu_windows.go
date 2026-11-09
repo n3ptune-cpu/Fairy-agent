@@ -54,7 +54,7 @@ type d3dkmtQueryAdapterInfo struct {
 type d3dkmtAdapterAddress struct{ Bus, Device, Function uint32 }
 
 // adapterLocation is the PCI bus / device / function of the adapter with this LUID (nil when Windows cannot
-// open it, e.g. a leftover LUID).
+// open it or gives no real location, e.g. a leftover LUID or a software adapter).
 func adapterLocation(high int32, low uint32) *PCILoc {
 	if procD3DKMTOpenAdapterFromLuid.Find() != nil || procD3DKMTQueryAdapterInfo.Find() != nil || procD3DKMTCloseAdapter.Find() != nil {
 		return nil
@@ -68,7 +68,10 @@ func adapterLocation(high int32, low uint32) *PCILoc {
 		var addr d3dkmtAdapterAddress
 		q := d3dkmtQueryAdapterInfo{Adapter: o.Adapter, Type: typ, Data: uintptr(unsafe.Pointer(&addr)), DataSize: uint32(unsafe.Sizeof(addr))}
 		if r, _, _ := procD3DKMTQueryAdapterInfo.Call(uintptr(unsafe.Pointer(&q))); r == 0 {
-			return &PCILoc{Bus: addr.Bus, Device: addr.Device, Function: addr.Function}
+			// a leftover LUID answers ffffffff:ffff.ffff: no location (PCILoc.Known)
+			if loc := (&PCILoc{Bus: addr.Bus, Device: addr.Device, Function: addr.Function}); loc.Known() {
+				return loc
+			}
 		}
 	}
 	return nil
@@ -179,7 +182,7 @@ func NewWinGPU(interval time.Duration, nvidiaSMI, amdADL bool) *WinGPU {
 	w.setupQueries()
 	if amdADL && slices.ContainsFunc(shown, func(a WinAdapter) bool { return a.VendorID == 0x1002 }) {
 		if lib, err := OpenADL(); err != nil {
-			slog.Debug("AMD GPU sensors (ADL): not available; showing load and VRAM only", "error", err)
+			ADLDiagnosis{Opened: "failed (load and VRAM only): " + err.Error()}.log()
 		} else {
 			w.amd = NewAMDSensors(lib)
 		}
@@ -205,15 +208,18 @@ func (w *WinGPU) setupQueries() {
 		if *c.q != nil {
 			continue
 		}
-		q, err := newPDHQuery(c.path)
+		q, err := newPDHQuery(c.path) // a new query each time: nothing of a failed one is kept
 		if err != nil {
 			if !w.logged[c.path] {
 				w.logged[c.path] = true
-				slog.Info("GPUs via Windows: counter not readable yet; trying again every minute", "counter", c.path, "error", err)
+				if !NoteCounterAccess(err) { // not readable by this account: one warning that names the fix
+					slog.Info("GPUs via Windows: counter not readable yet; trying again every minute", "counter", c.path, "error", err)
+				}
 			}
 			continue
 		}
 		if w.logged[c.path] {
+			delete(w.logged, c.path)
 			slog.Info("GPUs via Windows: counter readable now", "counter", c.path)
 		}
 		*c.q = q

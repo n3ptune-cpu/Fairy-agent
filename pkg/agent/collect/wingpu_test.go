@@ -359,3 +359,137 @@ func TestEngineLoadsIntelNames(t *testing.T) {
 		t.Fatal(u)
 	}
 }
+
+// NSX-FURINA on fairy-agent build 12, as its log shows the DXGI adapters (the agent running as
+// NT SERVICE\fairy-agent, which could not read the GPU counters):
+//
+//	name="Intel(R) UHD Graphics" luid=0x00000000_0x00018323 ids=8086:46a3:30581043:0c pci=ffffffff:ffff.ffff software=false
+//	name="Intel(R) UHD Graphics" luid=0x00000000_0x0000FA66 ids=8086:46a3:30581043:0c pci=00:02.0 software=false
+//	name="NVIDIA GeForce RTX 3050 4GB Laptop GPU" luid=0x00000000_0x0000FEAA ids=10de:25ab:30581043:a1 pci=01:00.0 software=false
+//	name="Microsoft Basic Render Driver" luid=0x00000000_0x0000FE16 ids=1414:008c:00000000:00 pci=ffffffff:ffff.ffff software=true
+//
+// 0x18323 is a leftover of the Intel UHD (a driver reset): no GPU counter instance at all (an administrator's
+// PDH listing had instances for FA66, FEAA and FE16 only). Two GPUs: the Intel UHD at 00:02.0 and the NVIDIA card.
+func build12Furina() []WinAdapter {
+	none := &PCILoc{Bus: 0xFFFFFFFF, Device: 0xFFFF, Function: 0xFFFF}
+	return []WinAdapter{
+		{Name: "Intel(R) UHD Graphics", VendorID: 0x8086, DeviceID: 0x46a3, SubSysID: 0x30581043, Revision: 0x0c,
+			LUID: "0x00000000_0x00018323", Loc: none},
+		{Name: "Intel(R) UHD Graphics", VendorID: 0x8086, DeviceID: 0x46a3, SubSysID: 0x30581043, Revision: 0x0c,
+			LUID: "0x00000000_0x0000FA66", Loc: &PCILoc{Bus: 0, Device: 2, Function: 0}},
+		{Name: "NVIDIA GeForce RTX 3050 4GB Laptop GPU", VendorID: 0x10de, DeviceID: 0x25ab, SubSysID: 0x30581043, Revision: 0xa1,
+			VRAMTotal: 4 << 30, LUID: "0x00000000_0x0000FEAA", Loc: &PCILoc{Bus: 1, Device: 0, Function: 0}},
+		{Name: "Microsoft Basic Render Driver", VendorID: 0x1414, DeviceID: 0x008c, LUID: "0x00000000_0x0000FE16",
+			Loc: none, Software: true},
+	}
+}
+
+func TestBuild12FurinaLeftoverIntelLUID(t *testing.T) {
+	all := build12Furina()
+	if all[0].Loc.Known() || all[0].Loc.String() != "" || !all[1].Loc.Known() || all[1].Loc.String() != "00:02.0" {
+		t.Fatalf("locations: %q %q", all[0].Loc.String(), all[1].Loc.String())
+	}
+	check := func(name string, got []WinAdapter) {
+		t.Helper()
+		if len(got) != 2 || got[0].LUID != "0x00000000_0x0000FA66" || got[0].Loc.String() != "00:02.0" || len(got[0].Also) != 0 ||
+			got[1].LUID != "0x00000000_0x0000FEAA" || got[1].Loc.String() != "01:00.0" {
+			t.Fatalf("%s: %+v", name, got)
+		}
+	}
+	// the counters not readable (build 12 as NT SERVICE\fairy-agent): the location alone tells
+	check("no counters", GroupAdapters(DropGhosts(ShownAdapters(all, false), nil), nil))
+	// DropGhosts drops the software adapter itself too
+	check("DropGhosts on everything", GroupAdapters(DropGhosts(all, nil), nil))
+	// counters readable (what an administrator's PDH listing had): the same
+	eng := []string{
+		"pid_1200_luid_0x00000000_0x0000fa66_phys_0_eng_0_engtype_3D",
+		"pid_1200_luid_0x00000000_0x0000feaa_phys_0_eng_0_engtype_3D",
+		"pid_1200_luid_0x00000000_0x0000fe16_phys_0_eng_0_engtype_3D",
+	}
+	mem := []string{"luid_0x00000000_0x0000FA66_phys_0", "luid_0x00000000_0x0000FEAA_phys_0", "luid_0x00000000_0x0000FE16_phys_0"}
+	shown := GroupAdapters(DropGhosts(ShownAdapters(all, false), MemoryLUIDs(mem)), CounterActivity(eng, mem))
+	check("counters", shown)
+	gpus := WinGPUs(shown, EngineLoads(eng, []float64{5, 9, 0}), AdapterMemory(mem, []float64{64 << 20, 512 << 20, 0}))
+	if len(gpus) != 2 || gpus[0].Vendor != "intel" || *gpus[0].UtilPercent != 5 || *gpus[0].VRAMUsed != 64<<20 ||
+		gpus[1].Vendor != "nvidia" || *gpus[1].UtilPercent != 9 || *gpus[1].VRAMUsed != 512<<20 {
+		t.Fatalf("%+v", gpus)
+	}
+	// with nvidia-smi the NVIDIA card is reported from there: the Intel UHD only
+	if got := GroupAdapters(DropGhosts(ShownAdapters(all, true), nil), nil); len(got) != 1 || got[0].LUID != "0x00000000_0x0000FA66" {
+		t.Fatalf("nvidia-smi: %+v", got)
+	}
+	// DXGI's order does not matter
+	rev := slices.Clone(all)
+	slices.Reverse(rev)
+	if got := GroupAdapters(DropGhosts(ShownAdapters(rev, false), nil), nil); len(got) != 2 || got[1].LUID != "0x00000000_0x0000FA66" {
+		t.Fatalf("reversed: %+v", got)
+	}
+}
+
+// Two genuine identical cards, both with a PCI location, stay two; an identical entry without a location is
+// kept when Windows drives it (it has a GPU Adapter Memory instance), and when no identical entry has a location.
+func TestDropGhostsByLocationKeepsRealCards(t *testing.T) {
+	card := func(luid string, loc *PCILoc) WinAdapter {
+		return WinAdapter{Name: "AMD Radeon RX 7900 XTX", VendorID: 0x1002, DeviceID: 0x744c, SubSysID: 0x0e3a1002, Revision: 0xc8,
+			VRAMTotal: 24 << 30, LUID: luid, Loc: loc}
+	}
+	a, b, c := "0x00000000_0x0000A001", "0x00000000_0x0000B002", "0x00000000_0x0000C003"
+	twins := []WinAdapter{card(a, &PCILoc{Bus: 3}), card(b, &PCILoc{Bus: 4})}
+	for _, mem := range []map[string]bool{nil, {a: true, b: true}} {
+		if got := GroupAdapters(DropGhosts(twins, mem), nil); len(got) != 2 {
+			t.Fatalf("twins (memory %v): %+v", mem, got)
+		}
+	}
+	// twins plus a leftover entry without a location: the leftover goes, the twins stay
+	if got := GroupAdapters(DropGhosts(append(slices.Clone(twins), card(c, nil)), nil), nil); len(got) != 2 || got[0].LUID != a || got[1].LUID != b {
+		t.Fatalf("twins + leftover: %+v", got)
+	}
+	// the entry without a location has a memory instance: Windows drives it, not dropped here
+	if got := DropGhosts([]WinAdapter{card(a, &PCILoc{Bus: 3}), card(c, nil)}, map[string]bool{a: true, c: true}); len(got) != 2 {
+		t.Fatalf("driven entry without location: %+v", got)
+	}
+	// no entry has a location (D3DKMT unavailable): nothing dropped by location
+	if got := DropGhosts([]WinAdapter{card(a, nil), card(c, nil)}, nil); len(got) != 2 {
+		t.Fatalf("no locations: %+v", got)
+	}
+	// other PCI ids (another model, another revision) are not a ghost of the located card
+	other := card(c, nil)
+	other.Revision = 0xc0
+	if got := DropGhosts([]WinAdapter{card(a, &PCILoc{Bus: 3}), other}, nil); len(got) != 2 {
+		t.Fatalf("other revision: %+v", got)
+	}
+}
+
+// STWS-VARESA on build 12 (one RX 5600 XT), as its log shows the DXGI adapters: two leftover LUIDs without a
+// location, the card at 2d:00.0. Both leftovers go, with or without the counters.
+//
+//	"AMD Radeon RX 5600 XT" luid=0x00000000_0x0001AACF ids=1002:731f:e4161da2:ca pci=ffffffff:ffff.ffff software=false
+//	"AMD Radeon RX 5600 XT" luid=0x00000000_0x000188B4 ids=1002:731f:e4161da2:ca pci=ffffffff:ffff.ffff software=false
+//	"AMD Radeon RX 5600 XT" luid=0x00000000_0x00011AE4 ids=1002:731f:e4161da2:ca pci=2d:00.0 software=false
+func TestBuild12VaresaTwoLeftoverLUIDs(t *testing.T) {
+	none := &PCILoc{Bus: 0xFFFFFFFF, Device: 0xFFFF, Function: 0xFFFF}
+	rx := func(luid string, loc *PCILoc) WinAdapter {
+		return WinAdapter{Name: "AMD Radeon RX 5600 XT", VendorID: 0x1002, DeviceID: 0x731f, SubSysID: 0xe4161da2, Revision: 0xca,
+			VRAMTotal: 6 << 30, LUID: luid, Loc: loc}
+	}
+	live := "0x00000000_0x00011AE4"
+	all := []WinAdapter{rx("0x00000000_0x0001AACF", none), rx("0x00000000_0x000188B4", none), rx(live, &PCILoc{Bus: 0x2d})}
+	if got := DropGhosts(ShownAdapters(all, true), nil); len(got) != 1 || got[0].LUID != live {
+		t.Fatalf("DropGhosts, no counters: %+v", got)
+	}
+	eng := []string{"pid_812_luid_0x00000000_0x0001aacf_phys_0_eng_0_engtype_3D", "pid_812_luid_0x00000000_0x00011ae4_phys_0_eng_0_engtype_3D"}
+	mem := []string{"luid_0x00000000_0x00011AE4_phys_0"}
+	for _, tc := range []struct {
+		name     string
+		mem      map[string]bool
+		activity map[string]int
+	}{{"no counters", nil, nil}, {"counters", MemoryLUIDs(mem), CounterActivity(eng, mem)}} {
+		for _, order := range [][]int{{0, 1, 2}, {2, 1, 0}, {0, 2, 1}} {
+			in := []WinAdapter{all[order[0]], all[order[1]], all[order[2]]}
+			got := GroupAdapters(DropGhosts(ShownAdapters(in, true), tc.mem), tc.activity)
+			if len(got) != 1 || got[0].LUID != live || got[0].Loc.String() != "2d:00.0" || len(got[0].Also) != 0 {
+				t.Fatalf("%s %v: %+v", tc.name, order, got)
+			}
+		}
+	}
+}

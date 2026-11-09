@@ -8,7 +8,7 @@ package collect
 import (
 	"errors"
 	"fmt"
-	"log/slog"
+	"strings"
 	"sync"
 	"syscall"
 	"unsafe"
@@ -39,9 +39,13 @@ type adlPMLogDataOutput struct {
 type adlTemperature struct{ Size, Temperature int32 }
 
 type adlDLL struct {
-	ctx   uintptr
-	procs map[string]*windows.LazyProc
+	ctx    uintptr
+	procs  map[string]*windows.LazyProc
+	opened string // for the start-up log (NewAMDSensors)
 }
+
+// Opened is the DLL and ADL2_Main_Control_Create's return code.
+func (d *adlDLL) Opened() string { return d.opened }
 
 var (
 	adlAllocOnce sync.Once
@@ -65,16 +69,17 @@ func adlAlloc() uintptr {
 	return adlAllocCB
 }
 
-// OpenADL loads atiadlxx.dll (atiadlxy.dll as a fallback) from System32 and creates an ADL2 context.
+// OpenADL loads atiadlxx.dll (atiadlxy.dll as a fallback) from System32 and creates an ADL2 context. The error
+// says what each DLL answered (load error, missing functions or ADL2_Main_Control_Create's return code).
 func OpenADL() (ADLLib, error) {
 	names := []string{"ADL2_Main_Control_Create", "ADL2_Adapter_NumberOfAdapters_Get", "ADL2_Adapter_AdapterInfo_Get",
 		"ADL2_Overdrive_Caps", "ADL2_New_QueryPMLogData_Get", "ADL2_OverdriveN_Temperature_Get",
 		"ADL2_Overdrive6_Temperature_Get", "ADL2_Overdrive6_CurrentPower_Get", "ADL2_Overdrive5_Temperature_Get"}
-	var lastErr error
+	var errs []string
 	for _, file := range []string{"atiadlxx.dll", "atiadlxy.dll"} {
 		dll := windows.NewLazySystemDLL(file)
 		if err := dll.Load(); err != nil {
-			lastErr = err
+			errs = append(errs, file+": "+err.Error())
 			continue
 		}
 		d := &adlDLL{procs: map[string]*windows.LazyProc{}}
@@ -85,17 +90,19 @@ func OpenADL() (ADLLib, error) {
 		}
 		create := d.procs["ADL2_Main_Control_Create"]
 		if create == nil || d.procs["ADL2_Adapter_AdapterInfo_Get"] == nil || d.procs["ADL2_Overdrive_Caps"] == nil {
-			lastErr = fmt.Errorf("%s: ADL2 functions missing", file)
+			errs = append(errs, file+": ADL2 functions missing")
 			continue
 		}
-		if r, _, _ := create.Call(adlAlloc(), 1, uintptr(unsafe.Pointer(&d.ctx))); int32(r) != 0 || d.ctx == 0 {
-			lastErr = fmt.Errorf("%s: ADL2_Main_Control_Create: %d", file, int32(r))
+		// 1: only adapters connected to a display (ADL's usual mode); a service in session 0 may see fewer
+		r, _, _ := create.Call(adlAlloc(), 1, uintptr(unsafe.Pointer(&d.ctx)))
+		if int32(r) != 0 || d.ctx == 0 {
+			errs = append(errs, fmt.Sprintf("%s: ADL2_Main_Control_Create returned %d (context %t)", file, int32(r), d.ctx != 0))
 			continue
 		}
-		slog.Debug("AMD GPU sensors (ADL): loaded", "dll", file)
+		d.opened = fmt.Sprintf("%s, ADL2_Main_Control_Create=%d", file, int32(r))
 		return d, nil
 	}
-	return nil, lastErr
+	return nil, errors.New(strings.Join(errs, "; "))
 }
 
 // call runs an ADL2 function with the context first; ADL_OK (0) and ADL_OK_WARNING (1) count as success.

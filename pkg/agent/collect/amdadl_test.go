@@ -1,7 +1,10 @@
 package collect
 
 import (
+	"bytes"
 	"errors"
+	"log/slog"
+	"strings"
 	"testing"
 )
 
@@ -141,4 +144,33 @@ func TestAMDSensorsWithoutLocationOrADL(t *testing.T) {
 	}
 	var nilS *AMDSensors
 	nilS.Attach(gpus) // safe
+}
+
+// The start-up line says what ADL answered: the DLL, the adapter count, per adapter its location and the
+// Overdrive answer (the error code when ADL refuses), and how many cards are read.
+func TestAMDSensorsLogsWhatADLAnswered(t *testing.T) {
+	var buf bytes.Buffer
+	old := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	defer slog.SetDefault(old)
+	f := &fakeADL{adapters: []ADLAdapter{
+		{Index: 0, Bus: 0x2d, VendorID: 0x1002, Present: true, Exist: true},
+		{Index: 1, Bus: 0x2d, VendorID: 0x1002},
+	}}
+	if s := NewAMDSensors(f); s != nil {
+		t.Fatal(s)
+	}
+	line := buf.String()
+	for _, want := range []string{`msg="AMD GPU sensors (ADL)"`, "adapters=2", "cards=0", "#0 2d:00.0 vendor=1002 present=true exist=true overdrive=Overdrive not supported"} {
+		if !strings.Contains(line, want) {
+			t.Fatalf("missing %q in %s", want, line)
+		}
+	}
+	buf.Reset()
+	if s := NewAMDSensors(&fakeADL{fail: true}); s != nil {
+		t.Fatal(s)
+	}
+	if !strings.Contains(buf.String(), `adapters_error="ADL error -1"`) || strings.Count(buf.String(), "\n") != 1 {
+		t.Fatal(buf.String())
+	}
 }

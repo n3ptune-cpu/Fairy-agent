@@ -304,7 +304,8 @@ func (w *Windows) thermalZones(now time.Time) []Temp {
 	if w.thermal == nil {
 		q, err := newPDHQuery(`\Thermal Zone Information(*)\Temperature`)
 		if err != nil {
-			w.thermalOff = true // no thermal zones on this machine
+			NoteCounterAccess(err)
+			w.thermalOff = true // no thermal zones on this machine (or no access, NoteCounterAccess)
 			return w.temps
 		}
 		w.thermal = q

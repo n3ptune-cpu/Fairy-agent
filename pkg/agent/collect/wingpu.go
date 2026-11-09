@@ -37,11 +37,29 @@ func (a WinAdapter) LUIDs() []string { return append([]string{a.LUID}, a.Also...
 // PCILoc is where a card sits on the PCI bus (from the adapter's LUID; nil when Windows would not say).
 type PCILoc struct{ Bus, Device, Function uint32 }
 
+// Known reports whether l is a real PCI location. For a leftover LUID (left by a driver reset) and for software
+// adapters D3DKMT answers, but with bus 0xFFFFFFFF, device 0xFFFF and function 0xFFFF ("ffffffff:ffff.ffff"
+// in the log): that is "unknown", not a location. A PCI device number is below 32, a function below 8.
+func (l *PCILoc) Known() bool {
+	return l != nil && l.Bus != 0xFFFFFFFF && l.Device < 32 && l.Function < 8
+}
+
+// String is "bus:device.function", "" when the location is unknown (Known).
 func (l *PCILoc) String() string {
-	if l == nil {
+	if !l.Known() {
 		return ""
 	}
 	return fmt.Sprintf("%02x:%02x.%x", l.Bus, l.Device, l.Function)
+}
+
+// pciIDs are the PCI ids DXGI reports for an adapter: vendor, device, subsystem, revision.
+func (a WinAdapter) pciIDs() string {
+	return fmt.Sprintf("%04x:%04x:%08x:%02x", a.VendorID, a.DeviceID, a.SubSysID, a.Revision)
+}
+
+// software reports a software adapter (Microsoft Basic Render Driver): never a GPU of this PC.
+func (a WinAdapter) software() bool {
+	return a.Software || a.VendorID == 0x1414 || strings.Contains(strings.ToLower(a.Name), "basic render")
 }
 
 // normLUID writes a LUID from a counter name like LUIDKey does (hex digits upper-case, "0x" prefixes).
@@ -134,7 +152,7 @@ func ShownAdapters(all []WinAdapter, nvidiaSMI bool) []WinAdapter {
 	var out []WinAdapter
 	seen := map[string]bool{}
 	for _, a := range all {
-		if a.Software || a.VendorID == 0x1414 || strings.Contains(strings.ToLower(a.Name), "basic render") || seen[a.LUID] {
+		if a.software() || seen[a.LUID] {
 			continue
 		}
 		if nvidiaSMI && a.VendorID == 0x10de {
@@ -163,26 +181,44 @@ func CounterLUIDs(names ...[]string) map[string]bool {
 	return out
 }
 
-// DropGhosts removes DXGI entries that Windows does not really drive: an adapter without a
-// `\GPU Adapter Memory` instance, when another adapter with the same vendor, device and dedicated VRAM has one.
-// `\GPU Engine` instances do not tell: every process with a Direct3D device (dwm.exe, browsers, games) gets
-// engine instances on every adapter DXGI lists, leftover ones included, so a leftover entry looked "live" and
-// showed up as a second card (2x RX 5600 XT on a one-GPU PC, 2x Intel UHD). Two identical cards that both have
-// memory instances are both kept. memLUIDs nil (the memory counter not read or not available): nothing is dropped.
+// DropGhosts removes DXGI entries that Windows does not really drive, and software adapters (Microsoft Basic
+// Render Driver) whatever ShownAdapters let through:
+//
+//   - an adapter whose PCI location Windows' kernel could not give (D3DKMT failed or answered
+//     ffffffff:ffff.ffff), when another adapter with the same PCI ids (vendor, device, subsystem, revision) has
+//     a location: the leftover LUID of a card after a driver reset (NSX-FURINA: two "Intel(R) UHD Graphics",
+//     one at 00:02.0, one without a location and without any GPU counter). This needs no counter, so it also
+//     works when the agent cannot read them. It is kept if it has a `\GPU Adapter Memory` instance (Windows
+//     drives it; GroupAdapters decides);
+//   - an adapter without a `\GPU Adapter Memory` instance, when another adapter with the same vendor, device and
+//     dedicated VRAM has one. `\GPU Engine` instances do not tell: every process with a Direct3D device
+//     (dwm.exe, browsers, games) gets engine instances on every adapter DXGI lists, leftover ones included, so a
+//     leftover entry looked "live" and showed up as a second card (2x RX 5600 XT on a one-GPU PC, 2x Intel
+//     UHD). memLUIDs nil (the memory counter not read or not available): this rule drops nothing.
+//
+// Two identical cards that both have a location, or both have memory instances, are both kept.
 func DropGhosts(all []WinAdapter, memLUIDs map[string]bool) []WinAdapter {
-	if memLUIDs == nil {
-		return all
+	located := map[string]bool{} // PCI ids of the adapters with a location
+	for _, a := range all {
+		if !a.software() && a.Loc.Known() {
+			located[a.pciIDs()] = true
+		}
 	}
 	key := func(a WinAdapter) string { return fmt.Sprintf("%04x:%04x:%d", a.VendorID, a.DeviceID, a.VRAMTotal) }
 	live := map[string]bool{}
 	for _, a := range all {
-		if memLUIDs[a.LUID] {
+		if memLUIDs[a.LUID] && !a.software() {
 			live[key(a)] = true
 		}
 	}
 	out := make([]WinAdapter, 0, len(all))
 	for _, a := range all {
-		if !memLUIDs[a.LUID] && live[key(a)] {
+		switch {
+		case a.software():
+			continue
+		case !a.Loc.Known() && located[a.pciIDs()] && !memLUIDs[a.LUID]:
+			continue
+		case memLUIDs != nil && !memLUIDs[a.LUID] && live[key(a)]:
 			continue
 		}
 		out = append(out, a)
@@ -256,7 +292,7 @@ func GroupAdapters(all []WinAdapter, activity map[string]int) []WinAdapter {
 	has := func(a WinAdapter) bool { return activity != nil && activity[a.LUID] > 0 }
 	act := func(a WinAdapter) int { return activity[a.LUID] }
 	for _, a := range all {
-		ids := fmt.Sprintf("%04x:%04x:%08x:%02x", a.VendorID, a.DeviceID, a.SubSysID, a.Revision)
+		ids := a.pciIDs()
 		loc := a.Loc.String()
 		matched := -1
 		for gi, g := range groups {

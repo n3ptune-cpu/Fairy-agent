@@ -22,6 +22,7 @@ type ProcGPU struct {
 func NewProcGPU() *ProcGPU {
 	q, err := newPDHQuery(`\GPU Process Memory(*)\Dedicated Usage`)
 	if err != nil {
+		NoteCounterAccess(err)
 		return nil
 	}
 	return &ProcGPU{q: q}

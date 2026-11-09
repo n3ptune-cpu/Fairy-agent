@@ -16,6 +16,7 @@ package collect
 // ADLLib interface (the DLL on Windows, a fake in tests).
 
 import (
+	"fmt"
 	"log/slog"
 	"strconv"
 	"sync"
@@ -76,37 +77,73 @@ type AMDSensors struct {
 }
 
 // NewAMDSensors lists the AMD cards ADL knows (one entry per PCI location); nil when there is none or ADL fails.
+// It logs one line saying what ADL answered (ADLDiagnosis): when a Radeon gets no temperature, that line tells
+// why.
 func NewAMDSensors(lib ADLLib) *AMDSensors {
 	if lib == nil {
 		return nil
 	}
+	diag := ADLDiagnosis{}
+	if d, ok := lib.(interface{ Opened() string }); ok {
+		diag.Opened = d.Opened()
+	}
 	ads, err := lib.Adapters()
 	if err != nil {
-		slog.Debug("AMD GPU sensors (ADL): adapters not readable", "error", err)
+		diag.AdaptersErr = err.Error()
+		diag.log()
 		return nil
 	}
+	diag.Count = len(ads)
 	s := &AMDSensors{lib: lib}
 	seen := map[PCILoc]bool{}
 	for _, a := range ads {
-		if a.VendorID != 0x1002 || a.Index < 0 {
-			continue
-		}
 		loc := PCILoc{Bus: uint32(a.Bus), Device: uint32(a.Device), Function: uint32(a.Function)}
-		if seen[loc] {
-			continue
+		line := fmt.Sprintf("#%d %s vendor=%04x present=%t exist=%t", a.Index, loc.String(), a.VendorID, a.Present, a.Exist)
+		if loc.String() == "" {
+			line = fmt.Sprintf("#%d bus=%d dev=%d fn=%d vendor=%04x present=%t exist=%t", a.Index, a.Bus, a.Device, a.Function, a.VendorID, a.Present, a.Exist)
 		}
-		v, err := lib.OverdriveVersion(a.Index)
-		if err != nil || v < 5 {
-			continue // not this logical adapter: another output of the same card may answer
+		switch {
+		case a.VendorID != 0x1002 || a.Index < 0:
+			line += " skipped"
+		case seen[loc]:
+			line += " same card"
+		default:
+			v, err := lib.OverdriveVersion(a.Index)
+			switch {
+			case err != nil:
+				line += " overdrive=" + err.Error()
+			case v < 5:
+				line += " overdrive=" + strconv.Itoa(v) + " (too old)"
+			default:
+				line += " overdrive=" + strconv.Itoa(v)
+				seen[loc] = true
+				s.cards = append(s.cards, &adlCard{index: a.Index, version: v, loc: loc, name: a.Name})
+			}
 		}
-		seen[loc] = true
-		s.cards = append(s.cards, &adlCard{index: a.Index, version: v, loc: loc, name: a.Name})
+		if len(diag.Adapters) < 16 {
+			diag.Adapters = append(diag.Adapters, line)
+		}
 	}
+	diag.Cards = len(s.cards)
+	diag.log()
 	if len(s.cards) == 0 {
-		slog.Debug("AMD GPU sensors (ADL): no AMD card with Overdrive")
 		return nil
 	}
 	return s
+}
+
+// ADLDiagnosis is what ADL answered at start, logged in one line.
+type ADLDiagnosis struct {
+	Opened      string   // the DLL and ADL2_Main_Control_Create's return code
+	AdaptersErr string   // ADL2_Adapter_NumberOfAdapters_Get / AdapterInfo_Get failed
+	Count       int      // ADL adapters (one per display output)
+	Adapters    []string // "#index bus:dev.fn vendor present exist overdrive=<version or error>"
+	Cards       int      // AMD cards with Overdrive 5 or newer (temperature / watts read)
+}
+
+func (d ADLDiagnosis) log() {
+	slog.Info("AMD GPU sensors (ADL)", "opened", d.Opened, "adapters", d.Count, "adapters_error", d.AdaptersErr,
+		"per_adapter", d.Adapters, "cards", d.Cards)
 }
 
 // Cards lists the cards found (for the start-up log): "name (bus:dev.fn, Overdrive N)".
