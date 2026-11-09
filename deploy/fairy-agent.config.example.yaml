@@ -35,7 +35,7 @@ gpu:
 # The board's BMC (e.g. Supermicro X11SCA-F) over IPMI: temperatures, fans and voltages in the panel.
 ipmi:
   enabled: false
-  # transport: wmi             # Windows default: Windows' own IPMI driver (service must run as LocalSystem)
+  # transport: wmi             # Windows default: Windows' own IPMI driver (through the fairy-agent-helper service)
   # transport: ipmitool        # Linux default: ipmitool in-band (/dev/ipmi0; see AGENT.md for the udev rule)
   # host: 192.168.1.5          # ipmitool over the network instead (IPMI-over-LAN, needs a BMC user):
   # username: fairy            #   read-only BMC user is enough for sensors; fan control needs "Operator"/admin

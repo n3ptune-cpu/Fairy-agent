@@ -37,7 +37,18 @@ func setupSelfUpdate(string) error {
 	return nil
 }
 
-func install(string, string) error {
+func setup(cfgPath string, _, _ bool) error { return setupSelfUpdate(cfgPath) }
+
+func removeHelper() error { return errors.New("the helper exists only on Windows") }
+
+func helperStatus() int {
+	fmt.Println("helper: Windows only (on Linux the agent needs no elevated helper)")
+	return 3
+}
+
+func checkAccount() {}
+
+func install(string, string, bool) error {
 	fmt.Println(`On Linux fairy-agent runs as a systemd service:
   1. copy the binary to /usr/local/bin/fairy-agent
   2. create /etc/fairy-agent/config.yaml (deploy/fairy-agent.config.example.yaml) and the token file

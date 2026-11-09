@@ -9,7 +9,14 @@
      fairy-agent 0.4.2 and older gave the service, copies the program to C:\Program Files\Fairy\fairy-agent.exe
      and checks the copy before running it
   2. installs the "fairy-agent" Windows service (first time only; creates C:\ProgramData\fairy-agent with
-     config.yaml, token and control-token, readable only by administrators, SYSTEM and the service)
+     config.yaml, token and control-token, readable only by administrators, SYSTEM and the service). The service
+     runs as its own virtual account NT SERVICE\fairy-agent (no password, cannot sign in, almost no rights).
+     An existing installation that runs as LocalService or LocalSystem (fairy-agent 0.4.x) is moved to that
+     account; config and tokens are kept
+  2b. when Core Temp, IPMI / fan control or power control is switched on in config.yaml (or with -Helper):
+     the "fairy-agent-helper" service (LocalSystem, no network, a local pipe only the agent's account may use,
+     a fixed list of requests) that reads Core Temp and the BMC, sets fans and shuts down / reboots / sleeps
+     for the agent, plus a firewall rule that blocks all network traffic of that service
   3. allows the panel in through Windows Firewall: TCP port 9101, only on the Tailscale network adapter and only
      from Tailscale addresses (100.64.0.0/10, or just the panel's address with -PanelAddress)
   4. sets up what the panel's Update button needs (only used when self_update is enabled in config.yaml): the
@@ -21,10 +28,12 @@
 
   Run it again with a newer fairy-agent-windows-amd64.exe to update by hand; config and tokens are kept.
 
+.PARAMETER Helper
+  Also install the elevated helper service (fairy-agent-helper), even if config.yaml does not switch on Core
+  Temp, IPMI, fan or power control yet (install.ps1 passes it when you chose one of those in the panel).
+
 .PARAMETER LocalSystem
-  Run the service as LocalSystem instead of LocalService. Only needed for IPMI / fan control on a Supermicro
-  board (Windows' IPMI driver is for administrators) and to see the details of every program in the Processes
-  tab. Has no effect when the service already exists (uninstall first to change the account).
+  Deprecated: the agent no longer runs as LocalSystem. Means the same as -Helper.
 
 .PARAMETER PanelAddress
   The Tailscale address of the Fairy panel, e.g. 100.64.0.2. Default: any Tailscale address (100.64.0.0/10).
@@ -36,12 +45,17 @@
   .\install-fairy-agent.ps1 -PanelAddress 100.64.0.2
 #>
 param(
+    [switch]$Helper,
     [switch]$LocalSystem,
     [string]$PanelAddress = '100.64.0.0/10',
     [int]$Port = 9101,
     [switch]$Quiet
 )
 $ErrorActionPreference = 'Stop'
+if ($LocalSystem) {
+    Write-Warning '-LocalSystem is deprecated: the agent now runs as NT SERVICE\fairy-agent and the elevated helper service is installed instead (same as -Helper).'
+    $Helper = $true
+}
 
 $src = Join-Path $PSScriptRoot 'fairy-agent-windows-amd64.exe'
 if (-not (Test-Path -LiteralPath $src)) { $src = Join-Path $PSScriptRoot 'fairy-agent.exe' }
@@ -72,6 +86,9 @@ New-Item -ItemType Directory -Force -Path $dir | Out-Null
 
 $svc = Get-Service -Name 'fairy-agent' -ErrorAction SilentlyContinue
 if ($svc -and $svc.Status -ne 'Stopped') { Stop-Service -Name 'fairy-agent' }
+# the helper runs the same program: stop it too (it hands the fans back to the BMC's automatic mode first)
+$helperSvc = Get-Service -Name 'fairy-agent-helper' -ErrorAction SilentlyContinue
+if ($helperSvc -and $helperSvc.Status -ne 'Stopped') { Stop-Service -Name 'fairy-agent-helper' }
 if ($svc) {
     # fairy-agent 0.4.2 and older let the service's own account change this folder (for self-update). Take that
     # back BEFORE copying, so nothing can swap the program between the copy and the check below.
@@ -86,12 +103,14 @@ Unblock-File -LiteralPath $exe
 if ((Get-Sha256 $exe) -ne $srcHash) { throw "$exe is not the program that was checked: not running it" }
 & $exe version
 
+$helperArg = @()
+if ($Helper) { $helperArg = @('--helper') }
 if (-not $svc) {
-    $account = if ($LocalSystem) { 'LocalSystem' } else { 'LocalService' }
-    & $exe install --account $account
+    & $exe install @helperArg
     if ($LASTEXITCODE -ne 0) { throw 'fairy-agent install failed' }
 } else {
-    & $exe setup-self-update   # existing installs: the updater service and permissions (idempotent)
+    # existing installs: move to NT SERVICE\fairy-agent, permissions, updater, helper (idempotent)
+    & $exe setup-self-update @helperArg
     if ($LASTEXITCODE -ne 0) { throw 'fairy-agent setup-self-update failed' }
 }
 
@@ -106,10 +125,24 @@ if (Get-NetAdapter -Name 'Tailscale' -ErrorAction SilentlyContinue) {
 }
 New-NetFirewallRule @rule | Out-Null
 
+# The helper never uses the network: block everything in and out for its service (and anything it starts).
+$helperRule = 'Fairy agent helper (no network)'
+Get-NetFirewallRule -DisplayName $helperRule -ErrorAction SilentlyContinue | Remove-NetFirewallRule
+if (Get-Service -Name 'fairy-agent-helper' -ErrorAction SilentlyContinue) {
+    try {
+        foreach ($d in 'Outbound', 'Inbound') {
+            New-NetFirewallRule -DisplayName $helperRule -Direction $d -Action Block -Service 'fairy-agent-helper' -Profile Any | Out-Null
+        }
+    } catch { Write-Warning "could not add the firewall rule '$helperRule': $_" }
+}
+
 & $exe check-config
 if ($LASTEXITCODE -ne 0) { throw 'fix C:\ProgramData\fairy-agent\config.yaml, then: Start-Service fairy-agent' }
+if ((Get-Service -Name 'fairy-agent-helper' -ErrorAction SilentlyContinue) -and (Get-Service -Name 'fairy-agent-helper').Status -ne 'Running') {
+    Start-Service -Name 'fairy-agent-helper'
+}
 Start-Service -Name 'fairy-agent'
-Get-Service -Name 'fairy-agent' | Format-Table -AutoSize Name, Status, StartType
+Get-Service -Name 'fairy-agent', 'fairy-agent-helper' -ErrorAction SilentlyContinue | Format-Table -AutoSize Name, Status, StartType
 
 if ($Quiet) { return }
 Write-Host ''

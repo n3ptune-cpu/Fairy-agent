@@ -12,8 +12,10 @@
      the release key built into the downloaded fairy-agent. An already installed fairy-agent.exe is never run
      before it has been replaced by the checked one (fairy-agent 0.4.2 and older let the service's own account
      change it);
-  2. runs install-fairy-agent.ps1: program in C:\Program Files\Fairy, the service (LocalSystem when Core Temp
-     or IPMI is chosen, else LocalService), folder permissions, the firewall rule for the panel only;
+  2. runs install-fairy-agent.ps1: program in C:\Program Files\Fairy, the service (as its own low-rights
+     account NT SERVICE\fairy-agent; an older install running as LocalService or LocalSystem is moved to it),
+     the elevated helper service fairy-agent-helper when Core Temp, IPMI or power control is chosen, folder
+     permissions, the firewall rule for the panel only;
   3. runs `fairy-agent join`: tokens, the chosen settings and the one-time join code (nothing secret is shown);
   4. restarts the service and waits until the panel has picked up the tokens.
 
@@ -100,17 +102,10 @@ try {
         }
     } else { Write-Warning 'Tailscale was not found in C:\Program Files\Tailscale: the panel reaches the agent only over Tailscale.' }
 
-    # 3. program, service, permissions, firewall (the existing installer script)
-    $system = $CoreTemp -or $Ipmi
-    $svc = Get-CimInstance Win32_Service -Filter "Name='fairy-agent'" -ErrorAction SilentlyContinue
-    if ($svc -and $system -and $svc.StartName -ne 'LocalSystem') {
-        Write-Host 'fairy: switching the service to LocalSystem (needed for Core Temp / IPMI)'
-        Stop-Service fairy-agent -ErrorAction SilentlyContinue
-        & (Join-Path $env:SystemRoot 'System32\sc.exe') config fairy-agent obj= LocalSystem | Out-Null
-        if ($LASTEXITCODE -ne 0) { throw 'sc.exe config fairy-agent obj= LocalSystem failed' }
-    }
+    # 3. program, services, permissions, firewall (the existing installer script). The agent runs as
+    #    NT SERVICE\fairy-agent; Core Temp, IPMI (fans) and power control go through the elevated helper.
     $inst = @{ PanelAddress = $PanelAddress; Quiet = $true }
-    if ($system) { $inst.LocalSystem = $true }
+    if ($CoreTemp -or $Ipmi -or $PowerControl) { $inst.Helper = $true }
     & (Join-Path $dir 'install-fairy-agent.ps1') @inst
 
     # the program now installed must be the checked one before it runs again as Administrator
@@ -127,6 +122,8 @@ try {
     if ($UpsName) { $joinArgs += @('--ups-name', $UpsName) } elseif ($Ups) { $joinArgs += '--ups' }
     & $exe @joinArgs
     if ($LASTEXITCODE -ne 0) { throw 'fairy-agent join failed (see above)' }
+    # the helper reads config.yaml when it starts: restart it so it serves what join just switched on
+    if (Get-Service fairy-agent-helper -ErrorAction SilentlyContinue) { Restart-Service fairy-agent-helper }
     Restart-Service fairy-agent
     Write-Host 'fairy: started; waiting for the panel to pair (keep the Add host dialog open) ...'
 

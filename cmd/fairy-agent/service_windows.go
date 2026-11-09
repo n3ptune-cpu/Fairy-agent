@@ -12,6 +12,7 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	"unsafe"
 
 	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/svc"
@@ -20,6 +21,7 @@ import (
 
 	"github.com/n3ptune-cpu/Fairy-agent/pkg/agent"
 	"github.com/n3ptune-cpu/Fairy-agent/pkg/agent/collect"
+	"github.com/n3ptune-cpu/Fairy-agent/pkg/helper/proto"
 )
 
 const serviceName = "fairy-agent"
@@ -104,6 +106,12 @@ func runService() int {
 		}
 		return 0
 	}
+	if len(os.Args) > 1 && os.Args[1] == "helper" { // the fairy-agent-helper service (LocalSystem)
+		if err := svc.Run(proto.ServiceName, helperHandler{cfgPath: configArg()}); err != nil {
+			return 1
+		}
+		return 0
+	}
 	if err := svc.Run(serviceName, handler{cfgPath: configArg()}); err != nil {
 		return 1
 	}
@@ -178,7 +186,7 @@ gpu:
   nvidia_smi: auto       # auto | off | full path to nvidia-smi.exe
 
 ipmi:
-  enabled: false         # Supermicro BMC sensors (needs: fairy-agent install --account LocalSystem)
+  enabled: false         # Supermicro BMC sensors (through the fairy-agent-helper service, see AGENT.md)
 
 fan_control:
   enabled: false         # needs ipmi.enabled; fans never below 30 %, back to 100 % at 80 °C
@@ -208,15 +216,20 @@ func writeIfMissing(path string, data []byte) (bool, error) {
 	return true, err
 }
 
-func install(cfgPath, account string) error {
-	var startName string
+// agentAccount is the agent's virtual service account: no password, cannot sign in, only its own rights.
+const agentAccount = `NT SERVICE\` + serviceName
+
+func install(cfgPath, account string, withHelper bool) error {
 	switch strings.ToLower(account) {
-	case "localservice":
-		startName = `NT AUTHORITY\LocalService`
+	case "":
 	case "localsystem":
-		startName = "" // LocalSystem
+		fmt.Println(`note: --account LocalSystem is deprecated: the agent now always runs as ` + agentAccount +
+			` and the elevated fairy-agent-helper service is installed instead (same as --helper)`)
+		withHelper = true
+	case "localservice":
+		fmt.Println(`note: --account is deprecated: the agent runs as ` + agentAccount)
 	default:
-		return errors.New("--account must be LocalService or LocalSystem")
+		return errors.New("--account is deprecated (the agent runs as " + agentAccount + "); use --helper for Core Temp, IPMI, fans or power control")
 	}
 	exe, err := os.Executable()
 	if err != nil {
@@ -242,36 +255,23 @@ func install(cfgPath, account string) error {
 	}
 	s, err := m.CreateService(serviceName, exe, mgr.Config{DisplayName: "Fairy agent",
 		Description: "Reports this PC's metrics to the Fairy homelab panel (read-only unless enabled in config.yaml).",
-		StartType:   mgr.StartAutomatic, DelayedAutoStart: true, ServiceStartName: startName,
+		StartType:   mgr.StartAutomatic, DelayedAutoStart: true, ServiceStartName: agentAccount,
 		SidType: windows.SERVICE_SID_TYPE_UNRESTRICTED, ErrorControl: mgr.ErrorNormal},
 		"run", "--config", cfgPath)
 	if err != nil {
 		return err
 	}
 	defer s.Close()
-	_ = s.SetRecoveryActions([]mgr.RecoveryAction{{Type: mgr.ServiceRestart, Delay: 10 * time.Second},
-		{Type: mgr.ServiceRestart, Delay: 30 * time.Second}, {Type: mgr.ServiceRestart, Delay: 60 * time.Second}}, 86400)
-	_ = s.SetRecoveryActionsOnNonCrashFailures(true)
-	_ = eventlog.InstallAsEventCreate(serviceName, eventlog.Error|eventlog.Warning|eventlog.Info)
-
-	// Folder: administrators and SYSTEM full control, the service itself read-only; logs\ writable by it.
-	sid, _, _, err := windows.LookupSID("", `NT SERVICE\`+serviceName)
-	if err != nil {
-		return fmt.Errorf("service installed, but its account was not found for the folder permissions: %w", err)
+	if err := hardenAgentService(s); err != nil {
+		return fmt.Errorf("service installed, but: %w", err)
 	}
+	_ = eventlog.InstallAsEventCreate(serviceName, eventlog.Error|eventlog.Warning|eventlog.Info)
 	dir := filepath.Dir(cfgPath)
-	logs := filepath.Join(dir, "logs")
-	if err := os.MkdirAll(logs, 0o700); err != nil {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
-	if err := applyACL(dir, "D:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;"+sid.String()+")"); err != nil {
-		return fmt.Errorf("folder permissions: %w", err)
-	}
-	if err := applyACL(logs, "D:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1301bf;;;"+sid.String()+")"); err != nil {
-		return fmt.Errorf("log folder permissions: %w", err)
-	}
-	if err := setupSelfUpdate(cfgPath); err != nil {
-		fmt.Println("warning: self-update (the panel's Update button) is not set up:", err)
+	if err := setupFolders(cfgPath); err != nil {
+		return err
 	}
 	if created, err := writeIfMissing(cfgPath, []byte(starterConfig())); err != nil {
 		return err
@@ -290,8 +290,125 @@ func install(cfgPath, account string) error {
 			fmt.Println("created", p)
 		}
 	}
-	fmt.Println(`installed the "fairy-agent" service (account: ` + account + `, starts automatically).
+	if err := setup(cfgPath, withHelper, false); err != nil {
+		fmt.Println("warning:", err)
+	}
+	fmt.Println(`installed the "fairy-agent" service (account: ` + agentAccount + `, starts automatically).
 Next: check config.yaml, add the firewall rule from AGENT.md, then: Start-Service fairy-agent`)
+	return nil
+}
+
+// Rights of the services. The agent's token keeps only SeChangeNotifyPrivilege (every process needs it to walk
+// folders): no shutdown, no impersonation, nothing else, whatever the account would get by default. The
+// helper is LocalSystem but keeps only what it uses: SeShutdownPrivilege (shutdown, reboot, sleep),
+// SeImpersonatePrivilege (to identify pipe clients) and SeChangeNotifyPrivilege; without SeDebugPrivilege,
+// SeLoadDriverPrivilege, SeTakeOwnershipPrivilege, SeBackupPrivilege ... it can neither open other programs'
+// memory, nor load a driver, nor take files over.
+var (
+	agentPrivileges  = []string{"SeChangeNotifyPrivilege"}
+	helperPrivileges = []string{"SeChangeNotifyPrivilege", "SeImpersonatePrivilege", "SeShutdownPrivilege"}
+)
+
+// serviceSidInfo is SERVICE_SID_INFO; requiredPrivilegesInfo is SERVICE_REQUIRED_PRIVILEGES_INFO.
+type serviceSidInfo struct{ ServiceSidType uint32 }
+type requiredPrivilegesInfo struct{ RequiredPrivileges *uint16 }
+
+func setRequiredPrivileges(h windows.Handle, privs []string) error {
+	var block []uint16 // REG_MULTI_SZ: each name NUL-terminated, then one more NUL
+	for _, p := range privs {
+		u, err := windows.UTF16FromString(p)
+		if err != nil {
+			return err
+		}
+		block = append(block, u...)
+	}
+	block = append(block, 0)
+	info := requiredPrivilegesInfo{RequiredPrivileges: &block[0]}
+	return windows.ChangeServiceConfig2(h, windows.SERVICE_CONFIG_REQUIRED_PRIVILEGES_INFO, (*byte)(unsafe.Pointer(&info)))
+}
+
+func setSidType(h windows.Handle, t uint32) error {
+	info := serviceSidInfo{ServiceSidType: t}
+	return windows.ChangeServiceConfig2(h, windows.SERVICE_CONFIG_SERVICE_SID_INFO, (*byte)(unsafe.Pointer(&info)))
+}
+
+func setRecovery(s *mgr.Service) {
+	_ = s.SetRecoveryActions([]mgr.RecoveryAction{{Type: mgr.ServiceRestart, Delay: 10 * time.Second},
+		{Type: mgr.ServiceRestart, Delay: 30 * time.Second}, {Type: mgr.ServiceRestart, Delay: 60 * time.Second}}, 86400)
+	_ = s.SetRecoveryActionsOnNonCrashFailures(true)
+}
+
+// hardenAgentService makes the agent's service run as its virtual account with an unrestricted service SID
+// (the folder permissions name that SID) and only SeChangeNotifyPrivilege. It reports whether the account
+// changed (the change takes effect when the service next starts).
+func hardenAgentService(s *mgr.Service) error {
+	_, err := migrateAgentAccount(s)
+	return err
+}
+
+func migrateAgentAccount(s *mgr.Service) (bool, error) {
+	c, err := s.Config()
+	if err != nil {
+		return false, err
+	}
+	changed := !strings.EqualFold(c.ServiceStartName, agentAccount)
+	if changed {
+		acc, _ := windows.UTF16PtrFromString(agentAccount)
+		// a virtual account has no password: lpPassword must be NULL
+		if err := windows.ChangeServiceConfig(s.Handle, windows.SERVICE_NO_CHANGE, windows.SERVICE_NO_CHANGE,
+			windows.SERVICE_NO_CHANGE, nil, nil, nil, nil, acc, nil, nil); err != nil {
+			return false, fmt.Errorf("switching the service to %s: %w", agentAccount, err)
+		}
+	}
+	if err := setSidType(s.Handle, windows.SERVICE_SID_TYPE_UNRESTRICTED); err != nil {
+		return changed, fmt.Errorf("service SID type: %w", err)
+	}
+	if err := setRequiredPrivileges(s.Handle, agentPrivileges); err != nil {
+		return changed, fmt.Errorf("service privileges: %w", err)
+	}
+	setRecovery(s)
+	return changed, nil
+}
+
+// setupFolders sets the permissions of C:\ProgramData\fairy-agent (idempotent): the folder (config.yaml,
+// token, control-token): administrators and SYSTEM full control, the agent's account read-only; logs\: the agent
+// may write; helper\ (the helper's audit log): the agent may only read.
+func setupFolders(cfgPath string) error {
+	sid, _, _, err := windows.LookupSID("", agentAccount)
+	if err != nil {
+		return fmt.Errorf("the service account %s was not found (is the service installed?): %w", agentAccount, err)
+	}
+	dir := filepath.Dir(cfgPath)
+	logs := filepath.Join(dir, "logs")
+	hdir := filepath.Join(dir, "helper")
+	for _, d := range []string{logs, hdir} {
+		if err := os.MkdirAll(d, 0o700); err != nil {
+			return err
+		}
+	}
+	for _, d := range []string{dir, logs, hdir} {
+		if st, err := os.Lstat(d); err != nil || !st.IsDir() || isReparse(st) {
+			return fmt.Errorf("%s is not a plain folder: remove it and run this again", d)
+		}
+	}
+	read := "D:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;" + sid.String() + ")"
+	if err := applyACL(dir, read); err != nil {
+		return fmt.Errorf("folder permissions: %w", err)
+	}
+	if err := applyACL(logs, "D:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1301bf;;;"+sid.String()+")"); err != nil {
+		return fmt.Errorf("log folder permissions: %w", err)
+	}
+	if err := applyACL(hdir, read); err != nil {
+		return fmt.Errorf("helper folder permissions: %w", err)
+	}
+	admins, err := windows.CreateWellKnownSid(windows.WinBuiltinAdministratorsSid)
+	if err != nil {
+		return err
+	}
+	// the helper (LocalSystem) writes in hdir only if an administrator owns it (collect.TrustedFolder)
+	if err := windows.SetNamedSecurityInfo(hdir, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION, admins, nil, nil, nil); err != nil {
+		return fmt.Errorf("helper folder owner: %w", err)
+	}
 	return nil
 }
 
@@ -435,7 +552,7 @@ func checkProgramFolder() {
 // The installer only installs releases signed with the key built into the installed program, and only when
 // self_update is enabled in config.yaml (the agent will not stage anything otherwise).
 func setupSelfUpdate(cfgPath string) error {
-	sid, _, _, err := windows.LookupSID("", `NT SERVICE\`+serviceName)
+	sid, _, _, err := windows.LookupSID("", agentAccount)
 	if err != nil {
 		return fmt.Errorf("the service account was not found (is the service installed?): %w", err)
 	}
@@ -546,18 +663,11 @@ func uninstall() error {
 		return errors.New("the service is not installed")
 	}
 	defer s.Close()
-	if st, err := s.Query(); err == nil && st.State != svc.Stopped {
-		_, _ = s.Control(svc.Stop)
-		for i := 0; i < 40; i++ {
-			if st, err := s.Query(); err != nil || st.State == svc.Stopped {
-				break
-			}
-			time.Sleep(500 * time.Millisecond)
-		}
-	}
+	stopAndWait(s, 20*time.Second)
 	if err := s.Delete(); err != nil {
 		return err
 	}
+	deleteHelper(m)
 	if u, err := m.OpenService(agent.UpdaterServiceName); err == nil {
 		if err := u.Delete(); err != nil {
 			fmt.Println("warning: could not remove the", agent.UpdaterServiceName, "service:", err)
@@ -565,7 +675,7 @@ func uninstall() error {
 		u.Close()
 	}
 	_ = eventlog.Remove(serviceName)
-	fmt.Println(`removed the "fairy-agent" service. Its folder (config, tokens, logs) is kept: delete`,
+	fmt.Println(`removed the "fairy-agent" services. Their folder (config, tokens, logs) is kept: delete`,
 		filepath.Dir(agent.DefaultConfigPath()), "yourself if you no longer need it.")
 	return nil
 }

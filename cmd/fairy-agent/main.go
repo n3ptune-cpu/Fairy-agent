@@ -1,7 +1,7 @@
 // Command fairy-agent reports this machine's metrics to the Fairy panel. See AGENT.md.
 //
 //	fairy-agent run [--config path]        serve (also what the Windows service and the systemd unit run)
-//	fairy-agent install [--config path] [--account LocalService|LocalSystem]   Windows: install the service
+//	fairy-agent install [--config path] [--helper]   Windows: install the service (and the elevated helper)
 //	fairy-agent uninstall                  Windows: remove the service (config and tokens stay)
 //	fairy-agent check-config [--config path]
 //	fairy-agent config get|set|show ...      read or change one setting of config.yaml (set: root / Administrator)
@@ -11,7 +11,9 @@
 //	fairy-agent gen-token                  print a new random token (for the token files)
 //	fairy-agent update [--check] [--yes] [--force]  install the latest signed release by hand (root / Administrator)
 //	fairy-agent apply-update [--config path]  install the release the agent staged (run by the updater, see AGENT.md)
-//	fairy-agent setup-self-update          Windows: the updater service and the permissions self-update needs
+//	fairy-agent setup-self-update [--helper]  Windows: move to NT SERVICE\fairy-agent, permissions, updater, helper
+//	fairy-agent helper-status              Windows: the helper service and what it serves
+//	fairy-agent remove-helper              Windows: remove the helper service
 //	fairy-agent version
 package main
 
@@ -43,8 +45,11 @@ var (
 const usage = `fairy-agent: reports this machine's metrics to the Fairy panel (see AGENT.md)
 
   fairy-agent run [--config PATH]           run in the foreground (the service and systemd unit run this)
-  fairy-agent install [--config PATH] [--account LocalService|LocalSystem]
-                                            Windows: install and configure the "fairy-agent" service
+  fairy-agent install [--config PATH] [--helper]
+                                            Windows: install the "fairy-agent" service (account
+                                            NT SERVICE\fairy-agent); --helper also installs the elevated
+                                            fairy-agent-helper service (Core Temp, IPMI, fans, power control).
+                                            --account LocalSystem still works: it now means --helper
   fairy-agent uninstall                     Windows: remove the service (config and tokens are kept)
   fairy-agent check-config [--config PATH]  check config.yaml and the token files, then exit
   fairy-agent config get <setting> | set <setting> <value> | show  [--config PATH]
@@ -68,9 +73,14 @@ const usage = `fairy-agent: reports this machine's metrics to the Fairy panel (s
   fairy-agent apply-update [--config PATH]  install the update the agent staged (started by the panel's
                                             Update button through fairy-agent-update.service (Linux) or the
                                             fairy-agent-update service (Windows))
-  fairy-agent setup-self-update             Windows (Administrator): install the fairy-agent-update service and
-                                            the permissions self-update needs; removes the program-folder write
-                                            access older versions gave the agent
+  fairy-agent setup-self-update [--helper]  Windows (Administrator), safe to run again: moves the agent to its
+                                            own account NT SERVICE\fairy-agent (from LocalService or LocalSystem),
+                                            sets the folder permissions, the fairy-agent-update service, and the
+                                            fairy-agent-helper service when config.yaml needs it (or --helper)
+  fairy-agent helper-status                 Windows (Administrator): accounts of both services, is the helper
+                                            running, what it serves (exit 0 running, 3 not running)
+  fairy-agent remove-helper                 Windows (Administrator): stop (fans back to the BMC) and remove the
+                                            helper service
   fairy-agent version
 `
 
@@ -85,7 +95,8 @@ func main() {
 	cmd, args := os.Args[1], os.Args[2:]
 	fs := flag.NewFlagSet(cmd, flag.ExitOnError)
 	cfgPath := fs.String("config", agent.DefaultConfigPath(), "path of config.yaml")
-	account := fs.String("account", "LocalService", "Windows service account: LocalService or LocalSystem")
+	account := fs.String("account", "", "deprecated: LocalSystem now means --helper")
+	withHelper := fs.Bool("helper", false, "Windows: install the elevated fairy-agent-helper service")
 	check := fs.Bool("check", false, "update: only show the installed and the latest version")
 	yes := fs.Bool("yes", false, "update: do not ask before installing")
 	force := fs.Bool("force", false, "update: also reinstall the same version or install an older one")
@@ -95,7 +106,7 @@ func main() {
 		os.Exit(runForeground(*cfgPath))
 	case "install":
 		_ = fs.Parse(args)
-		if err := install(*cfgPath, *account); err != nil {
+		if err := install(*cfgPath, *account, *withHelper); err != nil {
 			fmt.Fprintln(os.Stderr, "install failed:", err)
 			os.Exit(1)
 		}
@@ -143,10 +154,20 @@ func main() {
 		os.Exit(applyUpdate(*cfgPath))
 	case "setup-self-update":
 		_ = fs.Parse(args)
-		if err := setupSelfUpdate(*cfgPath); err != nil {
+		if err := setup(*cfgPath, *withHelper, true); err != nil {
 			fmt.Fprintln(os.Stderr, "setup-self-update failed:", err)
 			os.Exit(1)
 		}
+	case "helper-status":
+		os.Exit(helperStatus())
+	case "remove-helper":
+		if err := removeHelper(); err != nil {
+			fmt.Fprintln(os.Stderr, "remove-helper failed:", err)
+			os.Exit(1)
+		}
+	case "helper":
+		fmt.Fprintln(os.Stderr, "fairy-agent helper runs only as the fairy-agent-helper Windows service (Start-Service fairy-agent-helper)")
+		os.Exit(2)
 	case "version", "--version", "-v":
 		signed := "signed-release key: none (local build, no self-update)"
 		if releaseKey != "" {
@@ -213,6 +234,7 @@ func serve(ctx context.Context, cfgPath string, interactive bool) error {
 		defer closer.Close()
 	}
 	checkProgramFolder()
+	checkAccount()
 	if err := agent.Run(ctx, cfg, agent.Build{Version: version, ReleaseKey: releaseKey}); err != nil {
 		slog.Error("fairy-agent cannot run", "error", err.Error())
 		return err
