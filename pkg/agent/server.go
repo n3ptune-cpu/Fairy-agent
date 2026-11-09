@@ -130,7 +130,10 @@ type Deps struct {
 	// HelperSources are the readings and actions this agent gets through the helper (api.FeatureCoreTemp ...):
 	// while the helper is not running they are listed in /metrics "unavailable".
 	HelperSources []string
-	Version       string
+	// Migration is the Windows move from LocalSystem to NT SERVICE\fairy-agent (/metrics "migration"); nil on
+	// Linux.
+	Migration interface{ Status() api.MigrationStatus }
+	Version   string
 }
 
 // Agent answers the panel.
@@ -447,6 +450,9 @@ func (a *Agent) Metrics(ctx context.Context) map[string]any {
 	}
 	if a.d.Updater != nil {
 		m["self_update"] = a.d.Updater.Status()
+	}
+	if a.d.Migration != nil {
+		m["migration"] = a.d.Migration.Status()
 	}
 	if a.d.Helper != nil {
 		hs := a.d.Helper.Status(ctx)

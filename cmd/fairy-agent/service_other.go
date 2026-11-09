@@ -46,8 +46,6 @@ func helperStatus() int {
 	return 3
 }
 
-func checkAccount() {}
-
 func install(string, string, bool) error {
 	fmt.Println(`On Linux fairy-agent runs as a systemd service:
   1. copy the binary to /usr/local/bin/fairy-agent

@@ -92,6 +92,13 @@ func (p *Power) current() *Pending {
 	return p.pending
 }
 
+// Scheduled reports whether a shutdown, reboot or sleep is pending.
+func (p *Power) Scheduled() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.current() != nil
+}
+
 // State is the /metrics `power_control` block.
 func (p *Power) State() map[string]any {
 	p.mu.Lock()

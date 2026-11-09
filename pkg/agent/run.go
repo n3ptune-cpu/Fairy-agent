@@ -82,6 +82,9 @@ func IPMITransport(c IPMIConfig) (ipmi.Transport, error) {
 type Build struct {
 	Version    string
 	ReleaseKey string // base64 ed25519 public key of signed releases; "" in local builds (no self-update)
+	// Migration (Windows): moves a LocalSystem service to NT SERVICE\fairy-agent once the agent listens; nil
+	// elsewhere.
+	Migration Migrator
 }
 
 // Run starts every part of the agent and serves until ctx ends.
@@ -110,6 +113,9 @@ func Run(ctx context.Context, cfg *Config, b Build) error {
 	defer cancel()
 
 	d := Deps{Collector: collect.NewSystem(), Relay: relay, Version: version}
+	if b.Migration != nil {
+		d.Migration = b.Migration
+	}
 	// Windows: the elevated helper (fairy-agent-helper) does what this low-rights account may not. When it is
 	// installed, Core Temp, IPMI through Windows, fans and power go through it; when it is not, the agent tries
 	// them itself as before (an installation not yet moved to NT SERVICE\fairy-agent still has its old rights).
@@ -222,6 +228,18 @@ func Run(ctx context.Context, cfg *Config, b Build) error {
 				return err
 			}
 		}
+		if b.Migration != nil { // no update while the services are being changed
+			ready := o.Ready
+			o.Ready = func() error {
+				if b.Migration.Busy() {
+					return errMigrating
+				}
+				if ready != nil {
+					return ready()
+				}
+				return nil
+			}
+		}
 		d.Updater = NewUpdater(o)
 		if st := d.Updater.Status(); st.State == "unavailable" {
 			slog.Warn("self_update is enabled but cannot work", "reason", st.Message)
@@ -264,6 +282,9 @@ func Run(ctx context.Context, cfg *Config, b Build) error {
 	srv := a.Server()
 	errc := make(chan error, 1)
 	go func() { errc <- srv.Serve(ln) }()
+	if b.Migration != nil {
+		go b.Migration.Run(ctx, a.migrationHooks())
+	}
 	select {
 	case <-ctx.Done():
 	case err := <-errc:

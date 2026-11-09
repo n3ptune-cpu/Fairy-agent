@@ -6,7 +6,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log/slog"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -155,6 +154,13 @@ func setup(cfgPath string, forceHelper, restart bool) error {
 		if err := setupHelper(m, cfgPath); err != nil {
 			problems = append(problems, "the helper is not set up: "+err.Error())
 		}
+		if helperInstalled(m) {
+			if err := helperFirewall(); err != nil {
+				problems = append(problems, err.Error())
+			} else {
+				fmt.Println(`firewall: all network traffic of the helper's service blocked (rules "` + helperFirewallRule + `", in and out)`)
+			}
+		}
 	} else {
 		fmt.Println("no helper needed (no Core Temp, IPMI, fan or power control in config.yaml): only the low-rights agent runs")
 	}
@@ -254,6 +260,7 @@ func removeHelper() error {
 		return err
 	}
 	_ = eventlog.Remove(proto.ServiceName)
+	removeHelperFirewall()
 	fmt.Println("removed the " + proto.ServiceName + " service; restart the agent: Restart-Service fairy-agent")
 	return nil
 }
@@ -270,6 +277,7 @@ func deleteHelper(m *mgr.Mgr) {
 		fmt.Println("warning: could not remove the", proto.ServiceName, "service:", err)
 	}
 	_ = eventlog.Remove(proto.ServiceName)
+	removeHelperFirewall()
 }
 
 // helperStatus is `fairy-agent helper-status` (Administrator): asks the helper over its pipe (administrators
@@ -333,21 +341,4 @@ func helperStatus() int {
 	fmt.Println("helper: running, answers on", proto.PipeName)
 	fmt.Println(string(r.Data))
 	return 0
-}
-
-// checkAccount warns when the agent's service still runs as LocalSystem or LocalService (installed by 0.4.x
-// and updated through the panel): the move to its own low-rights account happens only as Administrator.
-func checkAccount() {
-	if !isService() {
-		return
-	}
-	u, err := windows.GetCurrentProcessToken().GetTokenUser()
-	if err != nil {
-		return
-	}
-	switch u.User.Sid.String() {
-	case "S-1-5-18", "S-1-5-19":
-		slog.Warn("the fairy-agent service still runs as LocalSystem or LocalService; move it to its own low-rights account " +
-			agentAccount + " (and install the helper where needed) " + agent.HelperSetupHint)
-	}
 }

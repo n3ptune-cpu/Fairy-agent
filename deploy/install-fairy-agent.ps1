@@ -16,7 +16,7 @@
   2b. when Core Temp, IPMI / fan control or power control is switched on in config.yaml (or with -Helper):
      the "fairy-agent-helper" service (LocalSystem, no network, a local pipe only the agent's account may use,
      a fixed list of requests) that reads Core Temp and the BMC, sets fans and shuts down / reboots / sleeps
-     for the agent, plus a firewall rule that blocks all network traffic of that service
+     for the agent, plus two firewall rules (in and out) that block all network traffic of that service
   3. allows the panel in through Windows Firewall: TCP port 9101, only on the Tailscale network adapter and only
      from Tailscale addresses (100.64.0.0/10, or just the panel's address with -PanelAddress)
   4. sets up what the panel's Update button needs (only used when self_update is enabled in config.yaml): the
@@ -126,14 +126,21 @@ if (Get-NetAdapter -Name 'Tailscale' -ErrorAction SilentlyContinue) {
 New-NetFirewallRule @rule | Out-Null
 
 # The helper never uses the network: block everything in and out for its service (and anything it starts).
+# install / setup-self-update above already add these two rules (the agent adds them too when it moves itself
+# off LocalSystem); this only makes sure both directions exist, the same rules either way.
 $helperRule = 'Fairy agent helper (no network)'
-Get-NetFirewallRule -DisplayName $helperRule -ErrorAction SilentlyContinue | Remove-NetFirewallRule
 if (Get-Service -Name 'fairy-agent-helper' -ErrorAction SilentlyContinue) {
+    $have = @(Get-NetFirewallRule -DisplayName $helperRule -ErrorAction SilentlyContinue |
+              Where-Object { $_.Action -eq 'Block' } | ForEach-Object { $_.Direction.ToString() })
     try {
         foreach ($d in 'Outbound', 'Inbound') {
-            New-NetFirewallRule -DisplayName $helperRule -Direction $d -Action Block -Service 'fairy-agent-helper' -Profile Any | Out-Null
+            if ($have -notcontains $d) {
+                New-NetFirewallRule -DisplayName $helperRule -Direction $d -Action Block -Service 'fairy-agent-helper' -Profile Any | Out-Null
+            }
         }
     } catch { Write-Warning "could not add the firewall rule '$helperRule': $_" }
+} else {
+    Get-NetFirewallRule -DisplayName $helperRule -ErrorAction SilentlyContinue | Remove-NetFirewallRule
 }
 
 & $exe check-config

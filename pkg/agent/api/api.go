@@ -72,3 +72,36 @@ var (
 	ErrHelperNotInstalled = errors.New("not_installed")
 	ErrHelperStopped      = errors.New("helper stopped")
 )
+
+// Migration states (MigrationStatus.State): moving a Windows agent installed by fairy-agent 0.4.x (LocalSystem
+// or LocalService) to its own account NT SERVICE\fairy-agent.
+const (
+	MigrationDone       = "done"        // the agent moved itself and runs as NT SERVICE\fairy-agent
+	MigrationPending    = "pending"     // it will move itself, or is doing so now (Step says where)
+	MigrationFailed     = "failed"      // the last attempt failed and was rolled back; it tries again at NextTry
+	MigrationNotNeeded  = "not_needed"  // already on NT SERVICE\fairy-agent (installed or moved by an admin)
+	MigrationNeedsAdmin = "needs_admin" // it cannot move itself (e.g. LocalService): Command, as Administrator
+)
+
+// MigrationStatus is the "migration" block of GET /metrics (Windows only; Linux agents leave it out).
+type MigrationStatus struct {
+	State string `json:"state"`
+	// Account the agent's process runs as now: `NT SERVICE\fairy-agent`, "LocalSystem", "LocalService", ...
+	Account string `json:"account,omitempty"`
+	// Step: pending, the step in progress (or "waiting" before the first); failed, the step that failed.
+	Step string `json:"step,omitempty"`
+	// Error of the last failed attempt (failed only).
+	Error string `json:"error,omitempty"`
+	// RolledBack: the failed attempt put the service back on its old account (failed only).
+	RolledBack bool `json:"rolled_back,omitempty"`
+	// Attempts so far.
+	Attempts int `json:"attempts,omitempty"`
+	// NextTry: RFC 3339 time of the next attempt (pending before the first, failed).
+	NextTry string `json:"next_try,omitempty"`
+	// Since: RFC 3339 time of the last change of the state.
+	Since string `json:"since,omitempty"`
+	// Reason the agent cannot move itself (needs_admin), or what it waits for (pending).
+	Reason string `json:"reason,omitempty"`
+	// Command an administrator runs instead (needs_admin, failed), in an Administrator PowerShell.
+	Command string `json:"command,omitempty"`
+}

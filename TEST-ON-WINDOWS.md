@@ -1,4 +1,4 @@
-# Testing 0.5.0 on Windows (agent + helper)
+# Testing 0.5.x on Windows (agent + helper, self-migration)
 
 0.5.0 moves the Windows agent to its own low-rights account and adds the **fairy-agent-helper** service (see
 AGENT.md, "Two services"). None of this has run on real Windows yet. Try it on **one** PC first, ideally one
@@ -105,6 +105,72 @@ with who asked.
 Only where safe: with a fixed speed set, `Stop-Service fairy-agent` (the agent, not the helper). The fans keep
 their speed and the helper's watchdog keeps watching (helper.log). `Start-Service fairy-agent` afterwards.
 
+## 8. Self-migration (0.5.1): a LocalSystem PC moves itself when you press Update
+
+Take **one** PC that runs build 7 (0.4.2) or build 10 (0.4.4) **as LocalSystem** (e.g. NSX-FURINA or Project
+Rebuild; not NSX-CYRENE first). LocalService PCs (Varesa, Escoffier, maybe MSI-5600X) do **not** move
+themselves: for those only check the `needs_admin` part at the end.
+
+Before, in an Administrator PowerShell on the PC (keep the output):
+
+```powershell
+sc.exe qc fairy-agent | findstr SERVICE_START_NAME      # LocalSystem
+sc.exe qprivs fairy-agent
+Get-Service fairy-agent, fairy-agent-update, fairy-agent-helper -ErrorAction SilentlyContinue
+```
+
+If the PC has fan control: set a fixed speed in the panel first (mode Full, e.g. 50 %).
+
+Then press **Update** for this host in the panel (self_update must be on). What should happen:
+
+1. 0 - 1 min: the old installer swaps in 0.5.1 and checks it; the panel shows the new version.
+   `/metrics` (panel raw view) has `"migration": {"state": "pending", "step": "waiting", "next_try": ...}`.
+2. about 2 min later, within a minute: `agent.log` shows `migration: attempt 1 ...`, then `migration: step
+   program_folder` ... `migration: step restart`; the fans go back to the BMC's automatic mode (step `fans`),
+   then the helper starts (where Core Temp / IPMI / power control are on) and takes the watchdog.
+3. the agent restarts once (the panel may show it offline for a few seconds). `installer.log` shows
+   `migration: attempt 1: restarting fairy-agent under NT SERVICE\fairy-agent` and `migration: done`.
+4. `/metrics`: `"migration": {"state": "done", "account": "NT SERVICE\\fairy-agent", ...}`; the panel's
+   Update button works again (try it once more: "already up to date").
+
+Check:
+
+```powershell
+Get-Content C:\ProgramData\fairy-agent\logs\agent.log -Tail 60 | Select-String migration
+Get-Content C:\ProgramData\fairy-agent\update\installer.log -Tail 30
+Get-Content C:\ProgramData\fairy-agent\migration\state.json        # "phase":"done"
+icacls C:\ProgramData\fairy-agent\migration                          # SYSTEM, Administrators (F), NT SERVICE\fairy-agent (RX) only
+sc.exe qc fairy-agent | findstr SERVICE_START_NAME                    # NT SERVICE\fairy-agent
+sc.exe qprivs fairy-agent                                             # SeChangeNotifyPrivilege only
+sc.exe qc fairy-agent-update | findstr START_TYPE                     # DEMAND_START again
+Get-NetFirewallRule -DisplayName "Fairy agent helper (no network)" | Select Direction, Action   # where a helper exists
+```
+
+and then sections 2 and 3 above (accounts, whoami, folders, readings).
+
+**Failure and rollback** (worth one try on a test PC): make the new account fail on purpose. Before pressing
+Update: `secpol.msc` > Local Policies > User Rights Assignment > **Deny log on as a service** > Add User or
+Group > `NT SERVICE\fairy-agent` (LocalSystem is not affected by that right; a file permission would not do,
+the LocalSystem service carries the same service SID). Expected after step 2: `installer.log` says starting
+the agent as NT SERVICE\fairy-agent failed (logon failure) and `rolling back to LocalSystem`; `sc.exe qc
+fairy-agent` shows LocalSystem again; the agent runs and answers the panel as before; `/metrics` says
+`"migration": {"state": "failed", "step": "restart", "rolled_back": true, "next_try": <in 1 hour>}`.
+`Restart-Service fairy-agent` does **not** make it try sooner (agent.log: no new `migration: attempt` line). Undo
+the test: remove the entry from "Deny log on as a service" again, then wait for next_try or run
+`& $fa setup-self-update`.
+
+**Interrupted**: during step 2 (the `migration: step ...` lines), `Restart-Service fairy-agent`. The next start
+logs `resuming attempt 1 after an interruption` about two minutes later and finishes.
+
+**LocalService PCs**: after Update to 0.5.1, `/metrics` says `"migration": {"state": "needs_admin", "account":
+"LocalService", "command": "& \"C:\\Program Files\\Fairy\\fairy-agent.exe\" setup-self-update"}` and agent.log
+says once that an administrator moves it. Nothing else changes. Run that command in an Administrator
+PowerShell: `/metrics` then says `not_needed` and `sc.exe qc` shows `NT SERVICE\fairy-agent`.
+
+**Rollback by hand** (if a PC is left in a bad state): `sc.exe config fairy-agent obj= LocalSystem` (no
+password), `Start-Service fairy-agent`, and send `migration\state.json`, `agent.log` and `installer.log`. To keep
+the agent from trying again for now, leave `state.json` as it is (it waits for `next_try`).
+
 ## Rollback (back to build 10 / v0.4.4)
 
 0.4.4 does not know the helper or the new account, so remove 0.5's services first. Config and tokens stay, the
@@ -119,4 +185,5 @@ Set-ExecutionPolicy -Scope Process Bypass
 .\install-fairy-agent.ps1 -PanelAddress 100.88.109.47 -LocalSystem   # -LocalSystem only if this PC used Core Temp / fans
 ```
 
-Report back: the output of section 2, the last 30 lines of both logs, and anything that differed.
+Report back: the output of section 2, the last 30 lines of both logs (and for section 8 `installer.log` and
+`migration\state.json`), and anything that differed.

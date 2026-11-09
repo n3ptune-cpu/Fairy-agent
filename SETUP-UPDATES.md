@@ -253,10 +253,12 @@ panel or by hand), in PowerShell as Administrator; it also takes back the write 
 **Coming from 0.4.x (0.5.0 and later).** Since 0.5.0 the agent runs as its own low-rights account
 `NT SERVICE\fairy-agent`, and Core Temp, IPMI / fans and shutdown / sleep go through the separate
 **fairy-agent-helper** service (see AGENT.md, "Install on Windows"). An update through the panel only swaps the
-program: the service keeps its old account (LocalService or LocalSystem) and keeps working as before, and its
-log says it should be moved. Move it once, as Administrator, with the same command as above (or by running
-`install-fairy-agent.ps1` again); it keeps config and tokens and installs the helper where config.yaml needs
-it. When the helper runs, the updater stops it during an update (fans go back to the BMC's automatic mode for
+program. Since 0.5.1 a service that runs as **LocalSystem** then moves itself (the agent does what the command
+above does, restarts once through the updater service, rolls back if the new account does not come up; see
+AGENT.md, "Moving to the new account by itself"). One that runs as **LocalService** keeps that account and keeps
+working as before, its log and `/metrics` (`"migration": {"state": "needs_admin"}`) say it should be moved:
+move it once, as Administrator, with the same command as above (or by running `install-fairy-agent.ps1`
+again); it keeps config and tokens and installs the helper where config.yaml needs it. When the helper runs, the updater stops it during an update (fans go back to the BMC's automatic mode for
 those seconds) and starts it again with the new program.
 
 The control token is in `C:\ProgramData\fairy-agent\control-token`.

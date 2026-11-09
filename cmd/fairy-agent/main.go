@@ -234,8 +234,10 @@ func serve(ctx context.Context, cfgPath string, interactive bool) error {
 		defer closer.Close()
 	}
 	checkProgramFolder()
-	checkAccount()
-	if err := agent.Run(ctx, cfg, agent.Build{Version: version, ReleaseKey: releaseKey}); err != nil {
+	// Windows: a LocalSystem service moves itself to NT SERVICE\fairy-agent (built before Run, which clears
+	// the update stage the migration looks at)
+	mig := newMigrator(cfgPath, cfg)
+	if err := agent.Run(ctx, cfg, agent.Build{Version: version, ReleaseKey: releaseKey, Migration: mig}); err != nil {
 		slog.Error("fairy-agent cannot run", "error", err.Error())
 		return err
 	}
@@ -282,6 +284,11 @@ func applyUpdateCtx(ctx context.Context, cfgPath string) int {
 	}
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Minute)
 	defer cancel()
+	// Windows: the agent moved its service to NT SERVICE\fairy-agent and started this service to restart and
+	// check it; that is all this run does (the state file is administrators-only)
+	if handled, code := superviseMigration(ctx, cfg, cfgPath); handled {
+		return code
+	}
 	slog.Warn("apply-update: starting", "installed", version)
 	if err := agent.ApplyUpdate(ctx, cfg, version, releaseKey); err != nil {
 		fmt.Fprintln(os.Stderr, "fairy-agent apply-update:", err)

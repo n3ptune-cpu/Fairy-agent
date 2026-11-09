@@ -243,13 +243,72 @@ account, the helper's folder writable only by administrators and SYSTEM), instal
 uses Core Temp, IPMI or power control (`--helper` installs it anyway), and restart what was running. Config and
 tokens stay, so the panel notices nothing but a restart. The folder permissions name the same account as
 before (`NT SERVICE\fairy-agent` was already the service's own SID), so nothing has to be re-granted. Updating
-to 0.5 through the panel does not move the account by itself; until you run one of the two, the agent works
-as before (with its old account's rights) and its log says so once at start.
+to 0.5.0 through the panel did not move the account by itself; since 0.5.1 an agent that runs as
+**LocalSystem** moves itself (next section). One that runs as **LocalService** cannot (that account may not
+change services): it keeps working as before (with LocalService's rights), its log says so once at start, and
+`/metrics` says `"migration": {"state": "needs_admin", "command": ...}` until an administrator runs one of the
+two above.
+
+#### Moving to the new account by itself (0.5.1, LocalSystem only)
+
+When the agent starts as a service running as LocalSystem (installed by 0.4.x for Core Temp or fans, then
+updated through the panel: on 0.4.2 by the old in-service updater, on build 10 by the fairy-agent-update
+service), it does what `setup-self-update` does, by itself, once. Nothing to press besides **Update**.
+
+It only does so as the signed release (built with the release key), installed as
+`C:\Program Files\Fairy\fairy-agent.exe` (the service must start exactly that program), after checking that
+only administrators can change it (the same check as for the updater). Otherwise `/metrics` says
+`needs_admin` with the reason. It never takes a path or a command from `config.yaml` or the network; it adds
+nothing that listens.
+
+**When.** Two minutes after the agent listens, and only once the installer that just put it in place has
+reported (it checks the new version for up to 90 s and must not see it restart), the updater service is not
+running, no update is being downloaded and no shutdown / reboot / sleep is scheduled. The panel's Update
+answers "unavailable" for the few minutes it takes.
+
+**The steps** (each one is safe to run again; agent.log has a line before and after each, `migration: step ...`):
+
+1. `program_folder`: the program folder administrators-only again (0.4.2 let the service write it);
+2. `folders`: `C:\ProgramData\fairy-agent` (config and tokens readable by the new account, `logs\` writable);
+3. `updater`: the fairy-agent-update service, `update\` and `state\`, as `setup-self-update`;
+4. `fans`: when this agent controls the fans itself, back to the BMC's automatic mode (only from a fixed duty);
+5. `helper`: the fairy-agent-helper service when `config.yaml` uses Core Temp, IPMI through Windows or power
+   control (or one is installed already); it starts at once and its fan watchdog takes over;
+6. `firewall`: the helper's two block rules (in and out, its service SID; `netsh advfirewall`, the same rules
+   `install-fairy-agent.ps1` and `setup-self-update` make);
+7. `switch`: the service to `NT SERVICE\fairy-agent`, SID type unrestricted, only `SeChangeNotifyPrivilege`
+   (effective at its next start), and the updater service to start with Windows until the switch is checked;
+8. `restart`: the agent starts the **fairy-agent-update** service (LocalSystem, the installed program). Seeing
+   the migration state, it installs nothing: it stops the agent, starts it (now as `NT SERVICE\fairy-agent`),
+   and checks within two minutes that the service runs, that its process runs as `NT SERVICE\fairy-agent`,
+   that the same process keeps running for 20 s, and that `/metrics` answers twice with this version. Then
+   it writes `done` and sets itself back to manual start. Its log is
+   `C:\ProgramData\fairy-agent\update\installer.log`.
+
+The state is in `C:\ProgramData\fairy-agent\migration\state.json` (administrators and SYSTEM may write,
+the agent's account only read; refused if anyone else could have written the folder).
+
+**If something fails** the agent keeps running as before: before the switch it just stops; at or after the
+switch the service is put back on LocalSystem with its old SID type and privileges (and, if the restart was
+the problem, started again as LocalSystem). The other steps stay (they are the 0.5 setup and work with
+LocalSystem too). `/metrics` says `failed` with the step, the error, `rolled_back` and `next_try`; the agent
+tries again after 1 hour, then 6 hours, then once a day (restarting it does not try sooner), and
+`setup-self-update` as Administrator does it at once. **Interrupted** (crash, reboot, Stop-Service): the next
+start resumes at the step that was running; an attempt interrupted three times counts as failed. A reboot
+after the switch: the updater service starts with Windows and finishes the check (the new agent starts it
+too after three minutes, if needed). The SID type and privileges a rollback restores are read before the
+switch; the account it restores is always LocalSystem, whatever the file says.
+
+**What the panel sees**: `GET /metrics` has `"migration": {"state": "done" | "pending" | "failed" |
+"not_needed" | "needs_admin", "account": "NT SERVICE\\fairy-agent" | "LocalSystem" | "LocalService" | ..., "step",
+"error", "rolled_back", "attempts", "next_try", "since", "reason", "command"}` (Windows only; fields that do not
+apply are left out). `pending` with step `waiting` before the first attempt (`next_try` says when, `reason`
+what it waits for), then the current step; `command` is what an administrator runs instead.
 
 **Commands** (Administrator PowerShell, `& "C:\Program Files\Fairy\fairy-agent.exe" ...`):
 `helper-status` (both services' accounts, is the helper running, what it serves), `setup-self-update
-[--helper]` (as above), `remove-helper` (stop it, fans back to the BMC, remove it), `uninstall` (both
-services and the updater).
+[--helper]` (as above; also adds the helper's firewall rules), `remove-helper` (stop it, fans back to the BMC,
+remove it and its firewall rules), `uninstall` (both services and the updater).
 
 **Troubleshooting**
 
@@ -569,7 +628,9 @@ self_update:
   run once in an Administrator PowerShell:
   `& "C:\Program Files\Fairy\fairy-agent.exe" setup-self-update`. It removes that access and sets up the
   updater service; until then the panel's Update button says so. (An agent running as LocalSystem removes the
-  access by itself when it starts; re-running `install.ps1` from the panel's Re-pair does all of it too.)
+  access by itself when it starts, and since 0.5.1 does all of `setup-self-update` by itself, see
+  [Moving to the new account by itself](#moving-to-the-new-account-by-itself-051-localsystem-only);
+  re-running `install.ps1` from the panel's Re-pair does all of it too.)
   Updates never go to an older release through the panel any more, not even with force: by hand only, with
   `fairy-agent update --force` as root / Administrator.
 
@@ -770,6 +831,14 @@ on the first install and report anything odd:
   entry on a failed start, automatic restart;
 * CPU %, memory, disks, network counters, uptime, OS name and hardware strings (registry);
 * ACPI thermal-zone temperatures (PDH);
+* **0.5.1's self-migration** from LocalSystem (TEST-ON-WINDOWS.md, section 8): the state machine is
+  unit-tested on Linux (every step failing, resume after a crash, rollback, the pauses), the Windows calls are
+  not: the switch and the rollback (`ChangeServiceConfig` to LocalSystem with an empty password,
+  `QueryServiceConfig2` for the old required privileges, the token's privileges as the fallback list), the
+  updater service as the one that restarts the agent (and starting with Windows meanwhile), the account check
+  of the new process (`OpenProcessToken` as SYSTEM), `netsh advfirewall ... service=fairy-agent-helper`, the
+  migration folder's permissions and `TrustedFolder` on it, and the interplay with 0.4.2's in-service updater
+  and build 10's updater service (the agent waits for their result before it restarts);
 * **0.5.0's two services** (none of this has run on Windows yet; TEST-ON-WINDOWS.md is the checklist): creating
   the agent's service as `NT SERVICE\fairy-agent` and moving an existing one (`ChangeServiceConfig` with the
   virtual account and no password), the required-privileges lists of both services (`sc qprivs`), the helper
