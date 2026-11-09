@@ -15,6 +15,7 @@ from source, and a map of the code, are in [README.md](README.md).
 * [What it never touches (anti-cheat safety)](#what-it-never-touches-anti-cheat-safety)
 * [Add a host from the panel (one command)](#add-a-host-from-the-panel-one-command): the easy way
 * [Install on Windows](#install-on-windows)
+  * [Two services: the agent and its helper](#two-services-the-agent-and-its-helper)
 * [Install on Linux](#install-on-linux)
 * [Point the panel at it](#point-the-panel-at-it)
 * [Optional features](#optional-features): fan control, shutdown / reboot, Wake-on-LAN, plugs and UPSes
@@ -46,6 +47,10 @@ BattlEye, FACEIT...) without looking like a cheat:
 * **Not packed or obfuscated**: a plain Go program, built from the source in this repository.
 * It runs at **below-normal priority** and starts helper programs (only `nvidia-smi`, and `powershell.exe` if
   you enable IPMI fan control) at below-normal priority without a window.
+* On Windows the agent runs as its **own low-rights account** (`NT SERVICE\fairy-agent`). The few things that
+  need more (Core Temp, the BMC, shutdown / sleep) are done by a second, small service, **fairy-agent-helper**,
+  that has no network at all and only answers a fixed list of requests from the agent (see
+  [Two services](#two-services-the-agent-and-its-helper)). Neither of them loads a driver.
 * Graphics card numbers come from `nvidia-smi`, NVIDIA's own tool that comes with the driver, started once and
   left running in its "repeat every 2 seconds" mode.
 * Temperatures on Windows come from the ACPI thermal zones that Windows itself publishes as performance
@@ -80,8 +85,8 @@ SHA-256 matches; when the panel passes the SHA-256 of the release's `SHA256SUMS`
 before anything in it is trusted, so a first install no longer rests on the downloaded program's own key),
 installs exactly as described
 in [Install on Windows](#install-on-windows) / [Install on Linux](#install-on-linux) (user, program, service,
-polkit / tmpfiles rules when needed, firewall rule for the panel only, LocalSystem on Windows when Core Temp or
-IPMI is chosen), then runs `fairy-agent join`: it makes the tokens on the machine, switches on the chosen
+polkit / tmpfiles rules when needed, firewall rule for the panel only, on Windows the elevated helper service
+when Core Temp, IPMI or shutdown / reboot is chosen), then runs `fairy-agent join`: it makes the tokens on the machine, switches on the chosen
 features with the same checked edit as `fairy-agent config set`, and stores the code (only a hash of it) with its
 expiry and the panel's address. The panel then asks the agent `POST /pair` with proof of the code; the agent
 answers **once**, only to the panel's address, with its tokens, and closes pairing for good (`fairy-agent
@@ -129,7 +134,9 @@ Set-ExecutionPolicy -Scope Process Bypass   # allows this one script, for this w
 .\install-fairy-agent.ps1 -PanelAddress 100.64.0.2   # the Tailscale address of the machine running the panel
 ```
 
-Add `-LocalSystem` on a PC where you want fan control (see [Fan control](#fan-control-supermicro)).
+Add `-Helper` on a PC where you want fan control, Core Temp or shutdown / reboot / sleep (the script also adds
+it by itself when `config.yaml` already switches one of them on). `-LocalSystem` from older instructions still
+works and means the same as `-Helper`.
 
 **What the script does, step by step** (you can also type these yourself):
 
@@ -142,31 +149,122 @@ Unblock-File "C:\Program Files\Fairy\fairy-agent.exe"
 # 2. install the service (starts automatically with Windows, a little after boot, restarts itself on failure).
 #    This also creates C:\ProgramData\fairy-agent with config.yaml, token and control-token, readable only by
 #    administrators, SYSTEM and the service itself.
-& "C:\Program Files\Fairy\fairy-agent.exe" install          # or: install --account LocalSystem
+& "C:\Program Files\Fairy\fairy-agent.exe" install          # or: install --helper
 
 # 3. let only the panel in: TCP 9101, only on the Tailscale adapter, only from Tailscale addresses
 New-NetFirewallRule -DisplayName "Fairy agent (Tailscale only)" -Direction Inbound -Action Allow `
   -Protocol TCP -LocalPort 9101 -RemoteAddress 100.64.0.0/10 -InterfaceAlias Tailscale `
   -Program "C:\Program Files\Fairy\fairy-agent.exe"
+#    with the helper (install --helper): it never uses the network, so block all of its traffic
+foreach ($d in 'Outbound', 'Inbound') { New-NetFirewallRule -DisplayName "Fairy agent helper (no network)" `
+  -Direction $d -Action Block -Service fairy-agent-helper }
 
 # 4. check the settings and start it
 & "C:\Program Files\Fairy\fairy-agent.exe" check-config
 Start-Service fairy-agent
 ```
 
-The service runs as **LocalService**, a built-in Windows account with very few rights. That is enough for
-everything except two things, which need **LocalSystem** (`install --account LocalSystem`):
-
-* fan control and BMC sensors through Windows' IPMI support (Windows only lets administrators use it), and
-* full details for programs of other accounts in the Processes tab. As LocalService the agent can open only
-  programs running under its own account; everything else (your games, your browser) is listed **by name only**,
-  without CPU, memory or user. For many people that is a feature.
-
-Shutdown / reboot and Wake-on-LAN work as LocalService.
+See [Two services](#two-services-the-agent-and-its-helper) for the accounts and what each service may do.
 
 By default the agent listens on this PC's Tailscale address, port 9101 (it finds it by itself). It never listens
 on your home network or the internet unless you set `listen:` yourself. Until Tailscale is up the agent waits
 (as long as it takes; the log says so once a minute) and then starts answering by itself.
+
+### Two services: the agent and its helper
+
+Since 0.5.0 (release build 11 or later) fairy-agent on Windows is two services that run the same program:
+
+| | **fairy-agent** (the agent) | **fairy-agent-helper** (the helper) |
+| --- | --- | --- |
+| Account | `NT SERVICE\fairy-agent`, a "virtual account": no password, cannot sign in, a member of no admin group | LocalSystem |
+| Rights | only `SeChangeNotifyPrivilege` (needed to open folders); no shutdown, no impersonation, nothing else | only `SeChangeNotifyPrivilege`, `SeShutdownPrivilege`, `SeImpersonatePrivilege` (to see who connects); no driver loading, no debugging other programs, no taking over files |
+| Network | listens on the Tailscale address for the panel; the tokens, `/metrics`, everything the panel sees | **none**: listens only on the local pipe `\\.\pipe\fairy-agent-helper`; a firewall rule blocks all its traffic in and out |
+| Files | reads `C:\ProgramData\fairy-agent` (config, tokens), writes only `logs\`, `state\` and `update\stage\` | reads config.yaml, writes only its own log `C:\ProgramData\fairy-agent\helper\helper.log` (the agent can only read it) |
+| Installed | always | only where something needs it: Core Temp, IPMI (BMC sensors, fans) or shutdown / reboot / sleep |
+
+**What the helper does, and nothing else.** It answers ten fixed requests from the agent: `ping`, `status`,
+`coretemp_read` (a copy of Core Temp's shared memory; the agent checks and converts it), `ipmi_sensors` (the
+BMC's readings), `fan_status`, `fan_set` (zone 0 or 1, 30-100 %), `fan_mode` (standard, full, optimal or
+heavyio), `fan_auto` (back to the BMC's automatic mode), `power` (shutdown, reboot or sleep after 10 s to 24 h,
+or cancel) and `apply_update` (starts the signature-checking updater service, nothing else). No request takes a
+path, a command or free text; anything else is refused, as are requests over 512 bytes, unknown fields and
+values out of range. Each request is checked against what `config.yaml` switches on (with Core Temp off,
+`coretemp_read` is refused too). Reads are limited to 300 a minute, changes to 30 a minute. Every change and
+every refused request is written to `helper.log` with who asked.
+
+**Who may talk to it.** The pipe's access list lets in only the agent's account, SYSTEM and Administrators,
+refuses network logons, and the pipe refuses remote clients. On top of that the helper looks at every
+client's identity and drops anyone else. The agent in turn checks that the pipe really belongs to the helper
+service's process (so nothing can pretend to be the helper while it is stopped), and lets the helper only
+identify it, not act as it.
+
+**The fan watchdog lives in the helper**: while a fixed fan speed is set it checks the CPU temperature every
+10 seconds (the BMC's sensors, and Core Temp's when that is on) and puts both zones to 100 % at 80 °C or after
+30 seconds without any temperature. It keeps working if the agent stops or crashes. When the helper itself
+stops (Stop-Service, the panel's Stop, an update, Windows shutting down) it first hands the fans back to the
+BMC's automatic mode (`auto_mode`, or "standard" when the board refuses that), so fans never keep a fixed speed
+without a watchdog. A mode you chose yourself (standard, optimal, heavy IO) is left as it is.
+
+**Readings run by themselves**, without any prompt. Changes (fans, power) still need the panel's control
+token and confirmation exactly as before; the agent only passes them on.
+
+**Stopping the helper** (`Stop-Service fairy-agent-helper`, or the panel's Stop once the panel shows it): the
+fans go back to the BMC's automatic mode, and Core Temp, BMC sensors, fan control and shutdown / sleep are
+simply missing. The agent does not count that as an error: `/metrics` says `"helper": {"state": "stopped"}` and
+lists them under `"unavailable"` with reason `helper_stopped`; `/fan/status` says `"available": false,
+"reason": "helper_stopped"`; changes answer 503 `helper_stopped`. Everything else keeps working.
+`Start-Service fairy-agent-helper` (or the panel's Start) brings them back within a few seconds. The helper
+starts with Windows again after a reboot.
+
+**What the panel sees** (for the panel's "Elevated helper" badge):
+
+* `GET /metrics` has `"helper": {"state": "running" | "stopped" | "starting" | "not_installed" | "error",
+  "needed": true/false, "version": "<the helper's build, like agent_version>", "since": "<RFC 3339>", "watchdog": true/false, "features":
+  ["coretemp", "ipmi", "fans", "power", "update"], "error": "..."}` (fields that do not apply are left out;
+  Linux agents have no `helper` block), and `"unavailable": [{"source": "ipmi", "reason": "helper_stopped"},
+  ...]` while the helper is not running. `power_control` then also says `"available": false, "reason":
+  "helper_stopped"`.
+* `POST /helper/stop` and `POST /helper/start` (control token, body `{}`, rate limited and logged like the
+  other control actions): 200 with the helper block afterwards, 409 `{"error": "not_installed"}` without a
+  helper. Stop hands the fans to the BMC first. The agent's account may query, start and stop the helper
+  service and nothing else (it cannot change or delete it).
+
+**Fewer process details.** As a virtual account the agent opens other programs with the weakest access
+there is (as always), and Windows refuses that for programs of other accounts and for elevated ones: those
+(your games, your browser, services) are listed **by name only**, without CPU, memory, path or user, the same
+as with LocalService before. For many people that is a feature. The helper is never used for the process list.
+
+**Moving an existing install** (0.4.x ran as LocalService, or LocalSystem for Core Temp / fans): run
+`install-fairy-agent.ps1` again, or, in an Administrator PowerShell,
+`& "C:\Program Files\Fairy\fairy-agent.exe" setup-self-update`. Both are safe to run again. They switch the
+service to `NT SERVICE\fairy-agent` (like `sc.exe config fairy-agent obj= "NT SERVICE\fairy-agent"`), give it
+only `SeChangeNotifyPrivilege`, set the folder permissions again (config and tokens readable by the agent's
+account, the helper's folder writable only by administrators and SYSTEM), install the helper when `config.yaml`
+uses Core Temp, IPMI or power control (`--helper` installs it anyway), and restart what was running. Config and
+tokens stay, so the panel notices nothing but a restart. The folder permissions name the same account as
+before (`NT SERVICE\fairy-agent` was already the service's own SID), so nothing has to be re-granted. Updating
+to 0.5 through the panel does not move the account by itself; until you run one of the two, the agent works
+as before (with its old account's rights) and its log says so once at start.
+
+**Commands** (Administrator PowerShell, `& "C:\Program Files\Fairy\fairy-agent.exe" ...`):
+`helper-status` (both services' accounts, is the helper running, what it serves), `setup-self-update
+[--helper]` (as above), `remove-helper` (stop it, fans back to the BMC, remove it), `uninstall` (both
+services and the updater).
+
+**Troubleshooting**
+
+* `sc.exe qc fairy-agent` should show `SERVICE_START_NAME : NT SERVICE\fairy-agent`, `sc.exe qc
+  fairy-agent-helper` `LocalSystem`. `sc.exe qprivs fairy-agent` lists `SeChangeNotifyPrivilege` only.
+* The agent's log says "fairy-agent-helper: error" or the panel shows the helper as "error": look at
+  `C:\ProgramData\fairy-agent\helper\helper.log` and the Event Viewer (Windows Logs > Application, source
+  fairy-agent-helper). `helper-status` asks the helper directly.
+* The helper does not start: it refuses to run from a folder others can change (keep the program in
+  `C:\Program Files\Fairy`) and needs the agent's service (it looks up its account). "not writing the helper
+  log": the `helper` folder is not administrators-only; `setup-self-update` fixes it.
+* Shutdown answers "helper stopped": start the helper. Shutdown answers that a privilege is missing: the
+  helper is not installed (power control was switched on later); run `setup-self-update`.
+* Something worked as LocalService / LocalSystem and not now: `sc.exe qprivs fairy-agent` and the agent's log;
+  report it. Going back to build 10 is in TEST-ON-WINDOWS.md ("Rollback").
 
 ## Install on Linux
 
@@ -300,9 +398,10 @@ Safety: the agent refuses any speed below 30 % (the panel does too). While you h
 the CPU temperature every 10 seconds; at 80 °C, or if it cannot read any temperature for 30 seconds, it sets
 both zones back to 100 % and writes that in the fan log the panel shows.
 
-On Windows this uses Windows' own IPMI support through one `powershell.exe` the agent starts when needed (and
-stops after 5 idle minutes), so the service must run as LocalSystem (`install --account LocalSystem`). The first
-reading of the BMC's sensor list can take a minute. On Linux it uses `ipmitool` (see the table above).
+On Windows this uses Windows' own IPMI support through one `powershell.exe` that the helper service starts
+when needed (and stops after 5 idle minutes): Windows lets only administrators use it, so it runs in
+[fairy-agent-helper](#two-services-the-agent-and-its-helper), together with the watchdog
+(`install-fairy-agent.ps1 -Helper`). The first reading of the BMC's sensor list can take a minute. On Linux it uses `ipmitool` (see the table above).
 `ipmi.enabled` alone (without `fan_control`) adds the BMC's temperatures, fan speeds and voltages to the panel.
 
 ### Shutdown, reboot and sleep
@@ -312,7 +411,8 @@ power_control:
   enabled: true
 ```
 
-Panel: `power_control: true` and `control_token_env:` in the agent's entry. The panel asks you to type the
+Panel: `power_control: true` and `control_token_env:` in the agent's entry. On Windows the helper does the
+actual shutdown, reboot or sleep (the agent's own account may not), so power control installs the helper. The panel asks you to type the
 machine's name and sends a delay (default 60 s). On Windows, Windows itself shows its usual "you're about to be
 signed out" warning and counts down (like `shutdown /s /t 60`; open programs are closed at the end); Cancel in
 the panel aborts it. On Linux the agent waits and then runs `systemctl poweroff` / `reboot` (needs the polkit
@@ -460,7 +560,9 @@ self_update:
   The agent's own account (`NT SERVICE\fairy-agent`) may only *start* that service and write the download
   folder `C:\ProgramData\fairy-agent\update\stage`; it can change nothing in `C:\Program Files\Fairy`, so
   even a compromised agent cannot plant a program that an administrator or SYSTEM later runs. The installer
-  logs to `C:\ProgramData\fairy-agent\update\installer.log`. No driver, no other programs touched.
+  logs to `C:\ProgramData\fairy-agent\update\installer.log`. No driver, no other programs touched. When
+  fairy-agent-helper runs, the installer stops it too (it runs the same program; the fans go back to the
+  BMC's automatic mode meanwhile) and starts it again with the new version.
   Without the updater service the panel shows self-update as unavailable, with this command as the fix.
 * **Coming from 0.4.2 or older on Windows**: those versions gave the agent's account write access to
   `C:\Program Files\Fairy` (so it could replace itself). After updating to 0.4.3, through the panel or by hand,
@@ -531,10 +633,10 @@ carries on without those readings (and picks them up again when Core Temp comes 
    without it Core Temp shares its readings only inside your own Windows sign-in session, and the fairy-agent
    service (like every service) runs outside it. In `CoreTemp.ini` this is `SnmpSharedMemory=1` under
    `[Advanced]`.
-3. The fairy-agent service must run as **LocalSystem** (`install-fairy-agent.ps1 -LocalSystem`, or
-   `install --account LocalSystem`; the same as for fan control). Core Temp runs as administrator and does not
-   open its readings to other accounts, so the default LocalService account is turned away ("access denied" in
-   the agent's log).
+3. The helper service must be installed (`install-fairy-agent.ps1 -Helper`, or `setup-self-update` once
+   `sensors.coretemp` is on; the same as for fan control). Core Temp runs as administrator and does not open its
+   readings to other accounts, so the agent's own account is turned away; the helper (LocalSystem) copies the
+   block for it, and the agent checks and converts it.
 4. In `C:\ProgramData\fairy-agent\config.yaml`:
 
    ```yaml
@@ -542,10 +644,11 @@ carries on without those readings (and picks them up again when Core Temp comes 
      coretemp: true
    ```
 
-   then `Restart-Service fairy-agent`. The log says "Core Temp readings available" once it has found them.
+   then `Restart-Service fairy-agent-helper, fairy-agent` (or run `setup-self-update`, which installs the helper if
+needed). The log says "Core Temp readings available" once it has found them.
 
 The agent looks for `Global\CoreTempMappingObjectEx` first, then the older `CoreTempMappingObject`, then the
-same names in the signed-in user's session. Core Temp has no CPU package *temperature* in its shared block, so
+same names in the signed-in user's session (the helper does the looking). Core Temp has no CPU package *temperature* in its shared block, so
 only the cores are shown. Core Temp's Fahrenheit and "distance to Tj. Max" display options are converted back to
 °C. Package watts appear only when Core Temp shows a "Power" value for your CPU.
 
@@ -601,9 +704,11 @@ are lists of devices: edit those in the file.
 
 ## Checking, logs, updating, removing
 
-* **Is it running?** Windows: `Get-Service fairy-agent`. Linux: `systemctl status fairy-agent`.
+* **Is it running?** Windows: `Get-Service fairy-agent, fairy-agent-helper` (the helper only where installed;
+  `fairy-agent helper-status` says more). Linux: `systemctl status fairy-agent`.
 * **Logs.** Windows: `Get-Content C:\ProgramData\fairy-agent\logs\agent.log -Tail 30` (start-up problems also go
-  to the Event Viewer, Windows Logs > Application, source "fairy-agent"). Linux: `journalctl -u fairy-agent`.
+  to the Event Viewer, Windows Logs > Application, source "fairy-agent"); the helper's:
+  `C:\ProgramData\fairy-agent\helper\helper.log` (source "fairy-agent-helper"). Linux: `journalctl -u fairy-agent`.
   Logs never contain tokens or passwords.
 * **Ask it directly** (from the panel machine):
   `curl -H "Authorization: Bearer <token>" http://100.64.0.10:9101/metrics`
@@ -619,8 +724,9 @@ are lists of devices: edit those in the file.
   until when), or the code expired. The agent's log says "paired with panel" (with the panel's address, never a
   token). The state file is `/var/lib/fairy-agent/pairing.json` (Linux) or
   `C:\ProgramData\fairy-agent\state\pairing.json` (Windows); it never holds the code itself.
-* **Remove.** Windows: `& "C:\Program Files\Fairy\fairy-agent.exe" uninstall` (removes both services), then
-  `Remove-NetFirewallRule -DisplayName "Fairy agent (Tailscale only)"` and delete `C:\Program Files\Fairy` and
+* **Remove.** Windows: `& "C:\Program Files\Fairy\fairy-agent.exe" uninstall` (removes all three services:
+  agent, helper, updater; the fans go back to the BMC first), then
+  `Remove-NetFirewallRule -DisplayName "Fairy agent (Tailscale only)", "Fairy agent helper (no network)"` and delete `C:\Program Files\Fairy` and
   `C:\ProgramData\fairy-agent`. Linux: `systemctl disable --now fairy-agent`, delete the units
   (`fairy-agent.service`, `fairy-agent-update.service`), `/etc/polkit-1/rules.d/49-fairy-agent.rules`,
   `/usr/local/bin/fairy-agent` (and `.old`), `/etc/fairy-agent`, `/var/lib/fairy-agent*`, and `userdel fairy-agent`.
@@ -645,7 +751,9 @@ are lists of devices: edit those in the file.
   (4 KiB per line, 1 MiB per poll, 64 UPSes), so a broken or hostile upsd cannot exhaust memory.
 * The log cannot fill the disk: the log file is rotated at 5 MB (one old file kept), and the same message is
   written at most 30 times a minute (the rest are counted: `suppressed=N` on the next one).
-* Windows: settings folder readable only by administrators, SYSTEM and the service; the program lives in
+* Windows: the agent runs as its own virtual account with a single privilege; what needs more goes through the
+  helper service, which has no network, admits only the agent's account on its local pipe (checked twice), and
+  answers ten fixed requests with strict limits. Settings folder readable only by administrators, SYSTEM and the service; the program lives in
   `C:\Program Files` and only administrators / SYSTEM can change it (self-update goes through the separate
   LocalSystem updater service, which checks the signature itself). The install scripts check the program's
   SHA-256 against the signed SHA256SUMS before running it as Administrator. Helper programs (ipmitool,
@@ -662,11 +770,22 @@ on the first install and report anything odd:
   entry on a failed start, automatic restart;
 * CPU %, memory, disks, network counters, uptime, OS name and hardware strings (registry);
 * ACPI thermal-zone temperatures (PDH);
-* Core Temp's shared memory: which name the service finds (global setting on/off), LocalService vs LocalSystem,
-  the values against Core Temp's window (unit conversions, package watts);
-* the process list (Toolhelp snapshot + limited handles), LocalService vs LocalSystem;
+* **0.5.0's two services** (none of this has run on Windows yet; TEST-ON-WINDOWS.md is the checklist): creating
+  the agent's service as `NT SERVICE\fairy-agent` and moving an existing one (`ChangeServiceConfig` with the
+  virtual account and no password), the required-privileges lists of both services (`sc qprivs`), the helper
+  service, its pipe (access list, `PIPE_REJECT_REMOTE_CLIENTS`, the first-instance flag, overlapped I/O with
+  time limits), the client checks on both ends (impersonation at identification level, `CheckTokenMembership`,
+  `GetNamedPipeServerProcessId` against the service's process id), the agent's query / start / stop right on
+  the helper service, the helper's folder check (`helper\` owned by Administrators), the firewall block rule
+  for the helper's service SID, Core Temp / WMI-IPMI / shutdown / sleep from a LocalSystem service with only
+  three privileges, the fans going back to the BMC when the helper stops, the updater stopping and starting the
+  helper around a swap, and Windows itself under a virtual account (PDH counters, DXGI, ADL, nvidia-smi,
+  event log, the Tailscale address);
+* Core Temp's shared memory: which name the helper finds (global setting on/off), the values against Core
+  Temp's window (unit conversions, package watts);
+* the process list (Toolhelp snapshot + limited handles) as `NT SERVICE\fairy-agent`;
 * nvidia-smi on Windows (looping mode, path detection);
-* shutdown / reboot / cancel (InitiateSystemShutdownEx / AbortSystemShutdown) as LocalService;
+* shutdown / reboot / cancel (InitiateSystemShutdownEx / AbortSystemShutdown) from the helper;
 * sleep (SetSuspendState after the agent's own countdown; GetPwrCapabilities for S1-S3 / Modern Standby) and
   `systemctl suspend` with the extended polkit rule (CanSuspend through busctl): untested on real machines;
 * IPMI through `powershell.exe` and the Microsoft_IPMI WMI class: the reply format is taken from Microsoft's

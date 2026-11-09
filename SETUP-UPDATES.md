@@ -228,8 +228,8 @@ Only if it said OK:
 
 ```powershell
 Set-ExecutionPolicy -Scope Process Bypass
-.\install-fairy-agent.ps1 -PanelAddress 100.64.0.2     # the panel's Tailscale address; add -LocalSystem on a
-                                                     # new install that needs fan control or Core Temp
+.\install-fairy-agent.ps1 -PanelAddress 100.64.0.2     # the panel's Tailscale address; add -Helper on a
+                                                     # new install that needs fan control, Core Temp or power
 notepad C:\ProgramData\fairy-agent\config.yaml
 ```
 
@@ -249,6 +249,15 @@ panel or by hand), in PowerShell as Administrator; it also takes back the write 
 ```powershell
 & "C:\Program Files\Fairy\fairy-agent.exe" setup-self-update
 ```
+
+**Coming from 0.4.x (0.5.0 and later).** Since 0.5.0 the agent runs as its own low-rights account
+`NT SERVICE\fairy-agent`, and Core Temp, IPMI / fans and shutdown / sleep go through the separate
+**fairy-agent-helper** service (see AGENT.md, "Install on Windows"). An update through the panel only swaps the
+program: the service keeps its old account (LocalService or LocalSystem) and keeps working as before, and its
+log says it should be moved. Move it once, as Administrator, with the same command as above (or by running
+`install-fairy-agent.ps1` again); it keeps config and tokens and installs the helper where config.yaml needs
+it. When the helper runs, the updater stops it during an update (fans go back to the BMC's automatic mode for
+those seconds) and starts it again with the new program.
 
 The control token is in `C:\ProgramData\fairy-agent\control-token`.
 
@@ -322,7 +331,7 @@ version did not come up, the agent is back on the old one and shows why ("rolled
 
 Linux details: `journalctl -u fairy-agent-update` (installer), `journalctl -u fairy-agent` (agent). Windows:
 `C:\ProgramData\fairy-agent\update\installer.log` (installer), `C:\ProgramData\fairy-agent\logs\agent.log`
-(agent). The panel's own version is on the same page, with "Panel update
+(agent), `C:\ProgramData\fairy-agent\helper\helper.log` (helper). The panel's own version is on the same page, with "Panel update
 available: run `fairy update` on the panel's host" when it is behind (the panel never updates itself from the
 web page).
 
@@ -351,8 +360,10 @@ fairy-update             # the same (the small wrapper from 3.1)
 ### Going back by hand
 
 * Linux agent: `mv /usr/local/bin/fairy-agent.old /usr/local/bin/fairy-agent && systemctl restart fairy-agent`
-* Windows agent: `Stop-Service fairy-agent`, rename `C:\Program Files\Fairy\fairy-agent.exe.old` to
-  `fairy-agent.exe` (rename the current one away first), `Start-Service fairy-agent`
+* Windows agent: `Stop-Service fairy-agent, fairy-agent-helper` (the helper only if installed), rename
+  `C:\Program Files\Fairy\fairy-agent.exe.old` to `fairy-agent.exe` (rename the current one away first),
+  `Start-Service fairy-agent-helper, fairy-agent`. Going back from 0.5 to 0.4.x: see TEST-ON-WINDOWS.md,
+  "Rollback" (0.4.x does not know the helper or the new account)
 * Panel: `mv /usr/local/bin/fairy.old /usr/local/bin/fairy && systemctl restart fairy`
 
 Agents never install a release older than the one they run; the panel only with `fairy update --force`.
