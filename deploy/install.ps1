@@ -9,7 +9,9 @@
 .DESCRIPTION
   1. downloads the latest release: fairy-agent-windows-amd64.exe, SHA256SUMS (+ signature), VERSION and
      install-fairy-agent.ps1, and checks each file's SHA-256 against SHA256SUMS and SHA256SUMS' signature with
-     fairy-agent's built-in release key (the installed agent's key on a re-run);
+     the release key built into the downloaded fairy-agent. An already installed fairy-agent.exe is never run
+     before it has been replaced by the checked one (fairy-agent 0.4.2 and older let the service's own account
+     change it);
   2. runs install-fairy-agent.ps1: program in C:\Program Files\Fairy, the service (LocalSystem when Core Temp
      or IPMI is chosen, else LocalService), folder permissions, the firewall rule for the panel only;
   3. runs `fairy-agent join`: tokens, the chosen settings and the one-time join code (nothing secret is shown);
@@ -63,16 +65,13 @@ try {
         if ($got -ne $sums[$f]) { throw "$f does not match SHA256SUMS (corrupted or tampered download)" }
     }
 
-    # 2. the signature, with the release key built into fairy-agent (the installed one's on a re-run)
+    # 2. the signature, with the release key built into the downloaded fairy-agent (its hash was checked above).
+    #    The installed C:\Program Files\Fairy\fairy-agent.exe is NOT run here: until install-fairy-agent.ps1 has
+    #    replaced it with the checked program, it may have been changed by the service's own account (0.4.2).
     $exe = Join-Path $env:ProgramFiles 'Fairy\fairy-agent.exe'
     $new = Join-Path $dir 'fairy-agent-windows-amd64.exe'
     Unblock-File $new
-    $rc = 2
-    if (Test-Path $exe) {
-        $rc = (Invoke-Quiet $exe @('verify-release', $dir)).Code
-        if ($rc -eq 1) { throw "the release signature does not match the installed fairy-agent's release key" }
-    }
-    if ($rc -ne 0) { $rc = (Invoke-Quiet $new @('verify-release', $dir)).Code }
+    $rc = (Invoke-Quiet $new @('verify-release', $dir)).Code
     if ($rc -eq 0) { Write-Host ("fairy: release " + (Get-Content (Join-Path $dir 'VERSION')) + " verified (signature and hashes)") }
     elseif ($rc -eq 3) { Write-Warning 'this build has no release key: the signature was not checked (hashes only)' }
     else { throw 'the release signature check failed' }
@@ -93,12 +92,16 @@ try {
     if ($svc -and $system -and $svc.StartName -ne 'LocalSystem') {
         Write-Host 'fairy: switching the service to LocalSystem (needed for Core Temp / IPMI)'
         Stop-Service fairy-agent -ErrorAction SilentlyContinue
-        & sc.exe config fairy-agent obj= LocalSystem | Out-Null
+        & (Join-Path $env:SystemRoot 'System32\sc.exe') config fairy-agent obj= LocalSystem | Out-Null
         if ($LASTEXITCODE -ne 0) { throw 'sc.exe config fairy-agent obj= LocalSystem failed' }
     }
     $inst = @{ PanelAddress = $PanelAddress; Quiet = $true }
     if ($system) { $inst.LocalSystem = $true }
     & (Join-Path $dir 'install-fairy-agent.ps1') @inst
+
+    # the program now installed must be the checked one before it runs again as Administrator
+    $got = (Get-FileHash -Algorithm SHA256 -LiteralPath $exe).Hash.ToLower()
+    if ($got -ne $sums['fairy-agent-windows-amd64.exe']) { throw "$exe does not match the signed SHA256SUMS: not running it" }
 
     # 4. tokens, settings and the join code (prints no secret)
     $joinArgs = @('join', '--code', $Join, '--panel', $PanelAddress)

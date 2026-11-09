@@ -31,12 +31,15 @@ import (
 //     GitHub, verifies its signature with the key built into this binary, downloads its own platform's binary and
 //     stages it with the signed files in a folder it may write (Linux: /var/lib/fairy-agent/update; Windows:
 //     C:\ProgramData\fairy-agent\update\stage). Then it starts the installer: Linux the root unit
-//     fairy-agent-update.service (allowed by the polkit rule), Windows a detached `fairy-agent apply-update`.
+//     fairy-agent-update.service (allowed by the polkit rule), Windows the LocalSystem service
+//     fairy-agent-update (the agent's service account may only start it). The agent itself can never write the
+//     installed program: only the installer, which runs the installed (administrator-owned) binary, can.
 //  2. The installer (`fairy-agent apply-update`, ApplyUpdate): verifies everything AGAIN with its own built-in
-//     key (it never trusts the stage), copies the binary next to the installed one while hashing exactly the
-//     copied bytes, swaps it in (keeping fairy-agent.old), restarts the service and waits until the agent
-//     answers /metrics with the new version; otherwise it puts the old binary back and restarts that. The result
-//     goes to a file the agent reads (and reports in /metrics as self_update.last).
+//     key (it never trusts the stage, and refuses links / junctions in it), copies the binary next to the
+//     installed one while hashing exactly the copied bytes, swaps it in (keeping fairy-agent.old), restarts the
+//     service and waits until the agent answers /metrics with the new version; otherwise it puts the old binary
+//     back and restarts that. The result goes to a file only the installer may write, which the agent reads (and
+//     reports in /metrics as self_update.last).
 
 // UpdateStatus is the /metrics "self_update" block.
 type UpdateStatus struct {
@@ -86,6 +89,9 @@ type UpdaterOptions struct {
 	Asset      string                          // this platform's release file
 	Apply      func(ctx context.Context) error // start the installer
 	ResultWait time.Duration                   // how long to wait for the installer's result (default 5 min)
+	// Ready says why the installer cannot be started on this machine (nil: it can), e.g. Windows without the
+	// fairy-agent-update service. Asked at start, before each update and (while it fails) once a minute.
+	Ready func() error
 }
 
 // Updater runs POST /update.
@@ -99,6 +105,8 @@ type Updater struct {
 	done      chan struct{} // closed when a run ends (tests)
 	resultMod time.Time     // the result file's mtime when it was last read
 	checkedAt time.Time
+	notReady  bool      // unavailable because o.Ready failed
+	readyAt   time.Time // when o.Ready was last asked
 }
 
 // NewUpdater returns the updater and reads the installer's last result.
@@ -113,9 +121,31 @@ func NewUpdater(o UpdaterOptions) *Updater {
 		if o.KeyErr != nil && !errors.Is(o.KeyErr, release.ErrNoKey) {
 			u.st.Message = o.KeyErr.Error()
 		}
+	} else {
+		u.checkReady()
 	}
 	u.refreshLast(true)
 	return u
+}
+
+// checkReady asks o.Ready and makes the state unavailable (or idle again). Caller holds u.mu (or owns u).
+func (u *Updater) checkReady() bool {
+	if u.o.Ready == nil || len(u.o.Key) == 0 {
+		return true
+	}
+	u.readyAt = time.Now()
+	if err := u.o.Ready(); err != nil {
+		if !u.busy {
+			u.st.State, u.st.Message, u.st.Since = "unavailable", err.Error(), u.ts()
+		}
+		u.notReady = true
+		return false
+	}
+	if u.notReady && !u.busy {
+		u.st.State, u.st.Message, u.st.Since = "idle", "", u.ts()
+	}
+	u.notReady = false
+	return true
 }
 
 // refreshLast picks up a new result file. The installer writes it only after the restarted agent has proven
@@ -152,6 +182,9 @@ func (u *Updater) ts() float64 { return collect.Round(float64(u.now().UnixMilli(
 func (u *Updater) Status() UpdateStatus {
 	u.mu.Lock()
 	defer u.mu.Unlock()
+	if u.notReady && time.Since(u.readyAt) > time.Minute {
+		u.checkReady() // e.g. setup-self-update was run since
+	}
 	u.refreshLast(false)
 	st := u.st
 	if st.Last != nil {
@@ -177,6 +210,9 @@ func (u *Updater) Start(req UpdateRequest) (int, map[string]any) {
 	}
 	if u.busy {
 		return 409, map[string]any{"error": "an update is already in progress (" + u.st.State + ")", "state": u.st.State}
+	}
+	if !u.checkReady() {
+		return 503, map[string]any{"error": u.st.Message, "code": "self_update_unavailable"}
 	}
 	u.busy = true
 	u.done = make(chan struct{})
@@ -352,6 +388,14 @@ func applyStaged(ctx context.Context, o ApplyOptions, res *UpdateResult) error {
 	if err := realDir(o.StageDir); err != nil {
 		return err
 	}
+	unlock, err := lockDir(o.StageDir) // Windows: it cannot be removed or turned into a junction while we read
+	if err != nil {
+		return fmt.Errorf("stage folder: %w", err)
+	}
+	defer unlock()
+	if err := plainIfExists(filepath.Dir(o.ResultPath)); err != nil {
+		return fmt.Errorf("result folder: %w", err)
+	}
 	p := func(n string) string { return filepath.Join(o.StageDir, n) }
 	var req stageRequest
 	if b, err := release.ReadStaged(p(stageRequestFile), 4<<10); err != nil {
@@ -381,8 +425,10 @@ func applyStaged(ctx context.Context, o ApplyOptions, res *UpdateResult) error {
 	if !req.Force && cmp == 0 {
 		return errors.New("already installed")
 	}
-	if !req.Force && known && cmp < 0 {
-		return fmt.Errorf("%s is older than the installed %s; not downgrading", ch.Version, o.CurrentVersion)
+	// Never older, not even with force: the stage is written by the less privileged agent, and an old signed
+	// release may have flaws fixed since. Going back is for root / an administrator: fairy-agent update --force.
+	if known && cmp < 0 {
+		return fmt.Errorf("%s is older than the installed %s; not downgrading (by hand: fairy-agent update --force)", ch.Version, o.CurrentVersion)
 	}
 	want, ok := ch.Sums[o.Asset]
 	if !ok {
@@ -400,22 +446,40 @@ func applyStaged(ctx context.Context, o ApplyOptions, res *UpdateResult) error {
 	return in.Install(ctx, newPath)
 }
 
-// realDir refuses a stage folder (or its parent) that is a symlink: the installer may run as root, the stage
-// belongs to the agent's user.
+// realDir refuses a stage folder (or its parent) that is a symlink or (Windows) a junction or other reparse
+// point: the installer runs as root / LocalSystem, the stage belongs to the agent's account.
 func realDir(dir string) error {
 	for _, d := range []string{filepath.Dir(dir), dir} {
 		st, err := os.Lstat(d)
 		if err != nil {
 			return fmt.Errorf("nothing staged: %w", err)
 		}
-		if !st.IsDir() {
-			return fmt.Errorf("%s is not a folder", d)
+		if !st.IsDir() || st.Mode()&os.ModeSymlink != 0 || isReparsePoint(st) {
+			return fmt.Errorf("%s is not a plain folder", d)
 		}
 	}
 	return nil
 }
 
+// plainIfExists refuses a folder that is a symlink or reparse point (a missing one is fine: it is created).
+func plainIfExists(dir string) error {
+	st, err := os.Lstat(dir)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if !st.IsDir() || st.Mode()&os.ModeSymlink != 0 || isReparsePoint(st) {
+		return fmt.Errorf("%s is not a plain folder", dir)
+	}
+	return nil
+}
+
 func writeResult(path string, r UpdateResult) error {
+	if err := plainIfExists(filepath.Dir(path)); err != nil {
+		return err
+	}
 	b, err := json.Marshal(r)
 	if err != nil {
 		return err
@@ -496,7 +560,7 @@ func DefaultUpdaterOptions(cfg *Config, version, releaseKey string) (UpdaterOpti
 	cfgPath := cfg.Path()
 	return UpdaterOptions{Version: version, Key: key, KeyErr: kerr, Client: c, StageDir: stage, ResultPath: result,
 		Asset: release.AssetName(release.AgentProgram, runtime.GOOS, runtime.GOARCH),
-		Apply: func(ctx context.Context) error { return startInstaller(ctx, cfgPath) }}, nil
+		Apply: func(ctx context.Context) error { return startInstaller(ctx, cfgPath) }, Ready: installerReady}, nil
 }
 
 // ApplyUpdate is `fairy-agent apply-update`: install what the agent staged (see the top of this file).

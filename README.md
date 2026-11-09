@@ -55,7 +55,7 @@ Each folder is one Go package; inside a package, files are named after what they
 
 | Folder | What it does |
 | --- | --- |
-| `cmd/fairy-agent` | The `fairy-agent` program: `main.go` (run, check-config, gen-token, apply-update, version), `config_cmd.go` (`config get/set/show`), `join.go` (`join`, `pair-status`, `verify-release`: the machine side of the panel's Add host), `service_windows.go` (the Windows service: install, uninstall, setup-self-update, run under the service manager). |
+| `cmd/fairy-agent` | The `fairy-agent` program: `main.go` (run, check-config, gen-token, apply-update, version), `config_cmd.go` (`config get/set/show`), `join.go` (`join`, `pair-status`, `verify-release`: the machine side of the panel's Add host), `service_windows.go` (the Windows services: install, uninstall, setup-self-update with the LocalSystem updater service, run under the service manager). |
 | `cmd/fairy-release-key` | The release signing key: `gen` (owner, once), `sign` and `verify` (release workflow). |
 | `pkg/agent` | The agent's HTTP server and the panel contract (`server.go`), settings and tokens (`config.go`), BMC sensors (`bmc.go`), Supermicro fan control and its watchdog (`fan.go`), shutdown / reboot (`power*.go`), Wake-on-LAN (`wol.go`), plugs and UPSes it relays (`relay.go`), self-update and its installer (`update*.go`), Tailscale address (`listen.go`), start-up (`run.go`), log file (`logfile.go`), the one-time `POST /pair` of Add host (`pairing.go`). |
 | `pkg/enroll` | Add host's join codes, shared with the panel: the code, the proof the panel sends, the verifier the agent stores, the pairing state file. |

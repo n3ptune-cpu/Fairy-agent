@@ -25,6 +25,16 @@ const (
 const stageHint = " (install the new deploy/fairy-agent.service, which has StateDirectory=fairy-agent, then " +
 	"systemctl daemon-reload && systemctl restart fairy-agent)"
 
+func isReparsePoint(os.FileInfo) bool { return false }
+
+func lockDir(string) (func(), error) { return func() {}, nil }
+
+// InstallerLogPath: the installer unit logs to the journal.
+func InstallerLogPath(*Config) string { return "" }
+
+// installerReady: the polkit rule and the unit are checked when the agent starts the unit.
+func installerReady() error { return nil }
+
 // UpdatePaths are the stage folder and the installer's result file.
 func UpdatePaths(*Config) (stage, result string) { return linuxStageDir, linuxResultPath }
 

@@ -11,7 +11,7 @@
 //	fairy-agent gen-token                  print a new random token (for the token files)
 //	fairy-agent update [--check] [--yes] [--force]  install the latest signed release by hand (root / Administrator)
 //	fairy-agent apply-update [--config path]  install the release the agent staged (run by the updater, see AGENT.md)
-//	fairy-agent setup-self-update          Windows: give the service the rights self-update needs
+//	fairy-agent setup-self-update          Windows: the updater service and the permissions self-update needs
 //	fairy-agent version
 package main
 
@@ -66,8 +66,11 @@ const usage = `fairy-agent: reports this machine's metrics to the Fairy panel (s
                                             install the latest signed release now (root / Administrator):
                                             download, verify, swap (keeps .old), restart, roll back on failure
   fairy-agent apply-update [--config PATH]  install the update the agent staged (started by the panel's
-                                            Update button through fairy-agent-update.service / the service)
-  fairy-agent setup-self-update             Windows: give the service the rights self-update needs
+                                            Update button through fairy-agent-update.service (Linux) or the
+                                            fairy-agent-update service (Windows))
+  fairy-agent setup-self-update             Windows (Administrator): install the fairy-agent-update service and
+                                            the permissions self-update needs; removes the program-folder write
+                                            access older versions gave the agent
   fairy-agent version
 `
 
@@ -208,6 +211,7 @@ func serve(ctx context.Context, cfgPath string, interactive bool) error {
 	if closer != nil {
 		defer closer.Close()
 	}
+	checkProgramFolder()
 	if err := agent.Run(ctx, cfg, agent.Build{Version: version, ReleaseKey: releaseKey}); err != nil {
 		slog.Error("fairy-agent cannot run", "error", err.Error())
 		return err
@@ -227,6 +231,12 @@ func runForeground(cfgPath string) int {
 
 // applyUpdate installs the staged release: verify again, swap, restart, health-check, roll back on failure.
 func applyUpdate(cfgPath string) int {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	return applyUpdateCtx(ctx, cfgPath)
+}
+
+func applyUpdateCtx(ctx context.Context, cfgPath string) int {
 	if runtime.GOOS == "linux" && os.Geteuid() != 0 {
 		fmt.Fprintln(os.Stderr, "apply-update runs as root from fairy-agent-update.service (the agent starts it); see AGENT.md")
 		return 1
@@ -236,6 +246,9 @@ func applyUpdate(cfgPath string) int {
 		fmt.Fprintln(os.Stderr, "fairy-agent apply-update:", err)
 		return 1
 	}
+	if p := agent.InstallerLogPath(cfg); p != "" {
+		cfg.LogFile = p // Windows: LocalSystem writes only where the agent's account cannot change anything
+	}
 	closer, err := setupLogging(cfg, false)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "fairy-agent apply-update:", err)
@@ -244,8 +257,6 @@ func applyUpdate(cfgPath string) int {
 	if closer != nil {
 		defer closer.Close()
 	}
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Minute)
 	defer cancel()
 	slog.Warn("apply-update: starting", "installed", version)

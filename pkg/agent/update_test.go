@@ -371,25 +371,65 @@ func TestApplyStagedReverifiesAndRollsBack(t *testing.T) {
 	}
 }
 
-func TestApplyStagedRefusesDowngradeUnlessForced(t *testing.T) {
+// The stage is written by the less privileged agent, so the installer never goes back to an older release, not
+// even with force (that would let a compromised agent bring back an old flaw). force still reinstalls the same
+// version.
+func TestApplyStagedNeverDowngrades(t *testing.T) {
 	ar := newApplyRig(t, "42-bbbbbbb", []byte("new 42"))
-	// rewrite request.json as if the agent had staged an older build without force
 	var req stageRequest
 	b, _ := os.ReadFile(filepath.Join(ar.stage, stageRequestFile))
 	_ = json.Unmarshal(b, &req)
 	in := &release.Installer{Target: ar.target, Start: func(context.Context) error { return nil }}
-	res := ApplyStaged(context.Background(), ApplyOptions{StageDir: ar.stage, ResultPath: ar.result, Asset: testAsset,
-		Key: ar.gh.Pub, CurrentVersion: "50-ddddddd", Installer: in, Healthy: func(context.Context, string) error { return nil }})
-	if res.OK || !strings.Contains(res.Message, "not downgrading") {
+	apply := func(current string) UpdateResult {
+		return ApplyStaged(context.Background(), ApplyOptions{StageDir: ar.stage, ResultPath: ar.result, Asset: testAsset,
+			Key: ar.gh.Pub, CurrentVersion: current, Installer: in, Healthy: func(context.Context, string) error { return nil }})
+	}
+	if res := apply("50-ddddddd"); res.OK || !strings.Contains(res.Message, "not downgrading") {
 		t.Fatalf("%+v", res)
 	}
 	req.Force = true
 	nb, _ := json.Marshal(req)
 	_ = os.WriteFile(filepath.Join(ar.stage, stageRequestFile), nb, 0o600)
-	res = ApplyStaged(context.Background(), ApplyOptions{StageDir: ar.stage, ResultPath: ar.result, Asset: testAsset,
-		Key: ar.gh.Pub, CurrentVersion: "50-ddddddd", Installer: in, Healthy: func(context.Context, string) error { return nil }})
-	if !res.OK {
-		t.Fatalf("forced: %+v", res)
+	if res := apply("50-ddddddd"); res.OK || !strings.Contains(res.Message, "fairy-agent update --force") {
+		t.Fatalf("forced downgrade: %+v", res)
+	}
+	if res := apply("42-bbbbbbb"); !res.OK {
+		t.Fatalf("forced reinstall of the same version: %+v", res)
+	}
+}
+
+// Windows without the fairy-agent-update service (e.g. after an update from 0.4.2 through the panel, before an
+// administrator ran setup-self-update): self-update says why and how to fix it, and picks it up once fixed.
+func TestUpdaterNotReady(t *testing.T) {
+	ready := errors.New("the panel's Update button needs the fairy-agent-update service, which is not installed: run setup-self-update")
+	u := NewUpdater(UpdaterOptions{Version: "41-a", Key: make([]byte, 32), Ready: func() error { return ready }})
+	if st := u.Status(); st.State != "unavailable" || !strings.Contains(st.Message, "setup-self-update") {
+		t.Fatalf("%+v", st)
+	}
+	if st, b := u.Start(UpdateRequest{}); st != 503 || b["code"] != "self_update_unavailable" {
+		t.Fatalf("%d %v", st, b)
+	}
+	ready = nil
+	u.mu.Lock()
+	u.readyAt = time.Now().Add(-2 * time.Minute)
+	u.mu.Unlock()
+	if st := u.Status(); st.State != "idle" {
+		t.Fatalf("after setup: %+v", st)
+	}
+}
+
+// A stage folder that is a link is refused (Linux: symlink; Windows: also junctions, through the attributes).
+func TestApplyStagedRefusesLinkedStage(t *testing.T) {
+	ar := newApplyRig(t, "42-bbbbbbb", []byte("new 42"))
+	link := filepath.Join(t.TempDir(), "stage-link")
+	if err := os.Symlink(ar.stage, link); err != nil {
+		t.Skip(err)
+	}
+	in := &release.Installer{Target: ar.target, Start: func(context.Context) error { return nil }}
+	res := ApplyStaged(context.Background(), ApplyOptions{StageDir: link, ResultPath: ar.result, Asset: testAsset,
+		Key: ar.gh.Pub, CurrentVersion: "41-a", Installer: in, Healthy: func(context.Context, string) error { return nil }})
+	if res.OK || !strings.Contains(res.Message, "not a plain folder") {
+		t.Fatalf("%+v", res)
 	}
 }
 

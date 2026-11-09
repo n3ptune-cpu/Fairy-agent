@@ -6,9 +6,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"golang.org/x/sys/windows"
@@ -17,6 +19,7 @@ import (
 	"golang.org/x/sys/windows/svc/mgr"
 
 	"github.com/n3ptune-cpu/Fairy-agent/pkg/agent"
+	"github.com/n3ptune-cpu/Fairy-agent/pkg/agent/collect"
 )
 
 const serviceName = "fairy-agent"
@@ -95,10 +98,52 @@ func configArg() string {
 }
 
 func runService() int {
+	if len(os.Args) > 1 && os.Args[1] == "apply-update" { // the fairy-agent-update service (LocalSystem)
+		if err := svc.Run(agent.UpdaterServiceName, updaterHandler{cfgPath: configArg()}); err != nil {
+			return 1
+		}
+		return 0
+	}
 	if err := svc.Run(serviceName, handler{cfgPath: configArg()}); err != nil {
 		return 1
 	}
 	return 0
+}
+
+// updaterHandler is the fairy-agent-update service: it installs what the agent staged (applyUpdateCtx) and
+// stops. The agent's own account may only start it; start parameters are ignored.
+type updaterHandler struct{ cfgPath string }
+
+func (h updaterHandler) Execute(_ []string, req <-chan svc.ChangeRequest, status chan<- svc.Status) (bool, uint32) {
+	status <- svc.Status{State: svc.StartPending}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan int, 1)
+	go func() { done <- applyUpdateCtx(ctx, h.cfgPath) }()
+	status <- svc.Status{State: svc.Running, Accepts: svc.AcceptStop | svc.AcceptShutdown}
+	for {
+		select {
+		case c := <-req:
+			switch c.Cmd {
+			case svc.Interrogate:
+				status <- c.CurrentStatus
+			case svc.Stop, svc.Shutdown:
+				status <- svc.Status{State: svc.StopPending}
+				cancel()
+				select {
+				case <-done:
+				case <-time.After(20 * time.Second):
+				}
+				return false, 0
+			}
+		case code := <-done:
+			status <- svc.Status{State: svc.StopPending}
+			if code != 0 {
+				return true, uint32(code) // service-specific exit code; the result file has the reason
+			}
+			return false, 0
+		}
+	}
 }
 
 // applyACL replaces a folder's permissions (inherited by everything inside) with the given SDDL DACL.
@@ -226,7 +271,7 @@ func install(cfgPath, account string) error {
 		return fmt.Errorf("log folder permissions: %w", err)
 	}
 	if err := setupSelfUpdate(cfgPath); err != nil {
-		return fmt.Errorf("self-update permissions: %w", err)
+		fmt.Println("warning: self-update (the panel's Update button) is not set up:", err)
 	}
 	if created, err := writeIfMissing(cfgPath, []byte(starterConfig())); err != nil {
 		return err
@@ -279,14 +324,116 @@ func grantACE(name string, typ windows.SE_OBJECT_TYPE, handle windows.Handle, si
 	return windows.SetNamedSecurityInfo(name, typ, windows.DACL_SECURITY_INFORMATION, nil, nil, acl, nil)
 }
 
-// setupSelfUpdate gives the service's own SID (NT SERVICE\fairy-agent; no other account or service) what the
-// self-update needs, idempotently:
-//   - modify on the program folder (C:\Program Files\Fairy), to rename the exe to .old and put the new one in;
-//   - an update folder under ProgramData it may write (stage + result), like logs\;
-//   - start / stop / query on its own service, so the installer it starts can restart it.
+// revokeSID removes every explicit allow entry for sid from a file system object's DACL (inherited entries of
+// objects inside follow when Windows propagates the change).
+func revokeSID(path string, sid *windows.SID) error {
+	sd, err := windows.GetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
+	if err != nil {
+		return err
+	}
+	old, _, err := sd.DACL()
+	if err != nil {
+		return err
+	}
+	acl, err := windows.ACLFromEntries([]windows.EXPLICIT_ACCESS{{AccessMode: windows.REVOKE_ACCESS,
+		Trustee: windows.TRUSTEE{TrusteeForm: windows.TRUSTEE_IS_SID, TrusteeType: windows.TRUSTEE_IS_WELL_KNOWN_GROUP,
+			TrusteeValue: windows.TrusteeValueFromSID(sid)}}}, old)
+	if err != nil {
+		return err
+	}
+	return windows.SetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION, nil, nil, acl, nil)
+}
+
+// secureProgramFolder takes back the write access to the program folder (and the files in it) that fairy-agent
+// 0.4.2 and older gave the service's own account for self-update, and makes Administrators the owner of
+// anything that service created there (an exe the old in-service installer put in place is owned by the
+// service's account, and an owner can always change the permissions).
+func secureProgramFolder(dir string, sid *windows.SID) error {
+	admins, err := windows.CreateWellKnownSid(windows.WinBuiltinAdministratorsSid)
+	if err != nil {
+		return err
+	}
+	_ = enablePrivilege("SeTakeOwnershipPrivilege") // administrators and SYSTEM hold it, disabled
+	_ = enablePrivilege("SeRestorePrivilege")
+	paths := []string{dir}
+	ents, err := os.ReadDir(dir)
+	if err != nil {
+		return err
+	}
+	for _, e := range ents {
+		paths = append(paths, filepath.Join(dir, e.Name()))
+	}
+	for _, p := range paths {
+		if err := revokeSID(p, sid); err != nil {
+			return fmt.Errorf("%s: %w", p, err)
+		}
+		sd, err := windows.GetNamedSecurityInfo(p, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION)
+		if err != nil {
+			return fmt.Errorf("%s: %w", p, err)
+		}
+		if owner, _, err := sd.Owner(); err == nil && owner != nil && collect.TrustedOwner(owner.String()) {
+			continue
+		}
+		if err := windows.SetNamedSecurityInfo(p, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION, admins, nil, nil, nil); err != nil {
+			return fmt.Errorf("%s: making Administrators the owner: %w", p, err)
+		}
+	}
+	return nil
+}
+
+// enablePrivilege switches on one privilege this process's token holds.
+func enablePrivilege(name string) error {
+	var tok windows.Token
+	if err := windows.OpenProcessToken(windows.CurrentProcess(), windows.TOKEN_ADJUST_PRIVILEGES|windows.TOKEN_QUERY, &tok); err != nil {
+		return err
+	}
+	defer tok.Close()
+	var luid windows.LUID
+	n, err := windows.UTF16PtrFromString(name)
+	if err != nil {
+		return err
+	}
+	if err := windows.LookupPrivilegeValue(nil, n, &luid); err != nil {
+		return err
+	}
+	tp := windows.Tokenprivileges{PrivilegeCount: 1}
+	tp.Privileges[0] = windows.LUIDAndAttributes{Luid: luid, Attributes: windows.SE_PRIVILEGE_ENABLED}
+	return windows.AdjustTokenPrivileges(tok, false, &tp, 0, nil, nil)
+}
+
+// checkProgramFolder runs when the agent starts: if the program (or its folder) can be changed by anyone but
+// administrators / SYSTEM - typically the service's own Modify entry from fairy-agent 0.4.2 after an update
+// through the panel - it removes the service's entry when it may (running as LocalSystem), else it says how to.
+func checkProgramFolder() {
+	exe, err := os.Executable()
+	if err != nil {
+		return
+	}
+	exe, _ = filepath.Abs(exe)
+	if collect.TrustedExecutable(exe) == nil {
+		return
+	}
+	if sid, _, _, err := windows.LookupSID("", `NT SERVICE\`+serviceName); err == nil {
+		if secureProgramFolder(filepath.Dir(exe), sid) == nil && collect.TrustedExecutable(exe) == nil {
+			slog.Warn("removed the service's write access to the program folder (left by fairy-agent 0.4.2 or older)", "folder", filepath.Dir(exe))
+			return
+		}
+	}
+	err = collect.TrustedExecutable(exe)
+	slog.Warn("the fairy-agent program can be changed by others than administrators; fix it "+agent.UpdaterSetupHint, "problem", err.Error())
+}
+
+// setupSelfUpdate sets up self-update, idempotently (as Administrator: install and install-fairy-agent.ps1 run it):
+//   - removes the program-folder write access fairy-agent 0.4.2 and older gave the service's account
+//     (NT SERVICE\fairy-agent); the program folder stays administrators-only;
+//   - update\ under ProgramData: administrators / SYSTEM full control, the service read-only (the installer's
+//     result and log); update\stage\: the service may write (it downloads the release there);
+//   - the fairy-agent-update service: LocalSystem, started on demand, runs this (installed) program's
+//     apply-update; the agent's account may only start and query it;
+//   - takes back the start / stop right on its own service that older versions gave the agent.
 //
-// The agent still installs only releases signed with the key built into it, and only when self_update is
-// enabled in config.yaml.
+// The installer only installs releases signed with the key built into the installed program, and only when
+// self_update is enabled in config.yaml (the agent will not stage anything otherwise).
 func setupSelfUpdate(cfgPath string) error {
 	sid, _, _, err := windows.LookupSID("", `NT SERVICE\`+serviceName)
 	if err != nil {
@@ -297,16 +444,24 @@ func setupSelfUpdate(cfgPath string) error {
 		return err
 	}
 	exe, _ = filepath.Abs(exe)
-	const modify = 0x1301bf // read, write, execute, delete
-	if err := grantACE(filepath.Dir(exe), windows.SE_FILE_OBJECT, 0, sid, modify, windows.SUB_CONTAINERS_AND_OBJECTS_INHERIT); err != nil {
-		return fmt.Errorf("program folder %s: %w", filepath.Dir(exe), err)
-	}
-	upd := filepath.Join(filepath.Dir(cfgPath), "update")
-	if err := os.MkdirAll(upd, 0o700); err != nil {
+	if err := secureProgramFolder(filepath.Dir(exe), sid); err != nil {
 		return err
 	}
-	if err := applyACL(upd, "D:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1301bf;;;"+sid.String()+")"); err != nil {
+	upd := filepath.Join(filepath.Dir(cfgPath), "update")
+	stage := filepath.Join(upd, "stage")
+	if err := os.MkdirAll(stage, 0o700); err != nil {
+		return err
+	}
+	for _, d := range []string{upd, stage} {
+		if st, err := os.Lstat(d); err != nil || !st.IsDir() || st.Mode()&os.ModeSymlink != 0 || isReparse(st) {
+			return fmt.Errorf("%s is not a plain folder: remove it and run this again", d)
+		}
+	}
+	if err := applyACL(upd, "D:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;"+sid.String()+")"); err != nil {
 		return fmt.Errorf("update folder %s: %w", upd, err)
+	}
+	if err := applyACL(stage, "D:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1301bf;;;"+sid.String()+")"); err != nil {
+		return fmt.Errorf("stage folder %s: %w", stage, err)
 	}
 	if err := prepareStateDir(filepath.Join(filepath.Dir(cfgPath), "state")); err != nil { // pairing (Add host)
 		return fmt.Errorf("state folder: %w", err)
@@ -321,12 +476,63 @@ func setupSelfUpdate(cfgPath string) error {
 		return fmt.Errorf("the %s service is not installed: %w", serviceName, err)
 	}
 	defer s.Close()
-	const svcRights = windows.SERVICE_START | windows.SERVICE_STOP | windows.SERVICE_QUERY_STATUS | windows.SERVICE_INTERROGATE
-	if err := grantACE("", windows.SE_SERVICE, s.Handle, sid, svcRights, windows.NO_INHERITANCE); err != nil {
+	if err := revokeServiceSID(s.Handle, sid); err != nil {
 		return fmt.Errorf("service permissions: %w", err)
 	}
-	fmt.Println("self-update permissions set (service account " + `NT SERVICE\` + serviceName + ")")
+	if err := collect.TrustedExecutable(exe); err != nil {
+		return fmt.Errorf("the updater would run this program as LocalSystem, so only administrators may be able to change it (install it in C:\\Program Files\\Fairy): %w", err)
+	}
+	u, err := m.OpenService(agent.UpdaterServiceName)
+	cfg := mgr.Config{ServiceType: windows.SERVICE_WIN32_OWN_PROCESS, DisplayName: "Fairy agent updater",
+		Description: "Installs a signed fairy-agent release that the Fairy agent downloaded (the panel's Update button), then stops.",
+		StartType:   mgr.StartManual, ServiceStartName: "LocalSystem", ErrorControl: mgr.ErrorNormal,
+		BinaryPathName: syscall.EscapeArg(exe) + " apply-update --config " + syscall.EscapeArg(cfgPath)}
+	if err == nil {
+		old, qerr := u.Config()
+		if qerr == nil {
+			cfg.Dependencies, cfg.LoadOrderGroup = old.Dependencies, old.LoadOrderGroup
+		}
+		if err := u.UpdateConfig(cfg); err != nil {
+			u.Close()
+			return fmt.Errorf("updating the %s service: %w", agent.UpdaterServiceName, err)
+		}
+	} else {
+		u, err = m.CreateService(agent.UpdaterServiceName, exe, cfg, "apply-update", "--config", cfgPath)
+		if err != nil {
+			return fmt.Errorf("creating the %s service: %w", agent.UpdaterServiceName, err)
+		}
+	}
+	defer u.Close()
+	if err := grantACE("", windows.SE_SERVICE, u.Handle, sid, windows.SERVICE_START|windows.SERVICE_QUERY_STATUS, windows.NO_INHERITANCE); err != nil {
+		return fmt.Errorf("%s service permissions: %w", agent.UpdaterServiceName, err)
+	}
+	fmt.Println("self-update set up: the " + agent.UpdaterServiceName + " service (LocalSystem) installs signed releases; " +
+		`NT SERVICE\` + serviceName + " may start it, write " + stage + " and nothing in " + filepath.Dir(exe))
 	return nil
+}
+
+// revokeServiceSID removes every allow entry for sid from a service's DACL.
+func revokeServiceSID(h windows.Handle, sid *windows.SID) error {
+	sd, err := windows.GetSecurityInfo(h, windows.SE_SERVICE, windows.DACL_SECURITY_INFORMATION)
+	if err != nil {
+		return err
+	}
+	old, _, err := sd.DACL()
+	if err != nil {
+		return err
+	}
+	acl, err := windows.ACLFromEntries([]windows.EXPLICIT_ACCESS{{AccessMode: windows.REVOKE_ACCESS,
+		Trustee: windows.TRUSTEE{TrusteeForm: windows.TRUSTEE_IS_SID, TrusteeType: windows.TRUSTEE_IS_WELL_KNOWN_GROUP,
+			TrusteeValue: windows.TrusteeValueFromSID(sid)}}}, old)
+	if err != nil {
+		return err
+	}
+	return windows.SetSecurityInfo(h, windows.SE_SERVICE, windows.DACL_SECURITY_INFORMATION, nil, nil, acl, nil)
+}
+
+func isReparse(st os.FileInfo) bool {
+	d, ok := st.Sys().(*syscall.Win32FileAttributeData)
+	return ok && d.FileAttributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0
 }
 
 func uninstall() error {
@@ -351,6 +557,12 @@ func uninstall() error {
 	}
 	if err := s.Delete(); err != nil {
 		return err
+	}
+	if u, err := m.OpenService(agent.UpdaterServiceName); err == nil {
+		if err := u.Delete(); err != nil {
+			fmt.Println("warning: could not remove the", agent.UpdaterServiceName, "service:", err)
+		}
+		u.Close()
 	}
 	_ = eventlog.Remove(serviceName)
 	fmt.Println(`removed the "fairy-agent" service. Its folder (config, tokens, logs) is kept: delete`,

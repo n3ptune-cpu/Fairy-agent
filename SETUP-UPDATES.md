@@ -228,8 +228,17 @@ self_update:
   enabled: true
 ```
 
-then `Restart-Service fairy-agent`. The install script also sets the permissions self-update needs (safe to run
-again). The control token is in `C:\ProgramData\fairy-agent\control-token`.
+then `Restart-Service fairy-agent`. The install script also sets up what self-update needs (safe to run again):
+the **fairy-agent-update** service (LocalSystem, started on demand) that installs signed releases, and the
+download folder `C:\ProgramData\fairy-agent\update\stage`. The agent itself cannot change
+`C:\Program Files\Fairy`. On a PC that ran 0.4.2 or older, run this once after it is on 0.4.3 (through the
+panel or by hand), in PowerShell as Administrator; it also takes back the write access 0.4.2 gave the agent:
+
+```powershell
+& "C:\Program Files\Fairy\fairy-agent.exe" setup-self-update
+```
+
+The control token is in `C:\ProgramData\fairy-agent\control-token`.
 
 ---
 
@@ -300,7 +309,8 @@ you to confirm with Pocket ID (like power actions), writes it to the Audit log, 
 version did not come up, the agent is back on the old one and shows why ("rolled back").
 
 Linux details: `journalctl -u fairy-agent-update` (installer), `journalctl -u fairy-agent` (agent). Windows:
-`C:\ProgramData\fairy-agent\logs\agent.log`. The panel's own version is on the same page, with "Panel update
+`C:\ProgramData\fairy-agent\update\installer.log` (installer), `C:\ProgramData\fairy-agent\logs\agent.log`
+(agent). The panel's own version is on the same page, with "Panel update
 available: run `fairy update` on the panel's host" when it is behind (the panel never updates itself from the
 web page).
 

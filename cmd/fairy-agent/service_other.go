@@ -5,7 +5,10 @@ package main
 import (
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
+
+	"github.com/n3ptune-cpu/Fairy-agent/pkg/agent/collect"
 )
 
 func isService() bool  { return false }
@@ -13,6 +16,18 @@ func runService() int  { return 1 }
 func lowerPriority()   {} // the systemd unit sets Nice= and the I/O class
 func isAdmin() bool    { return os.Geteuid() == 0 }
 func uninstall() error { return errors.New("on Linux, remove the systemd unit instead (see AGENT.md)") }
+
+// checkProgramFolder warns when the running binary could be replaced by someone other than root (or the agent's
+// own user): the update installer and administrators run it with more rights.
+func checkProgramFolder() {
+	exe, err := os.Executable()
+	if err != nil {
+		return
+	}
+	if err := collect.TrustedExecutable(exe); err != nil {
+		slog.Warn("the fairy-agent program can be changed by others; install it in /usr/local/bin owned by root", "problem", err.Error())
+	}
+}
 
 func setupSelfUpdate(string) error {
 	fmt.Println(`On Linux self-update needs (AGENT.md, "Updates"):

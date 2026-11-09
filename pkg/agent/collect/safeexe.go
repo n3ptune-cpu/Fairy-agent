@@ -49,6 +49,9 @@ func trustedSID(s string) bool {
 	return s == sidSystem || s == sidAdministrators || s == sidTrustedInstaller
 }
 
+// TrustedOwner reports whether a Windows owner SID is SYSTEM, Administrators or TrustedInstaller.
+func TrustedOwner(sid string) bool { return trustedSID(sid) }
+
 // Access rights that let someone replace a program or what it loads.
 const (
 	fileWriteData      = 0x2 // folder: add a file (e.g. a DLL next to the program)

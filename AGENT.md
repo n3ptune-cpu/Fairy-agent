@@ -73,7 +73,9 @@ Like adding a machine to Tailscale: no editor, no token copying.
 4. The dialog goes from *waiting for the machine* to *paired* to *online*, and the host appears.
 
 What the command does: it downloads the latest release, checks every file against the signed `SHA256SUMS`
-(with the release key built into fairy-agent: the installed agent's on a re-run), installs exactly as described
+(with the release key built into the downloaded fairy-agent on Windows, the installed agent's on a Linux re-run;
+on Windows an installed program is only run again after it has been replaced by the checked one and its
+SHA-256 matches), installs exactly as described
 in [Install on Windows](#install-on-windows) / [Install on Linux](#install-on-linux) (user, program, service,
 polkit / tmpfiles rules when needed, firewall rule for the panel only, LocalSystem on Windows when Core Temp or
 IPMI is chosen), then runs `fairy-agent join`: it makes the tokens on the machine, switches on the chosen
@@ -445,11 +447,24 @@ self_update:
   start exactly that one unit; Debian/Proxmox: `apt install polkitd` if `/etc/polkit-1/rules.d` does not
   exist). Then `systemctl daemon-reload && systemctl restart fairy-agent`. On Fedora with SELinux the installer
   runs `restorecon` on the new program. The installer's messages: `journalctl -u fairy-agent-update`.
-* **Windows**: run `install-fairy-agent.ps1` (again) as Administrator. It gives the service's own account
-  (`NT SERVICE\fairy-agent`, nothing else) the right to replace files in `C:\Program Files\Fairy`, to write
-  `C:\ProgramData\fairy-agent\update` and to stop and start its own service. The installer is
-  `fairy-agent.exe apply-update`, started by the service; it writes to the agent's log file. No driver, no
-  other programs touched.
+* **Windows**: run `install-fairy-agent.ps1` (again) as Administrator, or just
+  `& "C:\Program Files\Fairy\fairy-agent.exe" setup-self-update` in an Administrator PowerShell. It installs
+  a second service, **fairy-agent-update** (LocalSystem, started only on demand), which runs the *installed*
+  `C:\Program Files\Fairy\fairy-agent.exe apply-update`: it checks the downloaded release again with its own
+  built-in key, puts it into `C:\Program Files\Fairy`, restarts the agent and rolls back if needed, then stops.
+  The agent's own account (`NT SERVICE\fairy-agent`) may only *start* that service and write the download
+  folder `C:\ProgramData\fairy-agent\update\stage`; it can change nothing in `C:\Program Files\Fairy`, so
+  even a compromised agent cannot plant a program that an administrator or SYSTEM later runs. The installer
+  logs to `C:\ProgramData\fairy-agent\update\installer.log`. No driver, no other programs touched.
+  Without the updater service the panel shows self-update as unavailable, with this command as the fix.
+* **Coming from 0.4.2 or older on Windows**: those versions gave the agent's account write access to
+  `C:\Program Files\Fairy` (so it could replace itself). After updating to 0.4.3, through the panel or by hand,
+  run once in an Administrator PowerShell:
+  `& "C:\Program Files\Fairy\fairy-agent.exe" setup-self-update`. It removes that access and sets up the
+  updater service; until then the panel's Update button says so. (An agent running as LocalSystem removes the
+  access by itself when it starts; re-running `install.ps1` from the panel's Re-pair does all of it too.)
+  Updates never go to an older release through the panel any more, not even with force: by hand only, with
+  `fairy-agent update --force` as root / Administrator.
 
 The very first program with self-update has to be installed by hand once per machine;
 [SETUP-UPDATES.md](SETUP-UPDATES.md) has the exact commands. `self_update.repo` can point at a fork (its
@@ -599,7 +614,7 @@ are lists of devices: edit those in the file.
   until when), or the code expired. The agent's log says "paired with panel" (with the panel's address, never a
   token). The state file is `/var/lib/fairy-agent/pairing.json` (Linux) or
   `C:\ProgramData\fairy-agent\state\pairing.json` (Windows); it never holds the code itself.
-* **Remove.** Windows: `& "C:\Program Files\Fairy\fairy-agent.exe" uninstall`, then
+* **Remove.** Windows: `& "C:\Program Files\Fairy\fairy-agent.exe" uninstall` (removes both services), then
   `Remove-NetFirewallRule -DisplayName "Fairy agent (Tailscale only)"` and delete `C:\Program Files\Fairy` and
   `C:\ProgramData\fairy-agent`. Linux: `systemctl disable --now fairy-agent`, delete the units
   (`fairy-agent.service`, `fairy-agent-update.service`), `/etc/polkit-1/rules.d/49-fairy-agent.rules`,
@@ -623,7 +638,10 @@ are lists of devices: edit those in the file.
   environment, pins the Redfish certificate and never logs passwords.
 * Time limits on every connection; requests are small and bounded.
 * Windows: settings folder readable only by administrators, SYSTEM and the service; the program lives in
-  `C:\Program Files`. Linux: own user, no root, no capabilities, systemd sandbox.
+  `C:\Program Files` and only administrators / SYSTEM can change it (self-update goes through the separate
+  LocalSystem updater service, which checks the signature itself). The install scripts check the program's
+  SHA-256 against the signed SHA256SUMS before running it as Administrator. Helper programs (ipmitool,
+  nvidia-smi) are only run from places only administrators can change. Linux: own user, no root, no capabilities, systemd sandbox.
 
 ## Not yet tested on a real Windows PC
 
@@ -654,9 +672,12 @@ on the first install and report anything odd:
   its folders, e.g. that `C:\Program Files\ipmitool\ipmitool.exe` installed by an administrator is accepted;
 * leaving out leftover GPU entries ("GPU Adapter Memory" counter per adapter), checked against unit tests built
   from the RX 5600 XT and Intel UHD reports, not yet on those PCs;
-* self-update on Windows: the permissions `setup-self-update` sets (program folder, update folder, the
-  service's own start/stop right), the detached installer (`apply-update`) stopping and starting the service,
-  renaming the running exe, and rolling back.
+* self-update on Windows: `setup-self-update` (removing 0.4.2's program-folder entry, the update / stage folder
+  permissions, creating the fairy-agent-update service and its start right for the agent), the updater service
+  starting, stopping and starting the agent's service, renaming the running exe, rolling back, its log file,
+  and the stage folder lock (no junction while it reads);
+* `install.ps1` / `install-fairy-agent.ps1` on Windows with the new checks (parsed by PowerShell 7 on Linux
+  only): the SHA256SUMS check of the program, `icacls /remove:g` before the copy, the check of the copy;
 
 Self-update on Linux was tested with fakes (signature, download, swap, rollback) but not yet against a real
 GitHub release, a real polkit rule or SELinux: watch `journalctl -u fairy-agent-update` the first time.

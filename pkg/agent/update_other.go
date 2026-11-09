@@ -5,6 +5,7 @@ package agent
 import (
 	"context"
 	"errors"
+	"os"
 
 	"github.com/n3ptune-cpu/Fairy-agent/pkg/release"
 )
@@ -12,6 +13,15 @@ import (
 var errNoSelfUpdate = errors.New("self-update is only available on Linux and Windows")
 
 const stageHint = ""
+
+func isReparsePoint(os.FileInfo) bool { return false }
+
+func lockDir(string) (func(), error) { return func() {}, nil }
+
+// InstallerLogPath is the installer's own log file ("" = stderr).
+func InstallerLogPath(*Config) string { return "" }
+
+func installerReady() error { return errNoSelfUpdate }
 
 // UpdatePaths are the stage folder and the installer's result file.
 func UpdatePaths(*Config) (stage, result string) { return "", "" }
