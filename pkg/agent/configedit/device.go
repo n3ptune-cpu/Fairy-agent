@@ -18,8 +18,9 @@ type KV struct {
 	Value any // bool, int, float64, string or []string
 }
 
-// AddDevice puts one device entry (e.g. the local NUT server under `ups`) into a top-level device list that is
-// empty (`ups: []`, `ups:`) or missing, as one flow-style line: `ups: [{id: local-ups, host: 127.0.0.1}]`.
+// AddDevice puts one device entry (e.g. the local NUT server under `ups`) into a device list that is empty
+// (`ups: []`, `ups:`) or missing, as one flow-style line: `ups: [{id: local-ups, host: 127.0.0.1}]`. list may be
+// a dotted path (`bmc_relay.targets`).
 // Comments and everything else stay as they are; the result is decoded again and must differ only there.
 func AddDevice(data []byte, list string, item []KV) ([]byte, error) {
 	var parts []string
@@ -41,11 +42,12 @@ func AddDevice(data []byte, list string, item []KV) ([]byte, error) {
 	if root.Kind == yaml.DocumentNode && len(root.Content) == 1 {
 		top = root.Content[0]
 	}
-	if n := find(top, []string{list}); n != nil && !isNull(n) && (n.Kind != yaml.SequenceNode || len(n.Content) > 0) {
+	path := strings.Split(list, ".")
+	if n := find(top, path); n != nil && !isNull(n) && (n.Kind != yaml.SequenceNode || len(n.Content) > 0) {
 		return nil, fmt.Errorf("%s: %w", list, ErrListNotEmpty)
 	}
 	d := newDoc(data)
-	e, err := d.plan(top, []string{list}, text)
+	e, err := d.plan(top, path, text)
 	if err != nil {
 		return nil, fmt.Errorf("cannot add to %s safely (%v): edit config.yaml by hand", list, err)
 	}
@@ -60,16 +62,29 @@ func AddDevice(data []byte, list string, item []KV) ([]byte, error) {
 	if a == nil {
 		a = map[string]any{}
 	}
-	got, _ := b[list].([]any)
+	got, _ := getPath(b, path).([]any)
 	if len(got) != 1 || !sameItem(got[0], want) {
-		return nil, fmt.Errorf("cannot add to %s safely (it reads back as %v): edit config.yaml by hand", list, b[list])
+		return nil, fmt.Errorf("cannot add to %s safely (it reads back as %v): edit config.yaml by hand", list, getPath(b, path))
 	}
-	delete(a, list)
-	delete(b, list)
+	drop(a, path)
+	drop(b, path)
 	if !reflect.DeepEqual(prune(a), prune(b)) {
 		return nil, fmt.Errorf("cannot add to %s safely (other settings would change): edit config.yaml by hand", list)
 	}
 	return out, nil
+}
+
+// getPath is the value at a dotted path of a decoded document (nil when missing).
+func getPath(m map[string]any, path []string) any {
+	var cur any = m
+	for _, k := range path {
+		mm, ok := cur.(map[string]any)
+		if !ok {
+			return nil
+		}
+		cur = mm[k]
+	}
+	return cur
 }
 
 func sameItem(got any, want map[string]any) bool {

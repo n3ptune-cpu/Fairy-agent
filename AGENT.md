@@ -316,6 +316,53 @@ Panel: `wol_relay: true` and `control_token_env:` in this agent's entry, and `wo
 agent's id>}` under `systems:` for the machine to wake. The agent only sends to the LAN broadcast address or a
 private (192.168.x.x / 10.x / 172.16-31.x) address, on port 7 or 9.
 
+### BMC power-on relay
+
+For a machine Wake-on-LAN cannot wake (e.g. a BMC sharing the LAN port, so the NIC is not listening for magic
+packets), an always-on agent that can reach the BMC powers it on through the BMC: `POST /bmc/power
+{"target": "<id>", "action": "on" | "status"}` with the control token (rate limited and logged like the other
+control actions; `/metrics` lists the target ids and backends only, never addresses or accounts). Only private
+BMC addresses are accepted. Two backends per target:
+
+* `ipmitool` (default when `host:` is set): `ipmitool -I lanplus -H <host> -U <username> -E [-C <cipher_suite>]
+  chassis power on` (and `chassis power status`), 15 s. The password travels only in the child process's
+  `IPMI_PASSWORD` (that is what `-E` reads; never on the command line), and the child gets a minimal
+  environment without the agent's tokens. ipmitool is found in PATH, `C:\Program Files\ipmitool\` or
+  `/usr/bin` unless `ipmitool_path` says where. `cipher_suite` (0-17) is ipmitool's `-C` for BMCs that need a
+  particular one.
+* `redfish` (default when `url:` is set): `GET /redfish/v1/Systems`, then `POST <first
+  member>/Actions/ComputerSystem.Reset {"ResetType": "On"}`, basic auth, 10 s. The BMC's self-signed
+  certificate is pinned by SHA-256: `tls_fingerprint` if given, else learned on the first successful call
+  ("trust on first use", logged with the fingerprint) and kept in the agent's state folder (`bmc-pins.json`).
+
+```yaml
+bmc_relay:
+  enabled: true
+  targets:
+    - {id: cyrene-bmc, backend: ipmitool, host: 192.168.254.254, username: fairy, password_env: BMC_CYRENE_PASSWORD}
+env_file: C:\ProgramData\fairy-agent\secrets.env    # BMC_CYRENE_PASSWORD=... (written by `fairy-agent secret set`)
+```
+
+The password is never typed on a command line: `fairy-agent secret set NAME` asks for it (no echo) or reads one
+line from stdin, writes it into `env_file` (setting `env_file` to `secrets.env` next to config.yaml if it was
+not set) with tight permissions (Windows: SYSTEM and Administrators full control, the agent's service account
+read-only, nobody else; Linux: 0640 root:fairy-agent). IPMI over LAN without ipmitool is not built in (future).
+
+Neptune's NSX-FURINA (cabled to NSX-CYRENE's BMC port, BMC at 192.168.254.254, ipmitool installed), in an
+Administrator PowerShell:
+
+```powershell
+& "C:\Program Files\Fairy\fairy-agent.exe" bmc-relay add --id cyrene-bmc --backend ipmitool --host 192.168.254.254 --username <BMC user> --password-env BMC_CYRENE_PASSWORD
+& "C:\Program Files\Fairy\fairy-agent.exe" secret set BMC_CYRENE_PASSWORD
+Restart-Service fairy-agent
+```
+
+(add `--cipher-suite <n>` to the first line if the BMC needs a particular cipher suite, and
+`--ipmitool-path "C:\path\to\ipmitool.exe"` if it is not in PATH or `C:\Program Files\ipmitool\`).
+Panel (`config.yaml`), on the machine to wake: `systems: [{id: nsx-cyrene, bmc_power: {relay: nsx-furina-agent,
+target: cyrene-bmc}}]`; the relay agent's entry needs `control_token_env:`. The panel then offers "Power on (via
+BMC, through NSX-FURINA)" while NSX-CYRENE is offline and NSX-FURINA is online.
+
 ### Plugs and UPSes on this machine's network
 
 When the panel cannot reach a smart plug or UPS itself (for example at a friend's place), the agent there can
@@ -471,9 +518,10 @@ The file is `C:\ProgramData\fairy-agent\config.yaml` (Windows) or `/etc/fairy-ag
 | `gpu.windows` | auto | Windows: AMD / Intel / other GPUs from Windows' GPU counters; `off` to switch off |
 | `gpu.amd_adl` | auto | Windows: Radeon temperature and watts from AMD's ADL (Adrenalin driver), read only; `off` to switch off |
 | `sensors.coretemp` | false | Windows: CPU core temperatures and watts from Core Temp (see [Core Temp](#core-temp-optional-windows)) |
-| `ipmi`, `fan_control`, `power_control`, `wol` | off | see [Optional features](#optional-features) |
+| `ipmi`, `fan_control`, `power_control`, `wol`, `bmc_relay` | off | see [Optional features](#optional-features) |
+| `env_file` | none | `KEY=value` secrets (device and BMC passwords); `fairy-agent secret set NAME` writes it |
 | `self_update.enabled`, `self_update.repo` | off, `n3ptune-cpu/Fairy-agent` | see [Updates](#updates-the-panels-update-button) |
-| `control_rate_per_min` | 12 | all control requests together (fan, power, Wake-on-LAN, update) |
+| `control_rate_per_min` | 12 | all control requests together (fan, power, Wake-on-LAN, BMC relay, update) |
 | `log_file` | Windows: `C:\ProgramData\fairy-agent\logs\agent.log` (5 MB, one old copy); Linux: the journal | |
 
 Unknown settings are an error (so a typo does not silently do nothing). `fairy-agent check-config` checks the
@@ -544,6 +592,8 @@ are lists of devices: edit those in the file.
   installer, which never trusts the downloaded copy), only files fetched over HTTPS from GitHub, never an older
   version, and only when an admin asks for it.
 * Command lines are cleaned of passwords and tokens before they leave the machine (and again by the panel).
+* The BMC relay reaches private addresses only, passes the BMC password to ipmitool only through its
+  environment, pins the Redfish certificate and never logs passwords.
 * Time limits on every connection; requests are small and bounded.
 * Windows: settings folder readable only by administrators, SYSTEM and the service; the program lives in
   `C:\Program Files`. Linux: own user, no root, no capabilities, systemd sandbox.
@@ -553,6 +603,8 @@ are lists of devices: edit those in the file.
 The Windows parts compile and their pure logic is unit-tested, but were not yet run on real Windows. Check these
 on the first install and report anything odd:
 
+* the BMC power-on relay (ipmitool through `-E`, Redfish) against a real BMC, and `fairy-agent secret set`'s
+  Windows ACL with the installed service;
 * the service itself: install / start / stop / uninstall, the folder permissions, the log file, the Event Log
   entry on a failed start, automatic restart;
 * CPU %, memory, disks, network counters, uptime, OS name and hardware strings (registry);

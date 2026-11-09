@@ -58,6 +58,7 @@ type Config struct {
 	PowerControl PowerControlConfig `yaml:"power_control"`
 	WOL          WOLConfig          `yaml:"wol"`
 	SelfUpdate   SelfUpdateConfig   `yaml:"self_update"`
+	BMCRelay     BMCRelayConfig     `yaml:"bmc_relay"`
 
 	// ControlRatePerMin limits POST requests (fan, power, Wake-on-LAN, self-update) for the whole agent.
 	ControlRatePerMin int `yaml:"control_rate_per_min"`
@@ -181,7 +182,7 @@ func (c *Config) IPMISensors() bool { return c.IPMI.Enabled && boolOr(c.IPMI.Sen
 
 // ControlEnabled reports whether any POST feature is on (then a control token is required).
 func (c *Config) ControlEnabled() bool {
-	return c.FanControl.Enabled || c.PowerControl.Enabled || c.WOL.Enabled || c.SelfUpdate.Enabled
+	return c.FanControl.Enabled || c.PowerControl.Enabled || c.WOL.Enabled || c.SelfUpdate.Enabled || c.BMCRelay.Enabled
 }
 
 var (
@@ -301,6 +302,7 @@ func (c *Config) Validate() error {
 	if c.GPU.AMDADL != "auto" && c.GPU.AMDADL != "off" {
 		add("gpu.amd_adl must be auto or off")
 	}
+	c.BMCRelay.validate(func(s string) { add("%s", s) })
 	if c.GPU.IntervalS < 1 || c.GPU.IntervalS > 60 {
 		add("gpu.interval_s must be 1-60")
 	}

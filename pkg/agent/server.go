@@ -75,6 +75,7 @@ type Deps struct {
 	WOL       *WOL      // nil unless wol is enabled
 	Relay     *Relay    // may be nil
 	Updater   *Updater  // nil unless self_update is enabled
+	BMCRelay  *BMCRelay // nil unless bmc_relay is enabled
 	Pairer    *Pairer   // POST /pair ("Add host" in the panel); nil = never answers
 	Version   string
 }
@@ -236,6 +237,7 @@ func (a *Agent) Handler() http.Handler {
 		"/power":      {method: http.MethodPost, control: true, feature: func() bool { return a.d.Power != nil }, code: "power_control_disabled", h: a.power},
 		"/wol":        {method: http.MethodPost, control: true, feature: func() bool { return a.d.WOL != nil }, code: "wol_disabled", h: a.wol},
 		"/update":     {method: http.MethodPost, control: true, feature: func() bool { return a.d.Updater != nil }, code: "self_update_disabled", h: a.update},
+		"/bmc/power":  {method: http.MethodPost, control: true, feature: func() bool { return a.d.BMCRelay != nil }, code: "bmc_relay_disabled", h: a.bmcPower},
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ip := clientIP(r)
@@ -381,6 +383,9 @@ func (a *Agent) Metrics(ctx context.Context) map[string]any {
 	if a.d.Power != nil {
 		m["power_control"] = a.d.Power.State()
 	}
+	if a.d.BMCRelay != nil {
+		m["bmc_relay"] = map[string]any{"enabled": true, "targets": a.d.BMCRelay.Targets()}
+	}
 	if a.d.Updater != nil {
 		m["self_update"] = a.d.Updater.Status()
 	}
@@ -391,7 +396,7 @@ func (a *Agent) Metrics(ctx context.Context) map[string]any {
 func (a *Agent) Features() map[string]bool {
 	return map[string]bool{"processes": a.cfg.ProcessesEnabled(), "cmdline": a.cfg.ProcessesEnabled() && a.cfg.CmdlineEnabled(),
 		"fan_control": a.d.Fan != nil, "power_control": a.d.Power != nil, "wol_relay": a.d.WOL != nil,
-		"self_update": a.d.Updater != nil}
+		"self_update": a.d.Updater != nil, "bmc_relay": a.d.BMCRelay != nil}
 }
 
 // PairInfo is the /pair answer without the tokens.
@@ -590,6 +595,16 @@ func (a *Agent) power(w http.ResponseWriter, r *http.Request) {
 		req.DelayS = &d
 	}
 	st, body := a.d.Power.Handle(req)
+	writeJSON(w, st, body)
+}
+
+func (a *Agent) bmcPower(w http.ResponseWriter, r *http.Request) {
+	var b BMCRequest
+	if err := decodeBody(r, &b); err != nil {
+		writeJSON(w, 400, map[string]any{"error": err.Error()})
+		return
+	}
+	st, body := a.d.BMCRelay.Handle(r.Context(), b)
 	writeJSON(w, st, body)
 }
 

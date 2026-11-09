@@ -69,6 +69,10 @@ func newRig(t *testing.T, y string) *rig {
 		d.WOL = NewWOL(cfg.WOL.AllowedMACs)
 		d.WOL.Send = func(addr string, pkt []byte) error { r.sent = append(r.sent, addr); return nil }
 	}
+	if cfg.BMCRelay.Enabled {
+		d.BMCRelay = NewBMCRelay(cfg.BMCRelay, "")
+		d.BMCRelay.FindIpmitool = func() (string, error) { return os.Args[0], nil } // this test binary as ipmitool
+	}
 	a = New(cfg, tok, d)
 	r.a = a
 	r.srv = httptest.NewServer(a.Handler())
@@ -578,6 +582,9 @@ func TestRelay(t *testing.T) {
 }
 
 func TestMain(m *testing.M) {
+	if mode := os.Getenv("FAKE_IPMITOOL_MODE"); mode != "" {
+		os.Exit(fakeIpmitool(mode, os.Args[1:]))
+	}
 	slog.SetDefault(slog.New(slog.NewTextHandler(io.Discard, nil)))
 	os.Exit(m.Run())
 }

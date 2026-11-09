@@ -51,6 +51,11 @@ const usage = `fairy-agent: reports this machine's metrics to the Fairy panel (s
                                             read or change config.yaml (keeps its comments; set checks the
                                             result like check-config, needs root / Administrator), e.g.
                                             fairy-agent config set fan_control.auto_mode standard
+  fairy-agent secret set NAME [--config PATH]
+                                            store a password (e.g. a BMC's) in env_file; asks for it (no echo)
+                                            or reads one line from stdin, never from the command line
+  fairy-agent bmc-relay add --id ID --host IP --username USER --password-env NAME [--cipher-suite N] ...
+                                            add a BMC power-on relay target (see AGENT.md)
   fairy-agent join --code CODE --panel IP [--power-control] [--self-update] [--wol] [--ups] [--ups-name NAME]
                    [--coretemp] [--ipmi]     the machine side of the panel's "Add host" (install.sh / install.ps1
                                             run it): tokens, the chosen features, the one-time join code
@@ -110,6 +115,10 @@ func main() {
 		fmt.Println("config OK:", *cfgPath)
 	case "config":
 		os.Exit(configCmd(args, os.Stdout, os.Stderr))
+	case "secret":
+		os.Exit(secretCmd(args, os.Stdin, os.Stdout, os.Stderr))
+	case "bmc-relay":
+		os.Exit(bmcRelayCmd(args, os.Stdout, os.Stderr))
 	case "join":
 		os.Exit(joinCmd(args, os.Stdout, os.Stderr))
 	case "pair-status":

@@ -90,6 +90,9 @@ func Run(ctx context.Context, cfg *Config, b Build) error {
 		return err
 	}
 	collect.HideEnv(names...)
+	for _, t := range cfg.BMCRelay.Targets {
+		collect.HideEnv(t.PasswordEnv)
+	}
 	if cfg.IPMI.PasswordEnv != "" {
 		collect.HideEnv(cfg.IPMI.PasswordEnv)
 	}
@@ -148,6 +151,10 @@ func Run(ctx context.Context, cfg *Config, b Build) error {
 	}
 	if cfg.WOL.Enabled {
 		d.WOL = NewWOL(cfg.WOL.AllowedMACs)
+	}
+	if cfg.BMCRelay.Enabled {
+		d.BMCRelay = NewBMCRelay(cfg.BMCRelay, filepath.Join(filepath.Dir(PairingPath(cfg)), "bmc-pins.json"))
+		slog.Info("BMC power-on relay", "targets", d.BMCRelay.Targets())
 	}
 	if cfg.SelfUpdate.Enabled {
 		o, err := DefaultUpdaterOptions(cfg, version, b.ReleaseKey)
