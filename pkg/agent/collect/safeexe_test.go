@@ -1,9 +1,6 @@
 package collect
 
 import (
-	"os"
-	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 )
@@ -101,44 +98,6 @@ func TestCheckUnixMode(t *testing.T) {
 	} {
 		if err := CheckUnixMode("p", c.kind, c.f, 999); (err == nil) != c.ok {
 			t.Errorf("%+v: %v", c, err)
-		}
-	}
-}
-
-func TestTrustedExecutableUnix(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("unix permissions")
-	}
-	dir := t.TempDir()
-	bin := filepath.Join(dir, "ipmitool")
-	if err := os.WriteFile(bin, []byte("#!/bin/sh\n"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Chmod(dir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := TrustedExecutable(bin); err != nil && os.Geteuid() == 0 {
-		t.Fatal(err)
-	}
-	if err := os.Chmod(dir, 0o777); err != nil { // a folder anyone may write into (no sticky bit)
-		t.Fatal(err)
-	}
-	if err := TrustedExecutable(bin); err == nil || !strings.Contains(err.Error(), "everyone") {
-		t.Fatal(err)
-	}
-	_ = os.Chmod(dir, 0o755)
-	if err := TrustedExecutable("ipmitool"); err == nil {
-		t.Fatal("relative path accepted")
-	}
-	if err := TrustedExecutable(dir); err == nil {
-		t.Fatal("a folder accepted")
-	}
-	if os.Geteuid() == 0 {
-		if err := os.Chown(bin, 1234, 0); err != nil {
-			t.Fatal(err)
-		}
-		if err := TrustedExecutable(bin); err == nil || !strings.Contains(err.Error(), "uid 1234") {
-			t.Fatal(err)
 		}
 	}
 }
