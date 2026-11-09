@@ -16,3 +16,4 @@ func SystemPower() PowerExec { return noPower{} }
 
 func (noPower) Schedule(string, time.Duration, string) error { return errNoPower }
 func (noPower) Cancel() error                                { return errNoPower }
+func (noPower) CanSleep() (bool, string)                     { return false, errNoPower.Error() }

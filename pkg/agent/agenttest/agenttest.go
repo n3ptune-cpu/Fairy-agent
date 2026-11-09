@@ -92,6 +92,14 @@ type PowerExec struct {
 	mu        sync.Mutex
 	Scheduled []string
 	Cancels   int
+	NoSleep   string // CanSleep's reason when set (the machine cannot sleep)
+}
+
+// CanSleep is true unless NoSleep is set.
+func (p *PowerExec) CanSleep() (bool, string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.NoSleep == "", p.NoSleep
 }
 
 // Schedule records the action.

@@ -2,13 +2,16 @@
 // Lets the fairy-agent user (and nobody else) do exactly two things through systemd. Each one is used only when
 // it is switched on in /etc/fairy-agent/config.yaml (and in the panel).
 
-// 1. power_control: power off or reboot this machine through systemd-logind (`systemctl poweroff|reboot`).
+// 1. power_control: power off, reboot or suspend (sleep) this machine through systemd-logind
+// (`systemctl poweroff|reboot|suspend`). No hibernate, no ignoring inhibitors.
 polkit.addRule(function (action, subject) {
     if (subject.user === "fairy-agent" && [
         "org.freedesktop.login1.power-off",
         "org.freedesktop.login1.power-off-multiple-sessions",
         "org.freedesktop.login1.reboot",
-        "org.freedesktop.login1.reboot-multiple-sessions"
+        "org.freedesktop.login1.reboot-multiple-sessions",
+        "org.freedesktop.login1.suspend",
+        "org.freedesktop.login1.suspend-multiple-sessions"
     ].indexOf(action.id) >= 0) {
         return polkit.Result.YES;
     }

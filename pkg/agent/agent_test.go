@@ -666,3 +666,55 @@ func TestFanModeUnsupported(t *testing.T) {
 		t.Fatal(st, logs.String())
 	}
 }
+
+// Sleep: like shutdown (delay, one pending action, cancel), refused with 409 sleep_unavailable when the machine
+// cannot sleep; /metrics says which.
+func TestPowerSleep(t *testing.T) {
+	r := newRig(t, "power_control: {enabled: true, min_delay_s: 10}\ncontrol_rate_per_min: 20\n")
+	_, m := r.do(t, "GET", "/metrics", readTok, nil)
+	if pc := m["power_control"].(map[string]any); pc["sleep"] != true || pc["sleep_note"] != nil {
+		t.Fatal(pc)
+	}
+	st, b := r.do(t, "POST", "/power", ctlTok, map[string]any{"action": "sleep", "delay_s": 15, "requested_by": "neptune"})
+	if st != 200 || b["pending"].(map[string]any)["action"] != "sleep" {
+		t.Fatal(st, b)
+	}
+	if st, _ := r.do(t, "POST", "/power", ctlTok, map[string]any{"action": "shutdown"}); st != 409 {
+		t.Fatal("one pending action", st)
+	}
+	if st, _ := r.do(t, "POST", "/power", ctlTok, map[string]any{"action": "cancel"}); st != 200 {
+		t.Fatal(st)
+	}
+	if strings.Join(r.power.Scheduled, ",") != "sleep@15s" || r.power.Cancels != 1 {
+		t.Fatal(r.power)
+	}
+
+	r2 := newRig(t, "power_control: {enabled: true}\n")
+	r2.power.NoSleep = "only Modern Standby"
+	st, b = r2.do(t, "POST", "/power", ctlTok, map[string]any{"action": "sleep"})
+	if st != 409 || b["code"] != "sleep_unavailable" || !strings.Contains(b["error"].(string), "Modern Standby") {
+		t.Fatal(st, b)
+	}
+	_, m = r2.do(t, "GET", "/metrics", readTok, nil)
+	if pc := m["power_control"].(map[string]any); pc["sleep"] != false || pc["sleep_note"] != "only Modern Standby" {
+		t.Fatal(pc)
+	}
+}
+
+func TestSleepCapabilityParsers(t *testing.T) {
+	caps := make([]byte, 76)
+	if ok, _ := sleepFromCaps(caps); ok {
+		t.Fatal("nothing")
+	}
+	caps[20] = 1
+	if ok, why := sleepFromCaps(caps); ok || !strings.Contains(why, "Modern Standby") {
+		t.Fatal(why)
+	}
+	caps[5] = 1 // S3
+	if ok, _ := sleepFromCaps(caps); !ok {
+		t.Fatal("S3")
+	}
+	if ok, _ := sleepFromCaps(caps[:10]); ok {
+		t.Fatal("short")
+	}
+}

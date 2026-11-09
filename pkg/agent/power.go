@@ -10,13 +10,15 @@ import (
 	"github.com/n3ptune-cpu/Fairy-agent/pkg/agent/collect"
 )
 
-// PowerExec carries out a delayed shutdown or reboot (platform code: power_linux.go, power_windows.go).
+// PowerExec carries out a delayed shutdown, reboot or sleep (platform code: power_linux.go, power_windows.go).
 type PowerExec interface {
-	// Schedule arranges action ("shutdown" | "reboot") to happen after delay; message is shown to logged-in
-	// users where the OS can.
+	// Schedule arranges action ("shutdown" | "reboot" | "sleep") to happen after delay; message is shown to
+	// logged-in users where the OS can.
 	Schedule(action string, delay time.Duration, message string) error
 	// Cancel stops a scheduled action.
 	Cancel() error
+	// CanSleep reports whether this machine can be put to sleep (suspend to RAM), and why not.
+	CanSleep() (ok bool, why string)
 }
 
 // Pending is the scheduled power action as /metrics and /power report it.
@@ -27,7 +29,7 @@ type Pending struct {
 	RequestedBy string  `json:"requested_by"`
 }
 
-// Power handles POST /power: one pending shutdown or reboot at a time, cancellable until it happens.
+// Power handles POST /power: one pending shutdown, reboot or sleep at a time, cancellable until it happens.
 type Power struct {
 	exec     PowerExec
 	minDelay int
@@ -35,6 +37,20 @@ type Power struct {
 
 	mu      sync.Mutex
 	pending *Pending
+	sleep   struct {
+		ok    bool
+		why   string
+		until time.Time
+	}
+}
+
+// canSleep is CanSleep, asked at most every 10 minutes. Caller holds p.mu.
+func (p *Power) canSleep() (bool, string) {
+	if now := p.now(); now.After(p.sleep.until) {
+		p.sleep.ok, p.sleep.why = p.exec.CanSleep()
+		p.sleep.until = now.Add(10 * time.Minute)
+	}
+	return p.sleep.ok, p.sleep.why
 }
 
 // NewPower returns the power controller.
@@ -74,7 +90,12 @@ func (p *Power) State() map[string]any {
 		cp := *c
 		pend = cp
 	}
-	return map[string]any{"enabled": true, "pending": pend, "min_delay_s": p.minDelay}
+	ok, why := p.canSleep()
+	st := map[string]any{"enabled": true, "pending": pend, "min_delay_s": p.minDelay, "sleep": ok}
+	if !ok {
+		st["sleep_note"] = why
+	}
+	return st
 }
 
 // PowerRequest is the POST /power body.
@@ -102,8 +123,12 @@ func (p *Power) Handle(req PowerRequest) (int, map[string]any) {
 		p.pending = nil
 		return 200, map[string]any{"action": "cancel", "pending": nil}
 	case "shutdown", "reboot":
+	case "sleep":
+		if ok, why := p.canSleep(); !ok {
+			return 409, map[string]any{"error": "this machine cannot sleep: " + why, "code": "sleep_unavailable"}
+		}
 	default:
-		return 400, map[string]any{"error": "action must be shutdown, reboot or cancel"}
+		return 400, map[string]any{"error": "action must be shutdown, reboot, sleep or cancel"}
 	}
 	delay := 60
 	if req.DelayS != nil {
@@ -124,4 +149,19 @@ func (p *Power) Handle(req PowerRequest) (int, map[string]any) {
 	p.pending = &Pending{Action: req.Action, At: at, DelayS: delay, RequestedBy: who}
 	slog.Warn("power: scheduled", "action", req.Action, "delay_s", delay, "requested_by", who)
 	return 200, map[string]any{"action": req.Action, "pending": *p.pending}
+}
+
+// sleepFromCaps reads SYSTEM_POWER_CAPABILITIES (Windows): SystemS1-S3 at bytes 3-5, AoAc (Modern Standby) at
+// byte 20.
+func sleepFromCaps(c []byte) (bool, string) {
+	if len(c) < 21 {
+		return false, "power capabilities not readable"
+	}
+	if c[3] != 0 || c[4] != 0 || c[5] != 0 {
+		return true, ""
+	}
+	if c[20] != 0 {
+		return false, "only Modern Standby (S0 low power idle), which a service cannot start; sleep (S3) is not available"
+	}
+	return false, "sleep (S1-S3) is not available on this machine (firmware or a hypervisor turned it off?)"
 }

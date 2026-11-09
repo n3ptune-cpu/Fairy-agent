@@ -179,7 +179,7 @@ Three optional extras need a small permission each, and only if you want them:
 | You want | Install | Why |
 | --- | --- | --- |
 | CPU watts (Intel/AMD "RAPL") | `deploy/fairy-agent.tmpfiles.conf` as `/etc/tmpfiles.d/fairy-agent.conf`, then `systemd-tmpfiles --create /etc/tmpfiles.d/fairy-agent.conf` | the energy counters are root-only since 2020 (a side-channel fix); this lets the agent's group read them |
-| Shutdown / reboot from the panel | `deploy/fairy-agent.polkit.rules` as `/etc/polkit-1/rules.d/49-fairy-agent.rules` | lets exactly this user power off / reboot through systemd |
+| Shutdown / reboot / sleep from the panel | `deploy/fairy-agent.polkit.rules` as `/etc/polkit-1/rules.d/49-fairy-agent.rules` | lets exactly this user power off / reboot / suspend through systemd |
 | BMC sensors / fan control in-band | `apt install ipmitool`, `deploy/fairy-agent.udev.rules` as `/etc/udev/rules.d/60-fairy-agent-ipmi.rules`, `modprobe ipmi_devintf ipmi_si`, `udevadm trigger` | lets the agent's group use /dev/ipmi0 |
 
 Temperatures, fans and voltages of the board come from `/sys/class/hwmon` and need nothing extra. So do AMD
@@ -281,7 +281,7 @@ stops after 5 idle minutes), so the service must run as LocalSystem (`install --
 reading of the BMC's sensor list can take a minute. On Linux it uses `ipmitool` (see the table above).
 `ipmi.enabled` alone (without `fan_control`) adds the BMC's temperatures, fan speeds and voltages to the panel.
 
-### Shutdown and reboot
+### Shutdown, reboot and sleep
 
 ```yaml
 power_control:
@@ -293,6 +293,16 @@ machine's name and sends a delay (default 60 s). On Windows, Windows itself show
 signed out" warning and counts down (like `shutdown /s /t 60`; open programs are closed at the end); Cancel in
 the panel aborts it. On Linux the agent waits and then runs `systemctl poweroff` / `reboot` (needs the polkit
 rule above); if the agent is restarted in the meantime, the pending action is dropped.
+
+**Sleep** (suspend to RAM, not hibernate) works the same way (delay, Cancel, one pending action at a time), but
+the agent itself waits on Windows too and then calls `SetSuspendState` (powrprof.dll). The agent reports in
+`/metrics` (`power_control.sleep`, and `sleep_note` with the reason when not) whether the machine can sleep, and
+refuses with 409 `sleep_unavailable` otherwise: on Windows it needs S1-S3 in `GetPwrCapabilities` (a laptop with
+only Modern Standby cannot be put to sleep by a service; `powercfg /a` shows what is available), on Linux
+systemd-logind's `CanSuspend` must say `yes` (the polkit rule above covers `suspend` since v0.4.2: copy the new
+file over the old one). Waking it is Wake-on-LAN (the panel's "Power on"), which from sleep needs the network
+card's "Allow this device to wake the computer" / "Wake on Magic Packet" (Windows Device Manager) or
+`ethtool -s <nic> wol g` (Linux).
 
 ### Wake-on-LAN
 
@@ -552,6 +562,8 @@ on the first install and report anything odd:
 * the process list (Toolhelp snapshot + limited handles), LocalService vs LocalSystem;
 * nvidia-smi on Windows (looping mode, path detection);
 * shutdown / reboot / cancel (InitiateSystemShutdownEx / AbortSystemShutdown) as LocalService;
+* sleep (SetSuspendState after the agent's own countdown; GetPwrCapabilities for S1-S3 / Modern Standby) and
+  `systemctl suspend` with the extended polkit rule (CanSuspend through busctl): untested on real machines;
 * IPMI through `powershell.exe` and the Microsoft_IPMI WMI class: the reply format is taken from Microsoft's
   documentation and examples (first byte of the reply = completion code) and has not been seen on a real BMC
   yet. Try `ipmi: enabled: true` first (sensors only) and look at the panel and the log before enabling fan
