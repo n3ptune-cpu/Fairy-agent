@@ -463,7 +463,7 @@ fairy-agent`; Windows `Stop-Service fairy-agent`, rename `fairy-agent.exe.old` b
 | Board fans and voltages | yes (hwmon chips) | only through the BMC (Supermicro, `ipmi:`) |
 | CPU watts | yes (RAPL, see the table above) | only with [Core Temp](#core-temp-optional-windows) |
 | Battery (laptops) | charge %, state, AC, draw in watts, time left, health | charge %, state, AC, Windows' own time-left estimate (no watts) |
-| Processes | all, with command lines (passwords blanked) | all names; details for programs it may open; the program's path instead of its command line; no per-program GPU memory |
+| Processes | all, with command lines (passwords blanked) | all names; details for programs it may open; the program's path instead of its command line; per-program dedicated GPU memory for every card (Windows' "GPU Process Memory" counter, like Task Manager) |
 
 **Not possible on Windows without a driver**, and therefore never done: CPU core temperatures, CPU package
 watts, motherboard sensor chips (fans, voltages), and other programs' command-line arguments. Tools that show
@@ -638,6 +638,8 @@ on the first install and report anything odd:
   yet. Try `ipmi: enabled: true` first (sensors only) and look at the panel and the log before enabling fan
   control;
 * the install script's firewall rule;
+* per-program GPU memory from the "GPU Process Memory" counter (compare with Task Manager's "Dedicated GPU
+  memory" column), and its matching to the NVIDIA card through nvidia-smi's pci.bus_id;
 * leaving out leftover GPU entries ("GPU Adapter Memory" counter per adapter), checked against unit tests built
   from the RX 5600 XT and Intel UHD reports, not yet on those PCs;
 * self-update on Windows: the permissions `setup-self-update` sets (program folder, update folder, the

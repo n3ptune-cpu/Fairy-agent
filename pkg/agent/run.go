@@ -132,6 +132,12 @@ func Run(ctx context.Context, cfg *Config, b Build) error {
 			slog.Info("GPUs via Windows (DXGI + GPU counters)", "adapters", wg.Names(), "amd_adl", wg.AMDCards())
 		}
 	}
+	if d.GPU != nil && cfg.GPU.Windows == "auto" && runtime.GOOS == "windows" && cfg.ProcessesEnabled() {
+		// per-process GPU memory for every card from Windows' own counter (nvidia-smi has none under WDDM)
+		if pm := collect.NewProcGPU(); pm != nil {
+			d.GPU = WithProcessGPUMemory(d.GPU, pm)
+		}
+	}
 	var a *Agent
 	if cfg.IPMI.Enabled {
 		t, err := IPMITransport(cfg.IPMI)

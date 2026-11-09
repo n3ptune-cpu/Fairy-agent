@@ -19,8 +19,9 @@ import (
 	"time"
 )
 
-// GPUQuery is the --query-gpu field list; ParseNvidiaGPULine expects this order.
-const GPUQuery = "index,uuid,name,utilization.gpu,memory.used,memory.total,temperature.gpu,power.draw"
+// GPUQuery is the --query-gpu field list; ParseNvidiaGPULine expects this order. pci.bus_id matches a card to
+// Windows' adapters for per-process memory (procgpu.go).
+const GPUQuery = "index,uuid,name,utilization.gpu,memory.used,memory.total,temperature.gpu,power.draw,pci.bus_id"
 
 const mib = 1 << 20
 
@@ -66,11 +67,15 @@ func ParseNvidiaGPULine(line string) (GPU, bool) {
 	if g.Name == "" {
 		g.Name = "NVIDIA GPU"
 	}
+	if len(f) > 8 {
+		g.loc = pciBusID(f[8])
+	}
 	return g, true
 }
 
 // ParseComputeApps parses `--query-compute-apps=pid,gpu_uuid,used_memory --format=csv,noheader,nounits` into
-// pid -> VRAM bytes per GPU index (Windows in WDDM mode reports [N/A]: those rows are skipped).
+// pid -> VRAM bytes per GPU index (Windows in WDDM mode reports [N/A]: those rows are skipped; the Windows
+// counters in procgpu.go fill in).
 func ParseComputeApps(out []byte, uuidIndex map[string]int, nGPU int) map[int][]int64 {
 	res := map[int][]int64{}
 	r := csv.NewReader(bytes.NewReader(out))

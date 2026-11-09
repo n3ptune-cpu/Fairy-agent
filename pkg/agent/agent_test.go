@@ -725,3 +725,53 @@ func TestSleepCapabilityParsers(t *testing.T) {
 		t.Fatal("short")
 	}
 }
+
+// fakeProcMem stands in for Windows' per-process GPU memory counter (collect.ProcGPU).
+type fakeProcMem struct{ n *int }
+
+func (f fakeProcMem) ComputeAppsFor(gpus []collect.GPU) map[int][]int64 {
+	*f.n = len(gpus)
+	v := make([]int64, len(gpus))
+	v[len(v)-1] = 512 << 20 // a browser on the last GPU (the AMD card)
+	return map[int][]int64{6000: make([]int64, len(gpus)), 7100: v}
+}
+
+type nvidiaWDDM struct{ agenttest.GPU }
+
+// ComputeApps is what nvidia-smi gives on Windows: no per-process numbers at all, an empty (not nil) map.
+func (nvidiaWDDM) ComputeApps(context.Context) map[int][]int64 { return map[int][]int64{} }
+
+func TestProcessGPUMemoryMerge(t *testing.T) {
+	// NVIDIA (5 GiB for Ollama from nvidia-smi) + AMD: positions follow the combined list
+	g := WithProcessGPUMemory(CombineGPUs(agenttest.GPU{}, amdOnly{}), fakeProcMem{new(int)})
+	apps := g.ComputeApps(t.Context())
+	if len(apps[6000]) != 2 || apps[6000][0] != 5<<30 || apps[7100][1] != 512<<20 || apps[7100][0] != 0 {
+		t.Fatalf("%v", apps)
+	}
+	// the AMD source's own per-process numbers move to its position in the list
+	g = CombineGPUs(amdOnly{}, agenttest.GPU{})
+	if apps := g.ComputeApps(t.Context()); len(apps[6000]) != 2 || apps[6000][1] != 5<<30 || apps[6000][0] != 0 {
+		t.Fatalf("offset: %v", apps)
+	}
+	// Windows with only an NVIDIA card: nvidia-smi's empty map no longer hides the counter's numbers
+	n := new(int)
+	g = WithProcessGPUMemory(nvidiaWDDM{}, fakeProcMem{n})
+	if apps := g.ComputeApps(t.Context()); *n != 1 || apps[7100][0] != 512<<20 {
+		t.Fatalf("%v", apps)
+	}
+	if WithProcessGPUMemory(nil, fakeProcMem{n}) != nil {
+		t.Fatal("no GPU: nothing to add to")
+	}
+	// end to end through /processes
+	r := newRig(t, "listen: 127.0.0.1:0\n")
+	r.a.d.GPU = WithProcessGPUMemory(CombineGPUs(agenttest.GPU{}, amdOnly{}), fakeProcMem{new(int)})
+	code, body := r.do(t, "GET", "/processes?sort=gpu", readTok, nil)
+	procs, _ := body["processes"].([]any)
+	if code != 200 || len(procs) == 0 {
+		t.Fatal(code, body)
+	}
+	top := procs[0].(map[string]any)
+	if top["pid"].(float64) != 6000 || top["gpu_mem"].(float64) != 5<<30 || len(top["gpu_mem_by_gpu"].([]any)) != 2 {
+		t.Fatalf("%v", top)
+	}
+}

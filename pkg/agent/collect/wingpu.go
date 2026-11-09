@@ -230,7 +230,7 @@ func WinGPUs(adapters []WinAdapter, util map[string]float64, mem map[string]int6
 			v := Round(util[a.LUID], 1) // an adapter without busy engines has no instances: 0 %
 			g.UtilPercent = &v
 		}
-		g.loc = a.Loc
+		g.loc, g.luid = a.Loc, a.LUID
 		if b, ok := mem[a.LUID]; ok {
 			g.VRAMUsed = P(b)
 		}

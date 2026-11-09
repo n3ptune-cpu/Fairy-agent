@@ -28,8 +28,9 @@ type GPUSource interface {
 	ComputeApps(ctx context.Context) map[int][]int64
 }
 
-// CombineGPUs lists the GPUs of several sources one after the other (NVIDIA first, so its indexes in
-// gpu_mem_by_gpu stay right); per-process VRAM comes from the first source that has it. nil sources are skipped.
+// CombineGPUs lists the GPUs of several sources one after the other (NVIDIA first). Per-process VRAM from each
+// source is moved to its GPUs' positions in that combined list (gpu_mem_by_gpu follows the `gpus` order) and
+// merged. nil sources are skipped.
 func CombineGPUs(sources ...GPUSource) GPUSource {
 	var m multiGPU
 	for _, s := range sources {
@@ -57,12 +58,55 @@ func (m multiGPU) GPUs() []collect.GPU {
 }
 
 func (m multiGPU) ComputeApps(ctx context.Context) map[int][]int64 {
-	for _, s := range m {
-		if apps := s.ComputeApps(ctx); apps != nil {
-			return apps
-		}
+	offs := make([]int, len(m))
+	total := 0
+	for i, s := range m {
+		offs[i] = total
+		total += len(s.GPUs())
 	}
-	return nil
+	var all []map[int][]int64
+	for i, s := range m {
+		apps := s.ComputeApps(ctx)
+		if len(apps) == 0 {
+			continue
+		}
+		moved := make(map[int][]int64, len(apps))
+		for pid, v := range apps {
+			w := make([]int64, total)
+			for j, b := range v {
+				if offs[i]+j < total {
+					w[offs[i]+j] = b
+				}
+			}
+			moved[pid] = w
+		}
+		all = append(all, moved)
+	}
+	return collect.MergeComputeApps(all...)
+}
+
+// ProcessGPUMemory reads per-process GPU memory for a list of GPUs, by position (collect.ProcGPU: Windows'
+// `\GPU Process Memory` counter).
+type ProcessGPUMemory interface {
+	ComputeAppsFor(gpus []collect.GPU) map[int][]int64
+}
+
+// WithProcessGPUMemory adds a per-process GPU memory reader to src: per process and GPU the larger of what src
+// and pm report (nvidia-smi reports nothing per process on Windows; Windows' counters cover every card).
+func WithProcessGPUMemory(src GPUSource, pm ProcessGPUMemory) GPUSource {
+	if src == nil || pm == nil {
+		return src
+	}
+	return withProcMem{src, pm}
+}
+
+type withProcMem struct {
+	GPUSource
+	pm ProcessGPUMemory
+}
+
+func (w withProcMem) ComputeApps(ctx context.Context) map[int][]int64 {
+	return collect.MergeComputeApps(w.GPUSource.ComputeApps(ctx), w.pm.ComputeAppsFor(w.GPUSource.GPUs()))
 }
 
 // Deps are the parts the agent is built from (real ones in cmd/fairy-agent, fakes in tests).
