@@ -93,13 +93,15 @@ func OpenADL() (ADLLib, error) {
 			errs = append(errs, file+": ADL2 functions missing")
 			continue
 		}
-		// 1: only adapters connected to a display (ADL's usual mode); a service in session 0 may see fewer
-		r, _, _ := create.Call(adlAlloc(), 1, uintptr(unsafe.Pointer(&d.ctx)))
-		if int32(r) != 0 || d.ctx == 0 {
+		// iEnumConnectedAdapters 0: every adapter, not only those driving a display. A service in session 0 has
+		// no interactive desktop: there its Radeon is present=0 (ADL_Adapter_Active_Get), and with 1 ADL may
+		// leave it out. ADL_OK (0) and ADL_OK_WARNING (1) count as success.
+		r, _, _ := create.Call(adlAlloc(), 0, uintptr(unsafe.Pointer(&d.ctx)))
+		if c := int32(r); (c != 0 && c != 1) || d.ctx == 0 {
 			errs = append(errs, fmt.Sprintf("%s: ADL2_Main_Control_Create returned %d (context %t)", file, int32(r), d.ctx != 0))
 			continue
 		}
-		d.opened = fmt.Sprintf("%s, ADL2_Main_Control_Create=%d", file, int32(r))
+		d.opened = fmt.Sprintf("%s, ADL2_Main_Control_Create=%d (all adapters)", file, int32(r))
 		return d, nil
 	}
 	return nil, errors.New(strings.Join(errs, "; "))
