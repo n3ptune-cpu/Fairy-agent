@@ -22,6 +22,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/n3ptune-cpu/Fairy-agent/pkg/agent/collect"
 	"github.com/n3ptune-cpu/Fairy-agent/pkg/release"
 )
 
@@ -305,6 +306,12 @@ func (c *Config) Validate() error {
 	c.BMCRelay.validate(func(s string) { add("%s", s) })
 	if c.GPU.IntervalS < 1 || c.GPU.IntervalS > 60 {
 		add("gpu.interval_s must be 1-60")
+	}
+	if c.IPMI.Ipmitool != "" && collect.ExecPathProblem(c.IPMI.Ipmitool, runtime.GOOS == "windows") != "" {
+		add("ipmi.ipmitool must be an absolute local path")
+	}
+	if n := c.GPU.NvidiaSMI; n != "auto" && n != "off" && collect.ExecPathProblem(n, runtime.GOOS == "windows") != "" {
+		add("gpu.nvidia_smi must be auto, off or an absolute local path")
 	}
 	switch c.IPMI.Transport {
 	case "ipmitool":

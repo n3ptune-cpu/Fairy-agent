@@ -101,6 +101,16 @@ func TestBMCRelayIpmitool(t *testing.T) {
 		strings.Contains(b["error"].(string), "cabled") || strings.Contains(b["error"].(string), "IANA") || !strings.Contains(b["error"].(string), "Administrator") {
 		t.Fatal(st, b)
 	}
+	// a configured ipmitool_path that others may replace is not run
+	r.a.d.BMCRelay.targets["cyrene-bmc"] = func(t BMCTarget) BMCTarget { t.IpmitoolPath = os.Args[0]; return t }(r.a.d.BMCRelay.targets["cyrene-bmc"])
+	r.a.d.BMCRelay.CheckExe = func(string) error { return errors.New(`C:\ipmitool may be changed by S-1-5-11`) }
+	if st, b := r.do(t, "POST", "/bmc/power", ctlTok, map[string]any{"target": "cyrene-bmc", "action": "on"}); st != 409 || b["code"] != "ipmitool_untrusted" {
+		t.Fatal(st, b)
+	}
+	r.a.d.BMCRelay.CheckExe = func(string) error { return nil }
+	if st, b := r.do(t, "POST", "/bmc/power", ctlTok, map[string]any{"target": "cyrene-bmc", "action": "status"}); st == 409 {
+		t.Fatal(st, b)
+	}
 	if st, b := r.do(t, "POST", "/bmc/power", ctlTok, map[string]any{"target": "nope", "action": "on"}); st != 404 || b["code"] != "unknown_target" {
 		t.Fatal(st, b)
 	}

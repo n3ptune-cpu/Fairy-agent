@@ -20,7 +20,7 @@ func lowPriority() *syscall.SysProcAttr {
 func LowPriority() *syscall.SysProcAttr { return lowPriority() }
 
 // FindNvidiaSMI returns the absolute path of nvidia-smi.exe ("" if not installed). Only the two places the
-// NVIDIA driver installs it are tried; PATH is not searched.
+// NVIDIA driver installs it are tried, and only a file only administrators can change; PATH is not searched.
 func FindNvidiaSMI() string {
 	sys, _ := windows.GetSystemDirectory()
 	pf := os.Getenv("ProgramW6432")
@@ -28,7 +28,7 @@ func FindNvidiaSMI() string {
 		pf = `C:\Program Files`
 	}
 	for _, p := range []string{filepath.Join(sys, "nvidia-smi.exe"), filepath.Join(pf, "NVIDIA Corporation", "NVSMI", "nvidia-smi.exe")} {
-		if st, err := os.Stat(p); err == nil && !st.IsDir() {
+		if st, err := os.Stat(p); err == nil && !st.IsDir() && TrustedExecutable(p) == nil {
 			return p
 		}
 	}

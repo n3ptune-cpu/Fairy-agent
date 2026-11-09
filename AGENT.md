@@ -344,8 +344,11 @@ BMC addresses are accepted. Two backends per target:
 * `ipmitool` (default when `host:` is set): `ipmitool -I lanplus -H <host> -U <username> -E [-C <cipher_suite>]
   chassis power on` (and `chassis power status`), 15 s. The password travels only in the child process's
   `IPMI_PASSWORD` (that is what `-E` reads; never on the command line), and the child gets a minimal
-  environment without the agent's tokens. ipmitool is found in PATH, `C:\Program Files\ipmitool\` or
-  `/usr/bin` unless `ipmitool_path` says where. `cipher_suite` (0-17) is ipmitool's `-C` for BMCs that need a
+  environment without the agent's tokens. ipmitool is taken from `C:\Program Files\ipmitool\` on Windows
+  (never from PATH or another folder) and from `/usr/bin`, `/usr/sbin`, `/usr/local/bin` or PATH on Linux,
+  unless `ipmitool_path` gives its full path. Either way the file and every folder above it must be changeable
+  only by administrators / SYSTEM (Windows) or root (Linux), because the agent may run as LocalSystem: a
+  program in `C:\ipmitool\` or a user's folder is refused (`ipmitool_untrusted`). `cipher_suite` (0-17) is ipmitool's `-C` for BMCs that need a
   particular one.
 * `redfish` (default when `url:` is set): `GET /redfish/v1/Systems`, then `POST <first
   member>/Actions/ComputerSystem.Reset {"ResetType": "On"}`, basic auth, 10 s. The BMC's self-signed
@@ -382,7 +385,7 @@ Restart-Service fairy-agent
 ```
 
 (add `--cipher-suite <n>` to the first line if the BMC needs a particular cipher suite, and
-`--ipmitool-path "C:\path\to\ipmitool.exe"` if it is not in PATH or `C:\Program Files\ipmitool\`).
+`--ipmitool-path "C:\Program Files\<folder>\ipmitool.exe"` if it is not in `C:\Program Files\ipmitool\`).
 Panel (`config.yaml`), on the machine to wake: `systems: [{id: nsx-cyrene, bmc_power: {relay: nsx-furina-agent,
 target: cyrene-bmc}}]`; the relay agent's entry needs `control_token_env:`. The panel then offers "Power on (via
 BMC, through NSX-FURINA)" while NSX-CYRENE is offline and NSX-FURINA is online.
@@ -537,7 +540,7 @@ The file is `C:\ProgramData\fairy-agent\config.yaml` (Windows) or `/etc/fairy-ag
 | `token_file`, `control_token_file` | `token`, `control-token` next to config.yaml | the tokens (at least 24 characters, different from each other). `FAIRY_AGENT_TOKEN` / `FAIRY_AGENT_CONTROL_TOKEN` in the environment win. Never on the command line. |
 | `hide_host_details` | false | no hostname, no hardware model, just "Windows" / "Linux" |
 | `processes.enabled` / `cmdline` / `never_open` | true / true / none | the Processes tab |
-| `gpu.nvidia_smi` | auto | `off` or a full path |
+| `gpu.nvidia_smi` | auto | `off` or a full local path (only administrators / root may be able to change the file and its folders) |
 | `gpu.amdgpu` | auto | Linux: AMD GPUs through the amdgpu driver's sysfs files; `off` to switch off |
 | `gpu.windows` | auto | Windows: AMD / Intel / other GPUs from Windows' GPU counters; `off` to switch off |
 | `gpu.amd_adl` | auto | Windows: Radeon temperature and watts from AMD's ADL (Adrenalin driver), read only; `off` to switch off |
@@ -647,6 +650,8 @@ on the first install and report anything odd:
 * the install script's firewall rule;
 * per-program GPU memory from the "GPU Process Memory" counter (compare with Task Manager's "Dedicated GPU
   memory" column), and its matching to the NVIDIA card through nvidia-smi's pci.bus_id;
+* the permission check on helper programs (ipmitool, nvidia-smi): reading owner and ACL entries of the file and
+  its folders, e.g. that `C:\Program Files\ipmitool\ipmitool.exe` installed by an administrator is accepted;
 * leaving out leftover GPU entries ("GPU Adapter Memory" counter per adapter), checked against unit tests built
   from the RX 5600 XT and Intel UHD reports, not yet on those PCs;
 * self-update on Windows: the permissions `setup-self-update` sets (program folder, update folder, the

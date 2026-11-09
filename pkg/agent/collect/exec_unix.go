@@ -17,11 +17,11 @@ func LowPriority() *syscall.SysProcAttr { return nil }
 // FindNvidiaSMI returns the absolute path of nvidia-smi ("" if not installed).
 func FindNvidiaSMI() string {
 	for _, p := range []string{"/usr/bin/nvidia-smi", "/usr/local/bin/nvidia-smi"} {
-		if st, err := os.Stat(p); err == nil && !st.IsDir() {
+		if st, err := os.Stat(p); err == nil && !st.IsDir() && TrustedExecutable(p) == nil {
 			return p
 		}
 	}
-	if p, err := exec.LookPath("nvidia-smi"); err == nil {
+	if p, err := exec.LookPath("nvidia-smi"); err == nil && TrustedExecutable(p) == nil {
 		return p
 	}
 	return ""

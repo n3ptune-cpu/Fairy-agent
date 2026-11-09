@@ -29,7 +29,6 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"regexp"
 	"runtime"
 	"strconv"
@@ -55,7 +54,7 @@ type BMCTarget struct {
 	Username       string `yaml:"username"` // the BMC account (a dedicated one)
 	PasswordEnv    string `yaml:"password_env"`
 	CipherSuite    *int   `yaml:"cipher_suite"`    // ipmitool -C (0-17); unset: ipmitool's default
-	IpmitoolPath   string `yaml:"ipmitool_path"`   // default: PATH and the usual install folders
+	IpmitoolPath   string `yaml:"ipmitool_path"`   // default: C:\Program Files\ipmitool\ (Windows), /usr/bin etc. and PATH (Linux)
 	TLSFingerprint string `yaml:"tls_fingerprint"` // redfish: SHA-256 of the BMC's certificate; empty: learned on first use
 }
 
@@ -111,8 +110,8 @@ func (c BMCRelayConfig) validate(add func(string)) {
 			if t.CipherSuite != nil && (*t.CipherSuite < 0 || *t.CipherSuite > 17) {
 				add(where + ".cipher_suite must be 0-17")
 			}
-			if t.IpmitoolPath != "" && !filepath.IsAbs(t.IpmitoolPath) {
-				add(where + ".ipmitool_path must be an absolute path")
+			if t.IpmitoolPath != "" && collect.ExecPathProblem(t.IpmitoolPath, runtime.GOOS == "windows") != "" {
+				add(where + ".ipmitool_path must be an absolute local path (e.g. C:\\Program Files\\ipmitool\\ipmitool.exe)")
 			}
 		case "redfish":
 			u, err := url.Parse(t.URL)
@@ -150,12 +149,15 @@ type BMCRelay struct {
 	Run func(ctx context.Context, path string, args, env []string) ([]byte, error)
 	// FindIpmitool locates ipmitool when ipmitool_path is not set.
 	FindIpmitool func() (string, error)
-	mu           sync.Mutex
+	// CheckExe refuses a configured ipmitool_path that anyone but administrators / root could replace.
+	CheckExe func(path string) error
+	mu       sync.Mutex
 }
 
 // NewBMCRelay builds the relay; pinFile keeps learned Redfish certificate fingerprints ("" = memory only).
 func NewBMCRelay(c BMCRelayConfig, pinFile string) *BMCRelay {
-	b := &BMCRelay{targets: map[string]BMCTarget{}, pins: &pinStore{path: pinFile}, Run: runIpmitool, FindIpmitool: findIpmitool}
+	b := &BMCRelay{targets: map[string]BMCTarget{}, pins: &pinStore{path: pinFile}, Run: runIpmitool,
+		FindIpmitool: collect.FindIpmitool, CheckExe: collect.TrustedExecutable}
 	for _, t := range c.Targets {
 		b.targets[t.ID] = t
 		b.order = append(b.order, t.ID)
@@ -227,28 +229,6 @@ func (b *BMCRelay) password(t BMCTarget) (string, error) {
 
 // ---- ipmitool
 
-func findIpmitool() (string, error) {
-	var cands []string
-	if runtime.GOOS == "windows" {
-		for _, base := range []string{os.Getenv("ProgramFiles"), os.Getenv("ProgramFiles(x86)"), `C:\`} {
-			if base != "" {
-				cands = append(cands, filepath.Join(base, "ipmitool", "ipmitool.exe"), filepath.Join(base, "ipmitool", "bin", "ipmitool.exe"))
-			}
-		}
-	} else {
-		cands = []string{"/usr/bin/ipmitool", "/usr/sbin/ipmitool", "/usr/local/bin/ipmitool"}
-	}
-	for _, p := range cands {
-		if _, err := os.Stat(p); err == nil {
-			return p, nil
-		}
-	}
-	if p, err := exec.LookPath("ipmitool"); err == nil && filepath.IsAbs(p) {
-		return p, nil
-	}
-	return "", errors.New("ipmitool not found: install it or set ipmitool_path")
-}
-
 func runIpmitool(ctx context.Context, path string, args, env []string) ([]byte, error) {
 	cmd := exec.CommandContext(ctx, path, args...)
 	cmd.Env = append(collect.MinimalEnv(), env...)
@@ -277,9 +257,11 @@ func (b *BMCRelay) ipmitool(ctx context.Context, t BMCTarget, action string) (st
 	if path == "" {
 		p, err := b.FindIpmitool()
 		if err != nil {
-			return "", bmcErr(409, "ipmitool_missing", "%s", err.Error())
+			return "", bmcErr(409, "ipmitool_missing", "%s (or set ipmitool_path)", err.Error())
 		}
 		path = p
+	} else if err := b.CheckExe(path); err != nil {
+		return "", bmcErr(409, "ipmitool_untrusted", "ipmitool_path not used: %s", err.Error())
 	}
 	pw, err := b.password(t)
 	if err != nil {

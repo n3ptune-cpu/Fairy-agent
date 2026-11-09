@@ -7,7 +7,6 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"slices"
@@ -31,31 +30,33 @@ func nvidiaPath(c GPUConfig) (string, error) {
 	case "auto":
 		return collect.FindNvidiaSMI(), nil
 	}
-	if !filepath.IsAbs(c.NvidiaSMI) {
-		return "", errors.New("gpu.nvidia_smi must be auto, off or an absolute path")
+	if collect.ExecPathProblem(c.NvidiaSMI, runtime.GOOS == "windows") != "" {
+		return "", errors.New("gpu.nvidia_smi must be auto, off or an absolute local path")
 	}
 	if _, err := os.Stat(c.NvidiaSMI); err != nil {
 		return "", fmt.Errorf("gpu.nvidia_smi: %w", err)
+	}
+	if err := collect.TrustedExecutable(c.NvidiaSMI); err != nil {
+		return "", fmt.Errorf("gpu.nvidia_smi: not used: %w", err)
 	}
 	return c.NvidiaSMI, nil
 }
 
 func ipmitoolPath(c IPMIConfig) (string, error) {
 	if c.Ipmitool != "" {
-		if !filepath.IsAbs(c.Ipmitool) {
-			return "", errors.New("ipmi.ipmitool must be an absolute path")
+		if collect.ExecPathProblem(c.Ipmitool, runtime.GOOS == "windows") != "" {
+			return "", errors.New("ipmi.ipmitool must be an absolute local path")
+		}
+		if err := collect.TrustedExecutable(c.Ipmitool); err != nil {
+			return "", fmt.Errorf("ipmi.ipmitool: not used: %w", err)
 		}
 		return c.Ipmitool, nil
 	}
-	for _, p := range []string{"/usr/bin/ipmitool", "/usr/sbin/ipmitool", "/usr/local/bin/ipmitool"} {
-		if _, err := os.Stat(p); err == nil {
-			return p, nil
-		}
+	p, err := collect.FindIpmitool()
+	if err != nil {
+		return "", fmt.Errorf("%w (ipmi.ipmitool)", err)
 	}
-	if p, err := exec.LookPath("ipmitool"); err == nil {
-		return p, nil
-	}
-	return "", errors.New("ipmitool not found: install it (apt install ipmitool) or set ipmi.ipmitool")
+	return p, nil
 }
 
 // IPMITransport builds the configured IPMI transport.
