@@ -9,6 +9,7 @@ package collect
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"slices"
 	"sync"
@@ -31,7 +32,10 @@ var (
 	procD3DKMTCloseAdapter        = gdi32.NewProc("D3DKMTCloseAdapter")
 )
 
-const kmtqaiAdapterAddress = 6 // KMTQAITYPE_ADAPTERADDRESS -> D3DKMT_ADAPTERADDRESS
+const (
+	kmtqaiAdapterAddress       = 6  // KMTQAITYPE_ADAPTERADDRESS -> D3DKMT_ADAPTERADDRESS
+	kmtqaiAdapterAddressRender = 53 // KMTQAITYPE_ADAPTERADDRESS_RENDER: the render adapter of a display-only one
+)
 
 type d3dkmtOpenAdapterFromLUID struct {
 	LUIDLow  uint32
@@ -60,12 +64,14 @@ func adapterLocation(high int32, low uint32) *PCILoc {
 		return nil
 	}
 	defer procD3DKMTCloseAdapter.Call(uintptr(unsafe.Pointer(&o.Adapter)))
-	var addr d3dkmtAdapterAddress
-	q := d3dkmtQueryAdapterInfo{Adapter: o.Adapter, Type: kmtqaiAdapterAddress, Data: uintptr(unsafe.Pointer(&addr)), DataSize: uint32(unsafe.Sizeof(addr))}
-	if r, _, _ := procD3DKMTQueryAdapterInfo.Call(uintptr(unsafe.Pointer(&q))); r != 0 {
-		return nil
+	for _, typ := range []uint32{kmtqaiAdapterAddress, kmtqaiAdapterAddressRender} {
+		var addr d3dkmtAdapterAddress
+		q := d3dkmtQueryAdapterInfo{Adapter: o.Adapter, Type: typ, Data: uintptr(unsafe.Pointer(&addr)), DataSize: uint32(unsafe.Sizeof(addr))}
+		if r, _, _ := procD3DKMTQueryAdapterInfo.Call(uintptr(unsafe.Pointer(&q))); r == 0 {
+			return &PCILoc{Bus: addr.Bus, Device: addr.Device, Function: addr.Function}
+		}
 	}
-	return &PCILoc{Bus: addr.Bus, Device: addr.Device, Function: addr.Function}
+	return nil
 }
 
 const (
@@ -139,6 +145,8 @@ type WinGPU struct {
 	adapters []WinAdapter
 	listedAt time.Time
 	eng, mem *pdhQuery
+	triedAt  time.Time // when the counter queries were last set up (again)
+	logged   map[string]bool
 	gpus     []GPU
 	at       time.Time
 	amd      *AMDSensors // Radeon temperature / watts through ADL (nil: off, not installed or no Overdrive)
@@ -152,6 +160,14 @@ func NewWinGPU(interval time.Duration, nvidiaSMI, amdADL bool) *WinGPU {
 		slog.Info("GPUs via Windows: adapters not readable", "error", err)
 		return nil
 	}
+	for _, a := range all { // once at start: what DXGI and the kernel say, to tell a card's several entries apart
+		loc := a.Loc.String()
+		if loc == "" {
+			loc = "unknown"
+		}
+		slog.Info("GPUs via Windows: DXGI adapter", "name", a.Name, "luid", a.LUID, "ids",
+			fmt.Sprintf("%04x:%04x:%08x:%02x", a.VendorID, a.DeviceID, a.SubSysID, a.Revision), "pci", loc, "software", a.Software)
+	}
 	shown := ShownAdapters(all, nvidiaSMI)
 	if len(shown) == 0 {
 		return nil
@@ -159,9 +175,8 @@ func NewWinGPU(interval time.Duration, nvidiaSMI, amdADL bool) *WinGPU {
 	if interval <= 0 {
 		interval = 2 * time.Second
 	}
-	w := &WinGPU{interval: interval, nvidiaSMI: nvidiaSMI, adapters: shown, listedAt: time.Now()}
-	w.eng, _ = newPDHQuery(`\GPU Engine(*)\Utilization Percentage`)
-	w.mem, _ = newPDHQuery(`\GPU Adapter Memory(*)\Dedicated Usage`)
+	w := &WinGPU{interval: interval, nvidiaSMI: nvidiaSMI, adapters: shown, listedAt: time.Now(), logged: map[string]bool{}}
+	w.setupQueries()
 	if amdADL && slices.ContainsFunc(shown, func(a WinAdapter) bool { return a.VendorID == 0x1002 }) {
 		if lib, err := OpenADL(); err != nil {
 			slog.Debug("AMD GPU sensors (ADL): not available; showing load and VRAM only", "error", err)
@@ -170,6 +185,46 @@ func NewWinGPU(interval time.Duration, nvidiaSMI, amdADL bool) *WinGPU {
 		}
 	}
 	return w
+}
+
+const (
+	engCounter = `\GPU Engine(*)\Utilization Percentage`
+	memCounter = `\GPU Adapter Memory(*)\Dedicated Usage`
+)
+
+// setupQueries opens the counter queries that are missing. They can be missing at start (the GPU counters'
+// provider is not ready yet right after boot); without them utilization and VRAM in use are unknown ("-" in
+// the panel) and the ghost entries of a card cannot be told apart. So they are tried again once a minute, and
+// each failure is logged once. Caller holds w.mu (or owns w).
+func (w *WinGPU) setupQueries() {
+	w.triedAt = time.Now()
+	for _, c := range []struct {
+		q    **pdhQuery
+		path string
+	}{{&w.eng, engCounter}, {&w.mem, memCounter}} {
+		if *c.q != nil {
+			continue
+		}
+		q, err := newPDHQuery(c.path)
+		if err != nil {
+			if !w.logged[c.path] {
+				w.logged[c.path] = true
+				slog.Info("GPUs via Windows: counter not readable yet; trying again every minute", "counter", c.path, "error", err)
+			}
+			continue
+		}
+		if w.logged[c.path] {
+			slog.Info("GPUs via Windows: counter readable now", "counter", c.path)
+		}
+		*c.q = q
+	}
+}
+
+func (w *WinGPU) readFailed(path string, err error) {
+	if key := "read " + path; !w.logged[key] {
+		w.logged[key] = true
+		slog.Info("GPUs via Windows: reading a counter failed (logged once)", "counter", path, "error", err)
+	}
 }
 
 // AMDCards lists the Radeon cards read through ADL (for the start-up log).
@@ -212,30 +267,38 @@ func (w *WinGPU) GPUs() []GPU {
 		}
 		w.listedAt = time.Now()
 	}
-	var util map[string]float64
+	if (w.eng == nil || w.mem == nil) && time.Since(w.triedAt) > time.Minute {
+		w.setupQueries()
+	}
+	var util EngineLoad
 	var mem map[string]int64
-	var present, memLUIDs map[string]bool
+	var memLUIDs map[string]bool
+	var engNames, memNames []string
+	read := false
 	if w.eng != nil {
 		if v, err := w.eng.values(); err == nil {
 			names, values := split(v)
-			util, present = EngineUtil(names, values), CounterLUIDs(names)
-		} else if w.gpus != nil {
-			util = map[string]float64{} // collected before, no busy engine now
+			util, engNames, read = EngineLoads(names, values), names, true
+		} else {
+			w.readFailed(engCounter, err)
+			if w.gpus != nil {
+				util = EngineLoad{} // collected before, no busy engine now
+			}
 		}
 	}
 	if w.mem != nil {
 		if v, err := w.mem.values(); err == nil {
 			names, values := split(v)
-			mem, memLUIDs = AdapterMemory(names, values), MemoryLUIDs(names)
-			if present == nil {
-				present = map[string]bool{}
-			}
-			for k := range memLUIDs {
-				present[k] = true
-			}
+			mem, memLUIDs, memNames, read = AdapterMemory(names, values), MemoryLUIDs(names), names, true
+		} else {
+			w.readFailed(memCounter, err)
 		}
 	}
-	w.gpus, w.at = WinGPUs(PhysicalAdapters(DropGhosts(w.adapters, memLUIDs), present), util, mem), time.Now()
+	var activity map[string]int
+	if read {
+		activity = CounterActivity(engNames, memNames)
+	}
+	w.gpus, w.at = WinGPUs(GroupAdapters(DropGhosts(w.adapters, memLUIDs), activity), util, mem), time.Now()
 	if w.amd != nil {
 		w.amd.Attach(w.gpus)
 	}

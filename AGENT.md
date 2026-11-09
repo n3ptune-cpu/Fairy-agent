@@ -378,7 +378,15 @@ D3DKMT) are one card, and the entry the GPU counters know is kept; two identical
 A DXGI entry without a "GPU Adapter Memory" counter is left out when another entry of the same card model
 (vendor, device and VRAM) has one: such leftovers still get "GPU Engine" counters from every program that draws
 (e.g. dwm.exe), which made one Radeon or one Intel UHD show up twice. Two identical real cards both have memory
-counters and both stay. Nothing to install; `gpu: windows: off` switches it off.
+counters and both stay. Since 0.5.1, entries that Windows' kernel (D3DKMT) puts at the **same PCI bus /
+device / function** with the same vendor and device id are one card whatever else DXGI says about them (a
+laptop's Intel UHD had two LUIDs, both with memory and engine counters, with different subsystem ids: shown
+twice). Such a card is shown once, named after its busiest entry, and the counters of all its entries are
+added: busy % per engine summed over them (work sent through either reaches the same engine), then the
+busiest engine; VRAM in use summed (each entry's allocations are its own). When D3DKMT gives no location the
+rule above applies as before. The counters are set up again once a minute when Windows did not offer them at
+start (busy % and VRAM in use showed "–"), and the start-up log lists every DXGI entry with its LUID, PCI ids
+and location. Nothing to install; `gpu: windows: off` switches it off.
 
 Radeon temperature and watts on Windows come from AMD's own library, ADL (`atiadlxx.dll` in System32, installed
 with the Adrenalin driver), read only: per card by its Overdrive version, the PMLog sensors on Navi and newer
@@ -872,7 +880,9 @@ on the first install and report anything odd:
   against stock Windows 10 / 11 permissions (`C:\`, `C:\Program Files`, `C:\Windows\System32`, an
   administrator's `C:\Program Files\ipmitool`) written as SDDL, but not yet run on a PC;
 * leaving out leftover GPU entries ("GPU Adapter Memory" counter per adapter), checked against unit tests built
-  from the RX 5600 XT and Intel UHD reports, not yet on those PCs;
+  from the RX 5600 XT and Intel UHD reports, not yet on those PCs; 0.5.1's merging of entries at one PCI
+  location (D3DKMT `KMTQAITYPE_ADAPTERADDRESS`, then `..._RENDER`) and the added counters, tested with NSX-FURINA's
+  LUIDs (FA66 / FEAA / FE16) only; the PDH counters set up again after a failure at start;
 * self-update on Windows: `setup-self-update` (removing 0.4.2's program-folder entry, the update / stage folder
   permissions, creating the fairy-agent-update service and its start right for the agent), the updater service
   starting, stopping and starting the agent's service, renaming the running exe, rolling back, its log file,

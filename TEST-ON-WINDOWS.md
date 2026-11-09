@@ -171,6 +171,20 @@ PowerShell: `/metrics` then says `not_needed` and `sc.exe qc` shows `NT SERVICE\
 password), `Start-Service fairy-agent`, and send `migration\state.json`, `agent.log` and `installer.log`. To keep
 the agent from trying again for now, leave `state.json` as it is (it waits for `next_try`).
 
+## 9. GPUs on NSX-FURINA (one Intel UHD, not two)
+
+After updating to 0.5.1: the host's page shows **one** "Intel(R) UHD Graphics" (plus the RTX 3050 from
+nvidia-smi), with a number for Util (0 % when idle, not "–") and VRAM like "40 MiB / 128 MiB". Compare with
+Task Manager's Intel GPU page. agent.log at start lists every DXGI entry:
+
+```powershell
+Get-Content C:\ProgramData\fairy-agent\logs\agent.log | Select-String "DXGI adapter|counter"
+```
+
+Send those lines if there are still two: `pci=00:02.0` on both Intel lines is what merges them; `pci=unknown`
+means Windows' kernel did not say (then the old rule applies). A line "counter not readable yet" means PDH was
+not ready at start (it is tried again every minute, "counter readable now" follows).
+
 ## Rollback (back to build 10 / v0.4.4)
 
 0.4.4 does not know the helper or the new account, so remove 0.5's services first. Config and tokens stay, the

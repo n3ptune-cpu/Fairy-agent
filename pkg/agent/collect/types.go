@@ -83,8 +83,9 @@ type GPU struct {
 	// temperature / watts from AMD's ADL library).
 	Source string `json:"source,omitempty"`
 
-	loc  *PCILoc // the card's PCI location, to match AMD's own sensors (amdadl.go) and per-process memory (procgpu.go)
-	luid string  // Windows: the adapter's LUID when the readings come from Windows' counters (procgpu.go)
+	loc  *PCILoc  // the card's PCI location, to match AMD's own sensors (amdadl.go) and per-process memory (procgpu.go)
+	luid string   // Windows: the adapter's LUID when the readings come from Windows' counters (procgpu.go)
+	also []string // Windows: further LUIDs of the same card (GroupAdapters)
 }
 
 // PowerSensor is one named component power reading (e.g. "rapl package-0").

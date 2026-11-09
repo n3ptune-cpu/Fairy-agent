@@ -7,6 +7,7 @@ package collect
 
 import (
 	"errors"
+	"fmt"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -18,6 +19,7 @@ var (
 	procPdhAddEnglishCounterW       = pdh.NewProc("PdhAddEnglishCounterW")
 	procPdhCollectQueryData         = pdh.NewProc("PdhCollectQueryData")
 	procPdhGetFormattedCounterArray = pdh.NewProc("PdhGetFormattedCounterArrayW")
+	procPdhCloseQuery               = pdh.NewProc("PdhCloseQuery")
 )
 
 const (
@@ -52,7 +54,8 @@ func newPDHQuery(path string) (*pdhQuery, error) {
 		return nil, err
 	}
 	if r, _, _ := procPdhAddEnglishCounterW.Call(q.query, uintptr(unsafe.Pointer(p)), 0, uintptr(unsafe.Pointer(&q.counter))); r != 0 {
-		return nil, errors.New("counter not available")
+		procPdhCloseQuery.Call(q.query)
+		return nil, fmt.Errorf("counter not available (PDH status 0x%08X)", uint32(r))
 	}
 	return q, nil
 }
@@ -64,12 +67,24 @@ func (q *pdhQuery) values() ([]pdhValue, error) {
 	var size, count uint32
 	r, _, _ := procPdhGetFormattedCounterArray.Call(q.counter, pdhFmtDouble, uintptr(unsafe.Pointer(&size)), uintptr(unsafe.Pointer(&count)), 0)
 	if uint32(r) != pdhMoreData || size == 0 {
-		return nil, errors.New("no instances")
+		return nil, fmt.Errorf("no instances (PDH status 0x%08X)", uint32(r))
 	}
-	buf := make([]byte, size)
-	r, _, _ = procPdhGetFormattedCounterArray.Call(q.counter, pdhFmtDouble, uintptr(unsafe.Pointer(&size)), uintptr(unsafe.Pointer(&count)), uintptr(unsafe.Pointer(&buf[0])))
-	if r != 0 {
-		return nil, errors.New("PdhGetFormattedCounterArray failed")
+	var buf []byte
+	// the size can grow between the two calls (GPU Engine has an instance per process and engine, often
+	// a thousand, coming and going): ask again with what PDH says it needs now
+	for try := 0; ; try++ {
+		buf = make([]byte, size)
+		count = 0
+		r, _, _ = procPdhGetFormattedCounterArray.Call(q.counter, pdhFmtDouble, uintptr(unsafe.Pointer(&size)), uintptr(unsafe.Pointer(&count)), uintptr(unsafe.Pointer(&buf[0])))
+		if r == 0 {
+			break
+		}
+		if uint32(r) != pdhMoreData || try >= 3 || size == 0 || size > 64<<20 {
+			return nil, fmt.Errorf("PdhGetFormattedCounterArray: PDH status 0x%08X", uint32(r))
+		}
+	}
+	if uintptr(count)*unsafe.Sizeof(pdhItem{}) > uintptr(len(buf)) {
+		return nil, errors.New("PdhGetFormattedCounterArray: more items than fit")
 	}
 	items := unsafe.Slice((*pdhItem)(unsafe.Pointer(&buf[0])), count)
 	out := make([]pdhValue, 0, count)

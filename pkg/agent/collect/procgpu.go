@@ -55,6 +55,9 @@ func GPULUIDIndex(gpus []GPU, adapters []WinAdapter) map[string]int {
 	for i, g := range gpus {
 		if g.luid != "" {
 			idx[g.luid] = i
+			for _, l := range g.also {
+				idx[l] = i
+			}
 			continue
 		}
 		matched := false
