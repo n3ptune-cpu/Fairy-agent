@@ -86,7 +86,9 @@ pair-status` shows it). The agent still never connects to the panel; the panel k
 folder, not in `config.yaml`.
 
 * **Lost the panel's copy of the tokens**, or the code expired before the machine ran it: **Re-pair** on the
-  host's page makes a new code and the same command; running it again keeps the machine's tokens and settings.
+  host's page makes a new code and the same command; running it again keeps the machine's settings but makes
+  **new** read and control tokens (the old ones stop working at once, so whoever had them loses access) and
+  hands those to the panel.
 * **Remove host** (hosts added this way) forgets the host and its tokens in the panel. On the machine, remove
   the agent as in [Checking, logs, updating, removing](#checking-logs-updating-removing).
 * Hosts written by hand into the panel's `config.yaml` keep working exactly as before.

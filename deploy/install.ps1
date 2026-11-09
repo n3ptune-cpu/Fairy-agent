@@ -17,7 +17,8 @@
   3. runs `fairy-agent join`: tokens, the chosen settings and the one-time join code (nothing secret is shown);
   4. restarts the service and waits until the panel has picked up the tokens.
 
-  Safe to run again (e.g. with a new code from the panel's Re-pair): tokens and settings are kept. No driver,
+  Safe to run again (e.g. with a new code from the panel's Re-pair): settings are kept, the tokens are
+  replaced by new ones (the panel gets them by pairing). No driver,
   no other program touched.
 #>
 param(

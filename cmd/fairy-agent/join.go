@@ -21,7 +21,8 @@ import (
 
 // `fairy-agent join`: the machine side of the panel's "Add host", run by install.sh / install.ps1 (root /
 // Administrator) after the service is installed. It
-//   - writes a starter config.yaml and the read / control tokens when they are missing (never replaces them),
+//   - writes a starter config.yaml when it is missing, and NEW read / control tokens every time (a Re-pair
+//     replaces the old ones, which stop working when the agent restarts: whoever had them loses access),
 //   - switches on the features the panel's dialog asked for, through the same checked edit as `config set`,
 //   - stores the join code's verifier, its expiry and the panel's address in the pairing state,
 //
@@ -115,17 +116,22 @@ func join(o joinOpts, out io.Writer) error {
 	if created {
 		fmt.Fprintln(out, "wrote a starter", o.cfgPath)
 	}
-	for _, name := range []string{"token", "control-token"} {
+	tokFile, ctlFile := filepath.Join(dir, "token"), filepath.Join(dir, "control-token")
+	if c, err := agent.Load(o.cfgPath); err == nil {
+		tokFile, ctlFile = c.TokenFile, c.ControlTokenFile
+	}
+	for _, p := range []string{tokFile, ctlFile} {
 		tok, err := newToken()
 		if err != nil {
 			return err
 		}
-		p := filepath.Join(dir, name)
-		created, err := writeNew(p, []byte(tok+lineEnd()))
+		existed, err := replaceToken(p, []byte(tok+lineEnd()))
 		if err != nil {
 			return err
 		}
-		if created {
+		if existed {
+			fmt.Fprintln(out, "new token in", p, "(the old one stops working when the agent restarts)")
+		} else {
 			fmt.Fprintln(out, "created", p)
 		}
 	}
@@ -239,6 +245,33 @@ func writeNew(path string, data []byte) (bool, error) {
 		return false, err
 	}
 	return true, secureNew(path)
+}
+
+// replaceToken writes a token file, replacing an existing one in one step (a new file with the same permissions
+// as writeNew, renamed over the old one). It reports whether there was one.
+func replaceToken(path string, data []byte) (bool, error) {
+	_, statErr := os.Lstat(path)
+	existed := statErr == nil
+	f, err := os.CreateTemp(filepath.Dir(path), ".new-"+filepath.Base(path)+"-*")
+	if err != nil {
+		return false, err
+	}
+	tmp := f.Name()
+	_, err = f.Write(data)
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	if err == nil {
+		err = secureNew(tmp)
+	}
+	if err == nil {
+		err = os.Rename(tmp, path)
+	}
+	if err != nil {
+		os.Remove(tmp)
+		return false, err
+	}
+	return existed, nil
 }
 
 func hashFile(path string) ([32]byte, error) {

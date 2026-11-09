@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -68,15 +69,33 @@ func TestJoin(t *testing.T) {
 		t.Fatal(rc, out)
 	}
 
-	// a re-run (re-pair) keeps the tokens and the UPS entry, stores the new code
+	// a re-run (re-pair) issues NEW read and control tokens (the old ones are gone), keeps the settings and the
+	// UPS entry, and stores the new code
+	ctl, _ := os.ReadFile(filepath.Join(dir, "control-token"))
 	code2, _ := enroll.NewCode()
 	args[1] = code2
 	rc, out, errs = runJoin(t, join, args...)
-	if rc != 0 || strings.Contains(out, "created") || !strings.Contains(out, "already lists UPSes") {
+	if rc != 0 || strings.Contains(out, "created") || !strings.Contains(out, "new token in") || !strings.Contains(out, "already lists UPSes") {
 		t.Fatal(rc, out, errs)
 	}
-	if tok2, _ := os.ReadFile(filepath.Join(dir, "token")); !bytes.Equal(tok, tok2) {
-		t.Fatal("token replaced")
+	tok2, _ := os.ReadFile(filepath.Join(dir, "token"))
+	ctl2, _ := os.ReadFile(filepath.Join(dir, "control-token"))
+	if bytes.Equal(tok, tok2) || bytes.Equal(ctl, ctl2) || bytes.Equal(tok2, ctl2) || len(bytes.TrimSpace(tok2)) < agent.MinTokenLen {
+		t.Fatal("re-pair must replace both tokens")
+	}
+	if strings.Contains(out, strings.TrimSpace(string(tok2))) {
+		t.Fatal("join printed a secret")
+	}
+	if ents, _ := os.ReadDir(dir); len(ents) != 3 { // config.yaml, token, control-token: no temp files left
+		t.Fatal(ents)
+	}
+	if st, _ := os.Stat(filepath.Join(dir, "token")); runtime.GOOS != "windows" && st.Mode().Perm() != 0o640 {
+		t.Fatal(st.Mode())
+	}
+	if cfg, err := agent.Load(cfgPath); err != nil || !cfg.PowerControl.Enabled {
+		t.Fatal("settings kept", err)
+	} else if tk, err := cfg.LoadTokens(); err != nil || tk.Read != strings.TrimSpace(string(tok2)) {
+		t.Fatal("the agent loads the new token", err)
 	}
 	st, _ = enroll.ReadState(filepath.Join(state, "pairing.json"))
 	p2, _ := enroll.Proof(code2)

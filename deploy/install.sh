@@ -15,7 +15,8 @@
 # Proxmox VE node), join also makes the panel a read-only API token (user fairy@pve, role PVEAuditor, token
 # fairy@pve!panel-<node>) that the panel picks up once with the agent's tokens; nothing to copy.
 #
-# Safe to run again (with a new code from the panel's "Re-pair"): tokens and settings are kept, the binary and
+# Safe to run again (with a new code from the panel's "Re-pair"): settings are kept, the tokens are replaced
+# by new ones (the panel gets them by pairing), the binary and
 # units are brought up to date. Nothing secret is printed.
 set -eu
 
