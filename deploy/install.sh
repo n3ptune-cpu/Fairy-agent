@@ -15,6 +15,11 @@
 # Proxmox VE node), join also makes the panel a read-only API token (user fairy@pve, role PVEAuditor, token
 # fairy@pve!panel-<node>) that the panel picks up once with the agent's tokens; nothing to copy.
 #
+# The panel can vouch for the release: FAIRY_SUMS_SHA256=<sha256 of SHA256SUMS> in the environment (or
+# --sums-sha256 <hash>) makes the script refuse a SHA256SUMS with any other hash before it trusts a line of it.
+# The panel checks the release's signature with its own built-in key and puts the hash into the Add host
+# command, so even a first install does not have to trust the downloaded binary's own key.
+#
 # Safe to run again (with a new code from the panel's "Re-pair"): settings are kept, the tokens are replaced
 # by new ones (the panel gets them by pairing), the binary and
 # units are brought up to date. Nothing secret is printed.
@@ -30,6 +35,7 @@ say() { printf '%s\n' "fairy: $*"; }
 die() { printf '%s\n' "fairy: ERROR: $*" >&2; exit 1; }
 
 CODE="" PANEL="" UPSNAME=""
+SUMS_PIN="${FAIRY_SUMS_SHA256:-}"
 POWER=0 UPDATE=0 WOL=0 UPS=0 IPMI=0 PVE=0
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -43,6 +49,7 @@ while [ $# -gt 0 ]; do
     --ups=*) UPS=1; UPSNAME="${1#--ups=}" ;;
     --ipmi) IPMI=1 ;;
     --proxmox) PVE=1 ;;
+    --sums-sha256) [ $# -ge 2 ] || die "--sums-sha256 needs the SHA-256 of SHA256SUMS"; SUMS_PIN="$2"; shift ;;
     -h|--help) sed -n '2,20p' "$0" 2>/dev/null || true; exit 0 ;;
     *) die "unknown option $1 (copy the whole command from the panel's Add host dialog)" ;;
   esac
@@ -50,6 +57,13 @@ while [ $# -gt 0 ]; do
 done
 [ -n "$CODE" ] && [ -n "$PANEL" ] || die "usage: install.sh --join CODE --panel PANEL_TAILSCALE_IP [options]"
 case "$PANEL" in *[!0-9.]*) die "--panel must be the panel's Tailscale IPv4 address, e.g. 100.88.109.47" ;; esac
+if [ -n "$SUMS_PIN" ]; then
+  SUMS_PIN="$(printf '%s' "$SUMS_PIN" | tr 'A-F' 'a-f')"
+  case "$SUMS_PIN" in
+    *[!0-9a-f]*) die "FAIRY_SUMS_SHA256 / --sums-sha256 must be 64 hex digits (the SHA-256 of SHA256SUMS)" ;;
+  esac
+  [ "${#SUMS_PIN}" -eq 64 ] || die "FAIRY_SUMS_SHA256 / --sums-sha256 must be 64 hex digits (the SHA-256 of SHA256SUMS)"
+fi
 [ "$(id -u)" -eq 0 ] || die "run it as root (… | sudo sh -s -- …)"
 command -v systemctl >/dev/null 2>&1 || die "this installer needs systemd"
 command -v curl >/dev/null 2>&1 || die "curl is missing"
@@ -70,6 +84,13 @@ FILES="$ASSET SHA256SUMS SHA256SUMS.sig VERSION fairy-agent.service fairy-agent-
 for f in $FILES; do
   curl -fsSL --proto '=https,file' --proto-redir '=https' --retry 3 -o "$TMP/$f" "$BASE/$f" || die "download of $f failed"
 done
+
+# 0. SHA256SUMS itself must be the one the panel vouched for (when it passed its hash)
+if [ -n "$SUMS_PIN" ]; then
+  got="$(sha256sum "$TMP/SHA256SUMS" | awk '{ print $1 }')"
+  [ "$got" = "$SUMS_PIN" ] || die "SHA256SUMS is not the release the panel checked (SHA-256 $got, expected $SUMS_PIN)"
+  say "SHA256SUMS matches the hash the panel checked"
+fi
 
 # 1. every file must be listed in SHA256SUMS with the same SHA-256
 for f in $FILES; do

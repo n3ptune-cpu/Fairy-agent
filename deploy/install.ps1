@@ -17,6 +17,10 @@
   3. runs `fairy-agent join`: tokens, the chosen settings and the one-time join code (nothing secret is shown);
   4. restarts the service and waits until the panel has picked up the tokens.
 
+  -SumsSha256 <sha256 of SHA256SUMS>: the panel checks the release's signature with its own built-in key and
+  passes this hash; the script then refuses a SHA256SUMS with any other hash before trusting a line of it (so
+  even a first install does not rest on the downloaded program's own key).
+
   Safe to run again (e.g. with a new code from the panel's Re-pair): settings are kept, the tokens are
   replaced by new ones (the panel gets them by pairing). No driver,
   no other program touched.
@@ -31,6 +35,7 @@ param(
     [string]$UpsName = '',
     [switch]$CoreTemp,
     [switch]$Ipmi,
+    [string]$SumsSha256 = '',
     [string]$ReleaseUrl = 'https://github.com/n3ptune-cpu/Fairy-agent/releases/latest/download'
 )
 $ErrorActionPreference = 'Stop'
@@ -38,6 +43,7 @@ $ProgressPreference = 'SilentlyContinue'
 [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
 
 if ($PanelAddress -notmatch '^\d{1,3}(\.\d{1,3}){3}$') { throw "-PanelAddress must be the panel's Tailscale IPv4 address, e.g. 100.88.109.47" }
+if ($SumsSha256 -and $SumsSha256 -notmatch '^[0-9a-fA-F]{64}$') { throw '-SumsSha256 must be 64 hex digits (the SHA-256 of SHA256SUMS)' }
 
 # Runs a native program without letting Windows PowerShell 5.1 turn its stderr into a terminating error.
 function Invoke-Quiet([string]$cmd, [string[]]$cmdArgs) {
@@ -52,6 +58,13 @@ try {
     Write-Host "fairy: downloading the latest release from $ReleaseUrl"
     $files = 'fairy-agent-windows-amd64.exe', 'SHA256SUMS', 'SHA256SUMS.sig', 'VERSION', 'install-fairy-agent.ps1'
     foreach ($f in $files) { Invoke-WebRequest -UseBasicParsing -Uri "$ReleaseUrl/$f" -OutFile (Join-Path $dir $f) }
+
+    # 0. SHA256SUMS itself must be the one the panel vouched for (when it passed its hash)
+    if ($SumsSha256) {
+        $got = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $dir 'SHA256SUMS')).Hash.ToLower()
+        if ($got -ne $SumsSha256.ToLower()) { throw "SHA256SUMS is not the release the panel checked (SHA-256 $got, expected $($SumsSha256.ToLower()))" }
+        Write-Host 'fairy: SHA256SUMS matches the hash the panel checked'
+    }
 
     # 1. every file must be listed in SHA256SUMS with the same SHA-256
     $sums = @{}

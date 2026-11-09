@@ -75,7 +75,10 @@ Like adding a machine to Tailscale: no editor, no token copying.
 What the command does: it downloads the latest release, checks every file against the signed `SHA256SUMS`
 (with the release key built into the downloaded fairy-agent on Windows, the installed agent's on a Linux re-run;
 on Windows an installed program is only run again after it has been replaced by the checked one and its
-SHA-256 matches), installs exactly as described
+SHA-256 matches; when the panel passes the SHA-256 of the release's `SHA256SUMS` it checked with its own key,
+`FAIRY_SUMS_SHA256` / `--sums-sha256` on Linux or `-SumsSha256` on Windows, a different `SHA256SUMS` is refused
+before anything in it is trusted, so a first install no longer rests on the downloaded program's own key),
+installs exactly as described
 in [Install on Windows](#install-on-windows) / [Install on Linux](#install-on-linux) (user, program, service,
 polkit / tmpfiles rules when needed, firewall rule for the panel only, LocalSystem on Windows when Core Temp or
 IPMI is chosen), then runs `fairy-agent join`: it makes the tokens on the machine, switches on the chosen
