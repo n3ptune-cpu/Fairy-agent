@@ -237,6 +237,8 @@ func serve(ctx context.Context, cfgPath string, interactive bool) error {
 	// Windows: a LocalSystem service moves itself to NT SERVICE\fairy-agent (built before Run, which clears
 	// the update stage the migration looks at)
 	mig := newMigrator(cfgPath, cfg)
+	// Windows: NT SERVICE\fairy-agent reads performance counters only as a member of Performance Monitor Users
+	go counterAccessKick(ctx)
 	if err := agent.Run(ctx, cfg, agent.Build{Version: version, ReleaseKey: releaseKey, Migration: mig}); err != nil {
 		slog.Error("fairy-agent cannot run", "error", err.Error())
 		return err
@@ -287,6 +289,10 @@ func applyUpdateCtx(ctx context.Context, cfgPath string) int {
 	// Windows: the agent moved its service to NT SERVICE\fairy-agent and started this service to restart and
 	// check it; that is all this run does (the state file is administrators-only)
 	if handled, code := superviseMigration(ctx, cfg, cfgPath); handled {
+		return code
+	}
+	// Windows, nothing staged: the agent asked for its account to read performance counters (counterAccessKick)
+	if handled, code := counterAccessRun(ctx, cfg); handled {
 		return code
 	}
 	slog.Warn("apply-update: starting", "installed", version)

@@ -664,6 +664,10 @@ func uninstall() error {
 	}
 	defer s.Close()
 	stopAndWait(s, 20*time.Second)
+	// while the service exists (its account exists only with it)
+	if err := agent.RemoveCounterAccess(); err != nil {
+		fmt.Println("warning:", err)
+	}
 	if err := s.Delete(); err != nil {
 		return err
 	}

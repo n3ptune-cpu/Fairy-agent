@@ -284,7 +284,7 @@ func TestResumeAfterCrash(t *testing.T) {
 	if out.Kind != OutHanded || out.Attempt != 1 {
 		t.Fatalf("%+v", out)
 	}
-	if !slices.Equal(ops2.calls, []string{StepHelper, StepFirewall, StepSwitch, StepRestart}) {
+	if !slices.Equal(ops2.calls, []string{StepHelper, StepFirewall, StepCounters, StepSwitch, StepRestart}) {
 		t.Fatalf("resumed with %v", ops2.calls)
 	}
 	if s := st.state(t); s.Resumes != 1 {

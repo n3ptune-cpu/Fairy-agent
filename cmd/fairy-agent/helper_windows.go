@@ -114,6 +114,9 @@ func startAndWait(s *mgr.Service, d time.Duration) error {
 // setup is `fairy-agent setup-self-update` and the end of `install` (as Administrator, idempotent):
 //   - moves the agent's service to its virtual account NT SERVICE\fairy-agent (from LocalService or
 //     LocalSystem), with only SeChangeNotifyPrivilege; restarts it when it was running and restart is set;
+//   - NT SERVICE\fairy-agent into the built-in group Performance Monitor Users (S-1-5-32-558): read access to
+//     performance counters (GPU load, VRAM in use, ACPI temperatures), nothing else; when it was not a member,
+//     a running agent is restarted (when restart is set) so its token carries the group;
 //   - the ProgramData folder permissions (setupFolders); config and tokens are kept;
 //   - self-update (setupSelfUpdate);
 //   - the fairy-agent-helper service when forceHelper is set or config.yaml needs it (Core Temp, IPMI through
@@ -137,10 +140,16 @@ func setup(cfgPath string, forceHelper, restart bool) error {
 	if changed {
 		fmt.Printf("the %s service now runs as %s (was %s)\n", serviceName, agentAccount, orLocalSystem(old.ServiceStartName))
 	}
+	var problems []string
+	added, err := agent.EnsureCounterAccess()
+	if err != nil {
+		problems = append(problems, "GPU load, VRAM in use and ACPI temperatures will be unknown: "+err.Error())
+	} else if added {
+		fmt.Println(agentAccount + ` added to the group "Performance Monitor Users" (` + agent.PerfMonitorUsersSID + `): read access to performance counters`)
+	}
 	if err := setupFolders(cfgPath); err != nil {
 		return err
 	}
-	var problems []string
 	if err := setupSelfUpdate(cfgPath); err != nil {
 		problems = append(problems, "self-update (the panel's Update button) is not set up: "+err.Error())
 	}
@@ -164,9 +173,13 @@ func setup(cfgPath string, forceHelper, restart bool) error {
 	} else {
 		fmt.Println("no helper needed (no Core Temp, IPMI, fan or power control in config.yaml): only the low-rights agent runs")
 	}
-	if changed && restart {
+	if (changed || added) && restart {
 		if st, err := s.Query(); err == nil && st.State != svc.Stopped {
-			fmt.Println("restarting", serviceName, "under its new account")
+			if changed {
+				fmt.Println("restarting", serviceName, "under its new account")
+			} else {
+				fmt.Println("restarting", serviceName, "so it can read performance counters")
+			}
 			stopAndWait(s, 20*time.Second)
 			if err := startAndWait(s, 30*time.Second); err != nil {
 				problems = append(problems, "restarting "+serviceName+": "+err.Error())

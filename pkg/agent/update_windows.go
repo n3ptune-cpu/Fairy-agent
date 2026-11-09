@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"syscall"
@@ -221,6 +222,13 @@ func installerFor(exe string) *release.Installer {
 		return nil
 	}
 	start := func(ctx context.Context) error {
+		// the agent's account reads performance counters as a member of Performance Monitor Users; the service
+		// gets the group with the token of this start (also for agents moved off LocalSystem by 0.5.1)
+		if added, err := EnsureCounterAccess(); err != nil {
+			slog.Warn("apply-update: the agent may not read performance counters (GPU load, VRAM in use)", "error", err.Error())
+		} else if added {
+			slog.Warn(`apply-update: added NT SERVICE\` + ServiceName + " to Performance Monitor Users (" + PerfMonitorUsersSID + "): read access to performance counters")
+		}
 		if helperWasRunning {
 			if err := (scmHelper{}).Start(ctx); err != nil {
 				return fmt.Errorf("starting %s: %w", proto.ServiceName, err)
@@ -246,4 +254,23 @@ func serviceRunning(context.Context) error {
 		return fmt.Errorf("the %s service is not running (state %d)", ServiceName, st)
 	}
 	return nil
+}
+
+// UpdaterStopped reports whether the updater service is stopped (with the rights the agent's account has on
+// it: query and start).
+func UpdaterStopped() (bool, error) {
+	s, done, err := openUpdater(windows.SERVICE_QUERY_STATUS)
+	if err != nil {
+		return false, err
+	}
+	defer done()
+	st, err := serviceState(s)
+	return err == nil && st == windows.SERVICE_STOPPED, err
+}
+
+// Staged reports whether an update is staged (the agent wrote request.json into the stage).
+func Staged(cfg *Config) bool {
+	stage, _ := UpdatePaths(cfg)
+	_, err := os.Lstat(filepath.Join(stage, stageRequestFile))
+	return err == nil
 }

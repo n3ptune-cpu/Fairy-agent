@@ -12,3 +12,7 @@ import (
 func newMigrator(string, *agent.Config) agent.Migrator { return nil }
 
 func superviseMigration(context.Context, *agent.Config, string) (bool, int) { return false, 0 }
+
+func counterAccessKick(context.Context) {}
+
+func counterAccessRun(context.Context, *agent.Config) (bool, int) { return false, 0 }

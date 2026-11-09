@@ -41,12 +41,13 @@ const (
 	StepFans          = "fans"           // fans to the BMC's automatic mode (fan control in this process only)
 	StepHelper        = "helper"         // the fairy-agent-helper service, when config.yaml needs it (or one exists)
 	StepFirewall      = "firewall"       // the helper's block rules, in and out, for its service SID
+	StepCounters      = "counters"       // the new account into Performance Monitor Users (performance counters)
 	StepSwitch        = "switch"         // the service: NT SERVICE\fairy-agent, SeChangeNotifyPrivilege only
 	StepRestart       = "restart"        // the updater service restarts the agent under the new account
 )
 
 // Steps is the order the Machine works in.
-var Steps = []string{StepProgramFolder, StepFolders, StepUpdater, StepFans, StepHelper, StepFirewall, StepSwitch, StepRestart}
+var Steps = []string{StepProgramFolder, StepFolders, StepUpdater, StepFans, StepHelper, StepFirewall, StepCounters, StepSwitch, StepRestart}
 
 // Phases (State.Phase).
 const (

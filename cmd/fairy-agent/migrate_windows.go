@@ -331,6 +331,15 @@ func (o *winMigrationOps) Step(ctx context.Context, step string) error {
 			return nil
 		}
 		return helperFirewall()
+	case migrate.StepCounters:
+		// not fatal: without it only GPU load, VRAM in use and ACPI temperatures are missing, and the agent
+		// asks the updater service again under its new account (counterAccessKick)
+		if added, err := agent.EnsureCounterAccess(); err != nil {
+			slog.Warn("migration: the new account will not read performance counters", "error", err.Error(), "fix", collect.CounterAccessFix)
+		} else if added {
+			slog.Info(`migration: NT SERVICE\` + serviceName + " added to Performance Monitor Users (" + agent.PerfMonitorUsersSID + ")")
+		}
+		return nil
 	case migrate.StepSwitch:
 		m, err := mgr.Connect()
 		if err != nil {
