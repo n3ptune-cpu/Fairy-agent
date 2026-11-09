@@ -13,8 +13,6 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-const accessAllowedCallbackACEType = 9
-
 // TrustedExecutable checks that path is a local, absolute path to a plain file (no link or junction) that only
 // Administrators, SYSTEM or TrustedInstaller can change, through every folder above it. See safeexe.go.
 func TrustedExecutable(path string) error {
@@ -31,10 +29,13 @@ func TrustedExecutable(path string) error {
 	}
 	kind := ObjFile
 	for p := path; ; {
+		parent := filepath.Dir(p)
+		if parent == p && kind == ObjAncestor {
+			kind = ObjRoot // C:\ (the program's own folder keeps the stricter ObjParent check even if it is C:\)
+		}
 		if err := checkACL(p, kind); err != nil {
 			return err
 		}
-		parent := filepath.Dir(p)
 		if parent == p {
 			return nil
 		}
@@ -68,16 +69,10 @@ func checkACL(p string, kind int) error {
 	}
 	var aces []ACE
 	if !null {
-		for i := uint32(0); i < uint32(dacl.AceCount); i++ {
-			var ace *windows.ACCESS_ALLOWED_ACE
-			if err := windows.GetAce(dacl, i, &ace); err != nil {
-				return fmt.Errorf("%s: cannot read its permissions: %w", p, err)
-			}
-			if ace.Header.AceType != windows.ACCESS_ALLOWED_ACE_TYPE && ace.Header.AceType != accessAllowedCallbackACEType {
-				continue // deny entries only take rights away
-			}
-			sid := (*windows.SID)(unsafe.Pointer(&ace.SidStart))
-			aces = append(aces, ACE{SID: sid.String(), Mask: uint32(ace.Mask), InheritOnly: ace.Header.AceFlags&windows.INHERIT_ONLY_ACE != 0})
+		// the DACL as stored (ACL header, then the entries), read by the pure ParseDACL
+		size := *(*uint16)(unsafe.Add(unsafe.Pointer(dacl), 2))
+		if aces, err = ParseDACL(unsafe.Slice((*byte)(unsafe.Pointer(dacl)), size)); err != nil {
+			return fmt.Errorf("%s: cannot read its permissions: %w", p, err)
 		}
 	}
 	return CheckWindowsACL(p, kind, owner.String(), null, aces)

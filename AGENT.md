@@ -676,8 +676,13 @@ on the first install and report anything odd:
 * the install script's firewall rule;
 * per-program GPU memory from the "GPU Process Memory" counter (compare with Task Manager's "Dedicated GPU
   memory" column), and its matching to the NVIDIA card through nvidia-smi's pci.bus_id;
-* the permission check on helper programs (ipmitool, nvidia-smi): reading owner and ACL entries of the file and
-  its folders, e.g. that `C:\Program Files\ipmitool\ipmitool.exe` installed by an administrator is accepted;
+* the permission check on helper programs (ipmitool, nvidia-smi) and on the agent itself (setup-self-update):
+  reading owner and ACL entries of the file and its folders. 0.4.3 refused everything on a PC whose `C:\` gives
+  Authenticated Users Modify on `C:\` itself (which holds DELETE, harmless on a drive's root): no nvidia-smi,
+  no ipmitool, no self-update. 0.4.4 checks a folder further up only for what could replace the path below it
+  (DELETE except on the root, FILE_DELETE_CHILD, WRITE_DAC, WRITE_OWNER), maps generic rights, and is unit-tested
+  against stock Windows 10 / 11 permissions (`C:\`, `C:\Program Files`, `C:\Windows\System32`, an
+  administrator's `C:\Program Files\ipmitool`) written as SDDL, but not yet run on a PC;
 * leaving out leftover GPU entries ("GPU Adapter Memory" counter per adapter), checked against unit tests built
   from the RX 5600 XT and Intel UHD reports, not yet on those PCs;
 * self-update on Windows: `setup-self-update` (removing 0.4.2's program-folder entry, the update / stage folder
