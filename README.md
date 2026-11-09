@@ -1,5 +1,17 @@
 # Fairy-agent
 
+> [!WARNING]
+> Heads up: this whole thing was written by AI. We're not programmers,
+> so we can't help you set it up or fix your install. If you want a
+> feature or found a bug, open an issue and we'll have the AI look at it.
+> It might not work on your hardware.
+>
+> It's MIT, so no warranty, use it at your own risk. Nobody has
+> professionally security-tested it. It can shut down and reboot PCs
+> and change fan speeds if you turn those on, and on Windows part of
+> it runs as SYSTEM. Only connect to the agents over Tailscale, never
+> straight from the internet, and only install from our Releases page.
+
 `fairy-agent` is the small metrics agent for the Fairy homelab panel
 ([Fairy-dashboard](https://github.com/n3ptune-cpu/Fairy-dashboard)). It runs on each watched Windows or Linux
 machine and answers the panel over Tailscale: `/metrics`, `/processes`, and, only when the machine's owner turns
