@@ -185,6 +185,28 @@ Send those lines if there are still two: `pci=00:02.0` on both Intel lines is wh
 means Windows' kernel did not say (then the old rule applies). A line "counter not readable yet" means PDH was
 not ready at start (it is tried again every minute, "counter readable now" follows).
 
+## 10. Performance counters and leftover GPU entries (0.5.2, build 13)
+
+On a PC that runs as `NT SERVICE\fairy-agent` on build 12 (NSX-FURINA, NSX-CYRENE): press **Update**. 0.5.1's
+installer puts 0.5.2 in place (it does not know the group yet); about a minute later the new agent asks the
+fairy-agent-update service, which adds the account to Performance Monitor Users and restarts the agent once
+(the panel may show it offline for a few seconds). On FURINA, where the group was added by hand already,
+nothing restarts. Check:
+
+```powershell
+net localgroup "Performance Monitor Users"                       # lists NT SERVICE\fairy-agent
+Get-Content C:\ProgramData\fairy-agent\update\installer.log -Tail 10   # "added NT SERVICE\fairy-agent to Performance Monitor Users", restart
+Get-Content C:\ProgramData\fairy-agent\logs\agent.log | Select-String "DXGI adapter|counter|Performance Monitor|ADL"
+```
+
+Expected: no `0xC0000BC8` / "performance counters not readable" line after the restart; GPU Util and VRAM in
+use show numbers; Processes shows per-process GPU memory. FURINA: one Intel UHD (the `0x...18323` line says
+`pci=unknown` and is left out) plus the RTX 3050; VARESA: one RX 5600 XT (two `pci=unknown` lines left out),
+and the `AMD GPU sensors (ADL)` line (send it: it says why there is no Radeon temperature yet).
+
+LocalService PCs (ESCOFFIER, VARESA): `& "C:\Program Files\Fairy\fairy-agent.exe" setup-self-update` as
+Administrator moves them and adds the group in one go. `uninstall` removes the membership again.
+
 ## Rollback (back to build 10 / v0.4.4)
 
 0.4.4 does not know the helper or the new account, so remove 0.5's services first. Config and tokens stay, the

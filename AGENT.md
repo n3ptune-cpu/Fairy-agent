@@ -176,7 +176,7 @@ Since 0.5.0 (release build 11 or later) fairy-agent on Windows is two services t
 
 | | **fairy-agent** (the agent) | **fairy-agent-helper** (the helper) |
 | --- | --- | --- |
-| Account | `NT SERVICE\fairy-agent`, a "virtual account": no password, cannot sign in, a member of no admin group | LocalSystem |
+| Account | `NT SERVICE\fairy-agent`, a "virtual account": no password, cannot sign in, a member of no admin group (only of "Performance Monitor Users", see below) | LocalSystem |
 | Rights | only `SeChangeNotifyPrivilege` (needed to open folders); no shutdown, no impersonation, nothing else | only `SeChangeNotifyPrivilege`, `SeShutdownPrivilege`, `SeImpersonatePrivilege` (to see who connects); no driver loading, no debugging other programs, no taking over files |
 | Network | listens on the Tailscale address for the panel; the tokens, `/metrics`, everything the panel sees | **none**: listens only on the local pipe `\\.\pipe\fairy-agent-helper`; a firewall rule blocks all its traffic in and out |
 | Files | reads `C:\ProgramData\fairy-agent` (config, tokens), writes only `logs\`, `state\` and `update\stage\` | reads config.yaml, writes only its own log `C:\ProgramData\fairy-agent\helper\helper.log` (the agent can only read it) |
@@ -234,11 +234,30 @@ there is (as always), and Windows refuses that for programs of other accounts an
 (your games, your browser, services) are listed **by name only**, without CPU, memory, path or user, the same
 as with LocalService before. For many people that is a feature. The helper is never used for the process list.
 
+**Performance counters (0.5.2).** The agent reads GPU load, VRAM in use, per-process GPU memory and the ACPI
+thermal zones from Windows' performance counters (PDH, as Task Manager does). PDH first reads the counters'
+names from the Perflib registry key, which only Administrators, SYSTEM, INTERACTIVE, Performance Monitor Users
+and Performance Log Users may read, so as a plain virtual account every counter failed with PDH status
+`0xC0000BC8` (PDH_CANNOT_READ_NAME_STRINGS): Util and VRAM in use stayed "–" on 0.5.0 / 0.5.1. Since 0.5.2
+`NT SERVICE\fairy-agent` is a member of the built-in group **Performance Monitor Users** (`S-1-5-32-558`,
+found by its SID, so a localized Windows works too). That group grants read access to performance counter data
+and nothing else: no administrator rights, no right to change any setting, service or file, no access to other
+programs. `install`, `setup-self-update` (and so `install-fairy-agent.ps1`), the move off LocalSystem (step
+`counters`) and the fairy-agent-update service (before it starts an updated agent) add it; `uninstall` removes
+it. A group counts from the service's next start (a new token): `setup-self-update` restarts a running agent
+when it had to add the group. An agent that runs as `NT SERVICE\fairy-agent` without the group in its token
+(moved by 0.5.1, then updated to 0.5.2 by 0.5.1's updater, which does not know the group) starts the
+fairy-agent-update service once, a minute or more after it starts and only while that service is stopped; with
+nothing staged that service only adds the group and, if it really added it, restarts the agent (so this cannot
+repeat). Check: `net localgroup "Performance Monitor Users"` (English Windows) lists `NT SERVICE\fairy-agent`.
+If the counters still cannot be read, agent.log says so once: `performance counters not readable by this
+account (PDH status 0xC0000BC8 ...)`, with the fix.
+
 **Moving an existing install** (0.4.x ran as LocalService, or LocalSystem for Core Temp / fans): run
 `install-fairy-agent.ps1` again, or, in an Administrator PowerShell,
 `& "C:\Program Files\Fairy\fairy-agent.exe" setup-self-update`. Both are safe to run again. They switch the
 service to `NT SERVICE\fairy-agent` (like `sc.exe config fairy-agent obj= "NT SERVICE\fairy-agent"`), give it
-only `SeChangeNotifyPrivilege`, set the folder permissions again (config and tokens readable by the agent's
+only `SeChangeNotifyPrivilege`, add it to Performance Monitor Users (above), set the folder permissions again (config and tokens readable by the agent's
 account, the helper's folder writable only by administrators and SYSTEM), install the helper when `config.yaml`
 uses Core Temp, IPMI or power control (`--helper` installs it anyway), and restart what was running. Config and
 tokens stay, so the panel notices nothing but a restart. The folder permissions name the same account as
@@ -276,9 +295,11 @@ answers "unavailable" for the few minutes it takes.
    control (or one is installed already); it starts at once and its fan watchdog takes over;
 6. `firewall`: the helper's two block rules (in and out, its service SID; `netsh advfirewall`, the same rules
    `install-fairy-agent.ps1` and `setup-self-update` make);
-7. `switch`: the service to `NT SERVICE\fairy-agent`, SID type unrestricted, only `SeChangeNotifyPrivilege`
+7. `counters` (0.5.2): `NT SERVICE\fairy-agent` into Performance Monitor Users (above); a failure here is
+   logged and does not stop the move (only the counters would be missing);
+8. `switch`: the service to `NT SERVICE\fairy-agent`, SID type unrestricted, only `SeChangeNotifyPrivilege`
    (effective at its next start), and the updater service to start with Windows until the switch is checked;
-8. `restart`: the agent starts the **fairy-agent-update** service (LocalSystem, the installed program). Seeing
+9. `restart`: the agent starts the **fairy-agent-update** service (LocalSystem, the installed program). Seeing
    the migration state, it installs nothing: it stops the agent, starts it (now as `NT SERVICE\fairy-agent`),
    and checks within two minutes that the service runs, that its process runs as `NT SERVICE\fairy-agent`,
    that the same process keeps running for 20 s, and that `/metrics` answers twice with this version. Then
@@ -308,7 +329,8 @@ what it waits for), then the current step; `command` is what an administrator ru
 **Commands** (Administrator PowerShell, `& "C:\Program Files\Fairy\fairy-agent.exe" ...`):
 `helper-status` (both services' accounts, is the helper running, what it serves), `setup-self-update
 [--helper]` (as above; also adds the helper's firewall rules), `remove-helper` (stop it, fans back to the BMC,
-remove it and its firewall rules), `uninstall` (both services and the updater).
+remove it and its firewall rules), `uninstall` (both services and the updater; takes `NT SERVICE\fairy-agent`
+out of Performance Monitor Users).
 
 **Troubleshooting**
 
@@ -322,6 +344,10 @@ remove it and its firewall rules), `uninstall` (both services and the updater).
   log": the `helper` folder is not administrators-only; `setup-self-update` fixes it.
 * Shutdown answers "helper stopped": start the helper. Shutdown answers that a privilege is missing: the
   helper is not installed (power control was switched on later); run `setup-self-update`.
+* GPU Util / VRAM in use "–" and agent.log says `performance counters not readable by this account`: the
+  account is not in Performance Monitor Users, or the agent was not restarted since. Run `setup-self-update`
+  (it adds the group and restarts the agent), or by hand `net localgroup "Performance Monitor Users"
+  "NT SERVICE\fairy-agent" /add` and `Restart-Service fairy-agent`.
 * Something worked as LocalService / LocalSystem and not now: `sc.exe qprivs fairy-agent` and the agent's log;
   report it. Going back to build 10 is in TEST-ON-WINDOWS.md ("Rollback").
 
@@ -384,7 +410,12 @@ laptop's Intel UHD had two LUIDs, both with memory and engine counters, with dif
 twice). Such a card is shown once, named after its busiest entry, and the counters of all its entries are
 added: busy % per engine summed over them (work sent through either reaches the same engine), then the
 busiest engine; VRAM in use summed (each entry's allocations are its own). When D3DKMT gives no location the
-rule above applies as before. The counters are set up again once a minute when Windows did not offer them at
+rule above applies as before. Since 0.5.2 an entry whose location D3DKMT cannot give (it fails, or answers
+`ffffffff:ffff.ffff`, logged as `pci=unknown`) is left out when another entry with the same PCI ids (vendor,
+device, subsystem, revision) has a location: the leftover of a card after a driver reset (a laptop's Intel UHD
+showed up twice; a Radeon three times). This needs no counter, so it works even when the counters cannot be
+read; such an entry stays only if Windows still drives it (a "GPU Adapter Memory" counter). Software adapters
+(Microsoft Basic Render Driver) are never listed. The counters are set up again once a minute when Windows did not offer them at
 start (busy % and VRAM in use showed "–"), and the start-up log lists every DXGI entry with its LUID, PCI ids
 and location. Nothing to install; `gpu: windows: off` switches it off.
 
@@ -393,8 +424,11 @@ with the Adrenalin driver), read only: per card by its Overdrive version, the PM
 (edge temperature, board or ASIC power: e.g. RX 5600 XT), OverdriveN / Overdrive 6 / 5 calls on older cards.
 Only "Get" functions are called (no overclocking or fan settings are touched), no driver of our own is loaded
 and nothing is read from other processes. Cards are matched to the DXGI list by PCI location; the panel then
-shows them "via AMD". Without the DLL, or when a call fails, the card keeps load and VRAM only (logged once at
-debug level). `gpu: amd_adl: off` switches it off. Untested on real AMD hardware so far.
+shows them "via AMD". Without the DLL, or when a call fails, the card keeps load and VRAM only. agent.log has
+one line at start, `AMD GPU sensors (ADL)`, with what ADL answered: the DLL and `ADL2_Main_Control_Create`'s
+return code (or why no DLL could be used), the number of ADL adapters (or the error code), per adapter its
+index, PCI location, vendor, present / exist and the Overdrive answer (version or ADL error code), and how many
+cards are read. `gpu: amd_adl: off` switches it off. Untested on real AMD hardware so far.
 
 If the firewall on the machine is on (nftables/ufw), allow TCP 9101 only on `tailscale0`, e.g.
 `ufw allow in on tailscale0 to any port 9101 proto tcp`.

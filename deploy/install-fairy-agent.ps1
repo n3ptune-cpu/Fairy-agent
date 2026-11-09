@@ -12,7 +12,9 @@
      config.yaml, token and control-token, readable only by administrators, SYSTEM and the service). The service
      runs as its own virtual account NT SERVICE\fairy-agent (no password, cannot sign in, almost no rights).
      An existing installation that runs as LocalService or LocalSystem (fairy-agent 0.4.x) is moved to that
-     account; config and tokens are kept
+     account; config and tokens are kept. The account is added to the built-in group "Performance Monitor
+     Users" (S-1-5-32-558; read access to performance counters only: GPU load, VRAM in use, temperatures);
+     install / setup-self-update do that, and the service is started again below, so it takes effect
   2b. when Core Temp, IPMI / fan control or power control is switched on in config.yaml (or with -Helper):
      the "fairy-agent-helper" service (LocalSystem, no network, a local pipe only the agent's account may use,
      a fixed list of requests) that reads Core Temp and the BMC, sets fans and shuts down / reboots / sleeps
