@@ -261,11 +261,21 @@ func (f *Fan) WatchdogOnce(ctx context.Context) {
 		if f.noTemp >= 3 {
 			f.failSafe(ctx, "no temperature reading for 30 s while fans were set manually")
 		}
-	case temp >= f.cfg.MaxTempC:
-		f.failSafe(ctx, fmt.Sprintf("%s %.1f °C >= %.0f °C", name, temp, f.cfg.MaxTempC))
+	case !(temp < f.cfg.MaxTempC):
+		// written as "not below the limit": a reading or a limit that is not a number (NaN) compares false
+		// with everything, so `temp >= limit` would never act on it
+		f.failSafe(ctx, tooHot(name, temp, f.cfg.MaxTempC))
 	default:
 		f.noTemp = 0
 	}
+}
+
+// tooHot words why temp counts as "at or above the limit" (also when one of the two is not a number).
+func tooHot(name string, temp, limit float64) string {
+	if temp >= limit {
+		return fmt.Sprintf("%s %.1f °C >= %.0f °C", name, temp, limit)
+	}
+	return fmt.Sprintf("%s %v °C cannot be compared with the limit %v °C (not a number)", name, temp, limit)
 }
 
 // failSafe sets both zones to 100 % (mode stays "full"). Caller holds f.mu.
