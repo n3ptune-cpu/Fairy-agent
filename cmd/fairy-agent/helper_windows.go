@@ -328,14 +328,17 @@ func helperStatus() int {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
+	// the pipe's owner is looked at and printed (never refused here: this command is for looking)
+	owner := &winpipe.OwnerCheck{Warn: func(msg string) { fmt.Println("note:", msg) }}
 	conn, err := winpipe.Dial(ctx, proto.PipeName, func() (uint32, error) {
 		q, err := h.Query()
 		return q.ProcessId, err
-	})
+	}, owner)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "helper: running, but its pipe:", err)
 		return 1
 	}
+	fmt.Println("helper pipe owner:", owner.Owner(), "(expected: S-1-5-32-544, Administrators, or S-1-5-18, SYSTEM)")
 	defer conn.Close()
 	_ = conn.SetDeadline(time.Now().Add(10 * time.Second))
 	b, _ := proto.EncodeRequest(proto.Request{Verb: proto.VerbStatus})

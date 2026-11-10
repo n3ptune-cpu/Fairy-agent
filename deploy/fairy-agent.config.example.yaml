@@ -12,6 +12,11 @@
 # expired) then answers nobody but this machine until the Add host / Re-pair command has been run on it.
 # only_from_panel: true
 
+# Windows only. The agent uses its helper service's pipe only when the pipe belongs to SYSTEM or Administrators.
+# Off by default in this release: another owner is only reported as a warning in agent.log. Switch it on after
+# `fairy-agent.exe helper-status` has shown "helper pipe owner: S-1-5-32-544" (or S-1-5-18) on your PCs.
+# require_helper_pipe_owner: true
+
 # The panel's token for this machine (its token_env value), one line, at least 24 characters. Default: the file
 # "token" next to this config. FAIRY_AGENT_TOKEN in the environment wins over the file.
 # token_file: /etc/fairy-agent/token

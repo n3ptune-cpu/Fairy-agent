@@ -429,17 +429,31 @@ func MemberOf(sids ...*windows.SID) Allowed {
 // Dial connects to the pipe and checks that its server process is serverPID() (the helper service's process
 // as the service manager reports it), so a process that took the name while the helper was stopped is never
 // talked to. The client allows identification only: the helper can see who it is but cannot act as it.
-func Dial(ctx context.Context, name string, serverPID func() (uint32, error)) (*Conn, error) {
+//
+// owner (may be nil) also looks at who owns the pipe, read from the connected handle (owner.go): a process id
+// can be used again, a pipe's owner cannot be borrowed. In this release it only reports unless owner.Enforce.
+func Dial(ctx context.Context, name string, serverPID func() (uint32, error), owner *OwnerCheck) (*Conn, error) {
 	n16, err := windows.UTF16PtrFromString(name)
 	if err != nil {
 		return nil, err
 	}
+	// READ_CONTROL lets the owner be read. The helper's pipe gives it to the agent's account and to
+	// administrators; if a pipe does not, the connection is made without it and the owner counts as not read
+	// (so the look can never keep the agent from a pipe it reached before).
+	access := uint32(ClientAccess)
+	if owner != nil {
+		access |= windows.READ_CONTROL
+	}
 	var h windows.Handle
 	for {
-		h, err = windows.CreateFile(n16, ClientAccess, 0, nil, windows.OPEN_EXISTING,
+		h, err = windows.CreateFile(n16, access, 0, nil, windows.OPEN_EXISTING,
 			windows.FILE_FLAG_OVERLAPPED|windows.SECURITY_SQOS_PRESENT|windows.SECURITY_IDENTIFICATION, 0)
 		if err == nil {
 			break
+		}
+		if errors.Is(err, windows.ERROR_ACCESS_DENIED) && access != ClientAccess {
+			access = ClientAccess
+			continue
 		}
 		if errors.Is(err, windows.ERROR_FILE_NOT_FOUND) {
 			return nil, ErrNoPipe
@@ -463,5 +477,31 @@ func Dial(ctx context.Context, name string, serverPID func() (uint32, error)) (*
 		windows.CloseHandle(h)
 		return nil, ErrNotHelper
 	}
+	if owner != nil {
+		sid, oerr := "", error(windows.ERROR_ACCESS_DENIED)
+		if access&windows.READ_CONTROL != 0 {
+			sid, oerr = pipeOwner(h)
+		}
+		if err := owner.Decide(name, sid, oerr); err != nil {
+			windows.CloseHandle(h)
+			return nil, err
+		}
+	}
 	return newConn(h, false)
+}
+
+// pipeOwner is the owner SID of the pipe behind a connected handle (which needs READ_CONTROL).
+func pipeOwner(h windows.Handle) (string, error) {
+	sd, err := windows.GetSecurityInfo(h, windows.SE_KERNEL_OBJECT, windows.OWNER_SECURITY_INFORMATION)
+	if err != nil {
+		return "", err
+	}
+	sid, _, err := sd.Owner()
+	if err != nil {
+		return "", err
+	}
+	if sid == nil {
+		return "", nil
+	}
+	return sid.String(), nil
 }

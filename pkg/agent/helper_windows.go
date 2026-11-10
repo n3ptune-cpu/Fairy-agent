@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"time"
 	"unsafe"
 
@@ -20,8 +21,11 @@ import (
 // systemHelper is the client for fairy-agent-helper (also when it is not installed: /metrics then says so).
 func systemHelper(cfg *Config) *HelperClient {
 	svc := scmHelper{}
+	// who owns the pipe: reported in the log once when it is not SYSTEM or Administrators; refused only with
+	// require_helper_pipe_owner: true (winpipe.OwnerCheck says why this release only reports)
+	owner := &winpipe.OwnerCheck{Enforce: cfg.RequireHelperPipeOwner, Warn: func(msg string) { slog.Warn(msg) }}
 	dial := func(ctx context.Context) (io.ReadWriteCloser, error) {
-		return winpipe.Dial(ctx, proto.PipeName, svc.pid)
+		return winpipe.Dial(ctx, proto.PipeName, svc.pid, owner)
 	}
 	return NewHelperClient(dial, svc, NeedsHelper(cfg))
 }

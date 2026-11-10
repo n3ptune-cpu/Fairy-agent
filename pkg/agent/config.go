@@ -43,6 +43,9 @@ type Config struct {
 	// An agent with no panel address on record (never paired through Add host, or its last join code expired
 	// or was closed) then accepts this machine only, until it is paired: the setting fails closed.
 	OnlyFromPanel bool `yaml:"only_from_panel"`
+	// RequireHelperPipeOwner (Windows; off by default in this release): the agent uses the helper's pipe only
+	// when the pipe belongs to SYSTEM or Administrators. Off: another owner is only reported in the log.
+	RequireHelperPipeOwner bool `yaml:"require_helper_pipe_owner"`
 
 	// Tokens: the panel's token_env (read) and control_token_env (control) values. FAIRY_AGENT_TOKEN and
 	// FAIRY_AGENT_CONTROL_TOKEN in the environment win over the files.
