@@ -8,6 +8,12 @@
 //     The agent compares the proof's hash with the verifier in constant time, answers once with its tokens
 //     (Response) and closes pairing for good.
 //
+// Pairing v2 (v2.go) replaces steps 2 and 3 when the install command carries --pair-v2: the installer stores a
+// key made from the code instead of the verifier, the panel sends a fresh nonce with a MAC under that key, and
+// the agent's answer is encrypted and authenticated for that nonce, so the panel knows the answer comes from
+// the machine that was given the code and nobody else can read the tokens. A join code is for one version
+// only; v1 stays for panels that do not know v2.
+//
 // The agent never connects to the panel: the panel always asks, as for /metrics.
 package enroll
 
@@ -122,12 +128,13 @@ func Check(proof, verifier string) bool {
 	return subtle.ConstantTimeCompare(got[:], want) == 1
 }
 
-// Request is the panel's POST /pair body.
+// Request is the panel's POST /pair body in v1 (v2: RequestV2).
 type Request struct {
 	Proof string `json:"proof"`
 }
 
-// Response is the agent's answer to a correct proof. It is sent once.
+// Response is the agent's answer to a correct proof. It is sent once: in v1 as the body itself, in v2 as the
+// encrypted part of AnswerV2.
 type Response struct {
 	AgentVersion string          `json:"agent_version"`
 	Hostname     string          `json:"hostname,omitempty"`
@@ -165,11 +172,35 @@ type State struct {
 	// Proxmox: the node's API token for the panel (install.sh --proxmox), handed out once with the tokens and
 	// removed from this file before it leaves.
 	Proxmox *ProxmoxGrant `json:"proxmox,omitempty"`
+	// Key2 is the v2 pairing key (hex of PairingKey(code)), stored by `join --pair-v2` INSTEAD of the verifier:
+	// a state holds one or the other, and /pair answers only that version. Removed once pairing is closed.
+	Key2 string `json:"key2,omitempty"`
+}
+
+// PairVersion is the pairing version the stored join code is for: 2 when the state holds a v2 key (also when
+// a verifier is there as well: the weaker exchange is never chosen), 1 for a verifier only, 0 without a code.
+func (s State) PairVersion() int {
+	switch {
+	case s.Key2 != "":
+		return V2
+	case s.Verifier != "":
+		return 1
+	}
+	return 0
+}
+
+// PairingKey2 is the stored v2 pairing key (ErrBadKey when there is none or it is damaged).
+func (s State) PairingKey2() ([]byte, error) {
+	k, err := hex.DecodeString(s.Key2)
+	if err != nil || len(k) != KeySize {
+		return nil, ErrBadKey
+	}
+	return k, nil
 }
 
 // Active reports whether /pair may answer.
 func (s State) Active(now time.Time) bool {
-	return s.Closed == "" && s.Verifier != "" && now.Unix() < s.ExpiresAt
+	return s.Closed == "" && s.PairVersion() != 0 && now.Unix() < s.ExpiresAt
 }
 
 // Describe is one line for `fairy-agent pair-status` and the installer.
@@ -179,7 +210,7 @@ func (s State) Describe(now time.Time) string {
 		return fmt.Sprintf("paired with the panel (%s) at %s", s.PairedBy, time.Unix(s.PairedAt, 0).Format(time.RFC3339))
 	case s.Closed != "":
 		return "closed: " + s.Closed + " (make a new code in the panel)"
-	case s.Verifier == "":
+	case s.PairVersion() == 0:
 		return "no join code"
 	case !s.Active(now):
 		return "the join code expired at " + time.Unix(s.ExpiresAt, 0).Format(time.RFC3339) + " (make a new code in the panel)"

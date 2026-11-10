@@ -3,6 +3,7 @@ package agent
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"mime"
@@ -35,6 +36,11 @@ const pairOthersPerMin = 4 * enroll.RatePerMin
 // Pairer answers POST /pair: the panel's first contact after "Add host". It answers only while the state file
 // holds an unexpired, unused join code, only to the panel's address stored with it, at most enroll.RatePerMin
 // times a minute; a correct proof gets the tokens once and closes pairing for good.
+//
+// Two versions, chosen by the join command and never by the request (enroll.State.PairVersion): v1 compares
+// the proof with the stored verifier and answers with the tokens in clear (panels that do not know v2); v2
+// checks the request's MAC under the stored key and answers with the tokens encrypted and authenticated for
+// that request (enroll.SealAnswer). A request of the other version is refused with 400 wrong_version.
 //
 // Who is asking is settled before anything is counted: the panel's address has a budget of its own, which no
 // other address can use up. Every other address is refused anyway and has its own small budget (so that one
@@ -114,16 +120,46 @@ func (p *Pairer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		pairErr(w, 403, "wrong_address", "pairing is only open to the panel's address")
 		return
 	}
-	var req enroll.Request
+	var req pairRequest
 	b, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 1024))
-	if err != nil || json.Unmarshal(b, &req) != nil || req.Proof == "" {
-		pairErr(w, 400, "bad_request", `expected {"proof": "..."}`)
+	if err != nil || json.Unmarshal(b, &req) != nil {
+		pairErr(w, 400, "bad_request", `expected {"proof": "..."} or a pairing v2 request`)
 		return
 	}
-	if !enroll.Check(req.Proof, st.Verifier) {
+	// The join command chose the version (v1 verifier or v2 key in the state); the request cannot change it.
+	// A v1 proof is never checked, and tokens never leave in clear, when the code was stored for v2.
+	want := st.PairVersion()
+	if got := req.version(); got != want {
+		if got == 0 {
+			pairErr(w, 400, "bad_request", `expected {"proof": "..."} or a pairing v2 request`)
+			return
+		}
+		slog.Warn("pairing request refused: wrong pairing version", "remote", ip, "request", got, "join_code_for", want)
+		writeJSON(w, 400, map[string]any{"error": fmt.Sprintf("this agent's join code is for pairing v%d, the request is v%d", want, got),
+			"code": "wrong_version", "pair": want})
+		return
+	}
+	var key []byte
+	if want == enroll.V2 {
+		if key, err = st.PairingKey2(); err == nil {
+			err = enroll.CheckRequestV2(key, req.v2())
+		}
+		switch {
+		case errors.Is(err, enroll.ErrNotV2):
+			pairErr(w, 400, "bad_request", "malformed pairing v2 request")
+			return
+		case err != nil && !errors.Is(err, enroll.ErrWrongCode):
+			slog.Error("pairing: the stored v2 key is unusable", "error", err.Error())
+			pairErr(w, 500, "state_unreadable", "the agent cannot use its pairing state; run the join command again")
+			return
+		}
+	} else if !enroll.Check(req.Proof, st.Verifier) {
+		err = enroll.ErrWrongCode
+	}
+	if err != nil {
 		st.Failures++
 		if st.Failures >= enroll.MaxFailures {
-			st.Closed, st.Verifier, st.Proxmox = "too many wrong codes", "", nil
+			st.Closed, st.Verifier, st.Key2, st.Proxmox = "too many wrong codes", "", "", nil
 			slog.Warn("pairing closed after too many wrong codes", "remote", ip)
 		} else {
 			slog.Warn("pairing request with a wrong code", "remote", ip, "failures", st.Failures)
@@ -140,17 +176,53 @@ func (p *Pairer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		pairErr(w, 500, "tokens_unreadable", "the agent cannot read its own tokens; see its log")
 		return
 	}
+	grant := st.Proxmox
+	resp := p.Info()
+	resp.Token, resp.ControlToken, resp.Proxmox = tok.Read, tok.Control, grant
+	// v2: the answer is encrypted and authenticated for this request before anything is recorded, so a failure
+	// here leaves the code usable.
+	var answer any = resp
+	if want == enroll.V2 {
+		sealed, err := enroll.SealAnswer(key, req.v2(), resp)
+		if err != nil {
+			slog.Error("pairing: cannot seal the answer, tokens not sent", "error", err.Error())
+			pairErr(w, 500, "seal_failed", "the agent cannot encrypt its answer; see its log")
+			return
+		}
+		answer = sealed
+	}
 	// Close pairing on disk BEFORE the tokens leave: if that fails, nothing is handed out. The Proxmox token
 	// secret leaves the file at the same moment (it is sent exactly once).
-	grant := st.Proxmox
-	st.Closed, st.Verifier, st.PairedAt, st.PairedBy, st.Proxmox = "paired", "", now.Unix(), ip, nil
+	st.Closed, st.Verifier, st.Key2, st.PairedAt, st.PairedBy, st.Proxmox = "paired", "", "", now.Unix(), ip, nil
 	if err := enroll.WriteState(p.Path, st); err != nil {
 		slog.Error("pairing: cannot close the join code, tokens not sent", "error", err.Error())
 		pairErr(w, 500, "state_unwritable", "the agent cannot record the pairing; see its log")
 		return
 	}
-	resp := p.Info()
-	resp.Token, resp.ControlToken, resp.Proxmox = tok.Read, tok.Control, grant
-	slog.Info("paired with panel", "remote", ip, "control_token", tok.Control != "", "proxmox_token", grant != nil)
-	writeJSON(w, 200, resp)
+	slog.Info("paired with panel", "remote", ip, "pairing", want, "control_token", tok.Control != "", "proxmox_token", grant != nil)
+	writeJSON(w, 200, answer)
+}
+
+// pairRequest is a POST /pair body of either version: {"proof"} (v1, enroll.Request) or {"v":2,"nonce","mac"}
+// (enroll.RequestV2).
+type pairRequest struct {
+	Proof string `json:"proof"`
+	V     int    `json:"v"`
+	Nonce []byte `json:"nonce"`
+	MAC   []byte `json:"mac"`
+}
+
+// version is 1 for a v1 body, the body's "v" otherwise (0: neither).
+func (q pairRequest) version() int {
+	switch {
+	case q.V != 0:
+		return q.V
+	case q.Proof != "":
+		return 1
+	}
+	return 0
+}
+
+func (q pairRequest) v2() enroll.RequestV2 {
+	return enroll.RequestV2{V: q.V, Nonce: q.Nonce, MAC: q.MAC}
 }

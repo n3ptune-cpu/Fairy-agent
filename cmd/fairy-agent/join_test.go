@@ -114,6 +114,65 @@ func TestJoin(t *testing.T) {
 	}
 }
 
+// joinDirect runs parseJoin and join without the root / Administrator check of joinCmd, in temporary folders.
+func joinDirect(t *testing.T, args ...string) (enroll.State, []byte, string) {
+	t.Helper()
+	t.Setenv("FAIRY_AGENT_TOKEN", "")
+	t.Setenv("FAIRY_AGENT_CONTROL_TOKEN", "")
+	dir, state := t.TempDir(), t.TempDir()
+	var out, errb bytes.Buffer
+	o, err := parseJoin(append(args, "--config", filepath.Join(dir, "config.yaml"), "--state-dir", state), &errb)
+	if err != nil {
+		t.Fatal(err, errb.String())
+	}
+	if err := join(o, &out); err != nil {
+		t.Fatal(err, out.String())
+	}
+	path := filepath.Join(state, "pairing.json")
+	st, err := enroll.ReadState(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := os.ReadFile(path)
+	return st, raw, out.String()
+}
+
+// M3: --pair-v2 stores the v2 pairing key and no v1 verifier; without it the state is what it always was, so
+// an old panel's command still pairs the old way.
+func TestJoinPairV2(t *testing.T) {
+	code, _ := enroll.NewCode()
+	bare := strings.ReplaceAll(code, "-", "")
+	proof, _ := enroll.Proof(code)
+	key, _ := enroll.PairingKey(code)
+
+	st, raw, out := joinDirect(t, "--code", code, "--panel", "100.88.109.47", "--pair-v2")
+	if st.PairVersion() != 2 || st.Verifier != "" || !st.Active(time.Now()) || st.Panel != "100.88.109.47" {
+		t.Fatalf("v2 state: %+v", st)
+	}
+	if k, err := st.PairingKey2(); err != nil || !bytes.Equal(k, key) {
+		t.Fatalf("stored key: %x %v", k, err)
+	}
+	for _, secret := range []string{bare, code, proof, enroll.Verifier(proof)} {
+		if bytes.Contains(raw, []byte(secret)) || strings.Contains(out, secret) {
+			t.Fatalf("%q in the v2 state or the output", secret)
+		}
+	}
+	if strings.Contains(out, st.Key2) || !strings.Contains(out, "pairing v2") || !strings.Contains(out, "join code stored") {
+		t.Fatalf("output:\n%s", out)
+	}
+	// the stored key is the one a panel derives from the same code: its request checks, another code's does not
+	req, _ := enroll.NewRequestV2(key)
+	stored, _ := st.PairingKey2()
+	if err := enroll.CheckRequestV2(stored, req); err != nil {
+		t.Fatal(err)
+	}
+
+	st, raw, out = joinDirect(t, "--code", code, "--panel", "100.88.109.47")
+	if st.PairVersion() != 1 || st.Key2 != "" || !enroll.Check(proof, st.Verifier) || bytes.Contains(raw, []byte("key2")) || strings.Contains(out, "pairing v2") {
+		t.Fatalf("v1 state: %+v\n%s", st, out)
+	}
+}
+
 func TestVerifyRelease(t *testing.T) {
 	pub, priv, err := release.GenerateKey()
 	if err != nil {

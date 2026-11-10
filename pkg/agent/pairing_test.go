@@ -3,12 +3,17 @@ package agent
 import (
 	"bytes"
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/http/httputil"
+	"net/url"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -24,6 +29,8 @@ type pairRig struct {
 	now   time.Time
 	p     *Pairer
 	proof string
+	code  string
+	key   []byte // the v2 pairing key of code (stored in the state only by newPairRigV2)
 }
 
 // newPairRig serves an agent whose pairing state holds a fresh code for the panel at 127.0.0.1 (httptest's
@@ -36,7 +43,8 @@ func newPairRig(t *testing.T, cfgYAML, panel string) *pairRig {
 		t.Fatal(err)
 	}
 	proof, _ := enroll.Proof(code)
-	r := &pairRig{path: filepath.Join(t.TempDir(), "pairing.json"), now: time.Unix(1_800_000_000, 0), proof: proof}
+	key, _ := enroll.PairingKey(code)
+	r := &pairRig{path: filepath.Join(t.TempDir(), "pairing.json"), now: time.Unix(1_800_000_000, 0), proof: proof, code: code, key: key}
 	st := enroll.State{Version: 1, Verifier: enroll.Verifier(proof), Panel: panel, CreatedAt: r.now.Unix(),
 		ExpiresAt: r.now.Add(enroll.TTL).Unix()}
 	if err := enroll.WriteState(r.path, st); err != nil {
@@ -329,5 +337,369 @@ func TestPairHandsTheProxmoxTokenOutOnce(t *testing.T) {
 	}
 	if s, _ := enroll.ReadState(r3.path); s.Proxmox != nil {
 		t.Fatal("expired grant kept")
+	}
+}
+
+// ---- pairing v2 (M3) ----
+
+// newPairRigV2 is newPairRig after `fairy-agent join --pair-v2`: the state holds the v2 key and no verifier.
+func newPairRigV2(t *testing.T, cfgYAML, panel string) *pairRig {
+	t.Helper()
+	r := newPairRig(t, cfgYAML, panel)
+	st, err := enroll.ReadState(r.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st.Verifier, st.Key2 = "", hex.EncodeToString(r.key)
+	if err := enroll.WriteState(r.path, st); err != nil {
+		t.Fatal(err)
+	}
+	return r
+}
+
+func postJSON(t *testing.T, url string, body []byte) (int, []byte) {
+	t.Helper()
+	resp, err := http.Post(url+enroll.Path, "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	b, err := io.ReadAll(io.LimitReader(resp.Body, 128<<10))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return resp.StatusCode, b
+}
+
+// panelPairV2 is what a v2 panel does with one request: a new nonce and MAC, POST /pair, and the answer is
+// accepted only when it opens for that request. It never falls back to v1.
+func panelPairV2(t *testing.T, url string, key []byte) (status int, resp enroll.Response, raw []byte, err error) {
+	t.Helper()
+	req, err := enroll.NewRequestV2(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, _ := json.Marshal(req)
+	status, raw = postJSON(t, url, b)
+	if status != 200 {
+		return status, resp, raw, nil
+	}
+	resp, err = enroll.OpenAnswer(key, req, raw)
+	return status, resp, raw, err
+}
+
+func errCode(raw []byte) string {
+	var e struct {
+		Code string `json:"code"`
+	}
+	_ = json.Unmarshal(raw, &e)
+	return e.Code
+}
+
+func TestPairV2Once(t *testing.T) {
+	r := newPairRigV2(t, "power_control: {enabled: true}\n", "127.0.0.1")
+	st, resp, raw, err := panelPairV2(t, r.srv.URL, r.key)
+	if st != 200 || err != nil {
+		t.Fatalf("pair: %d %v %s", st, err, raw)
+	}
+	if resp.Token != readTok || resp.ControlToken != ctlTok || resp.AgentVersion != "test" || !resp.Features["power_control"] {
+		t.Fatalf("opened answer: %+v", resp)
+	}
+	// nothing readable in the answer
+	for _, secret := range []string{readTok, ctlTok, "token", "agent_version", "features"} {
+		if bytes.Contains(raw, []byte(secret)) {
+			t.Fatalf("%q is readable in the v2 answer: %s", secret, raw)
+		}
+	}
+	var m map[string]any
+	if json.Unmarshal(raw, &m) != nil || len(m) != 3 || m["v"] != float64(2) {
+		t.Fatalf("answer shape: %s", raw)
+	}
+	// never again, and the key is gone from the state
+	if st, _, raw, _ := panelPairV2(t, r.srv.URL, r.key); st != 404 || errCode(raw) != "pairing_inactive" {
+		t.Fatalf("second pair: %d %s", st, raw)
+	}
+	s, err := enroll.ReadState(r.path)
+	if err != nil || s.Closed != "paired" || s.Key2 != "" || s.Verifier != "" || s.PairedBy != "127.0.0.1" {
+		t.Fatalf("state after pairing: %+v %v", s, err)
+	}
+	if b, _ := os.ReadFile(r.path); bytes.Contains(b, []byte(hex.EncodeToString(r.key))) {
+		t.Fatal("the pairing key stayed on disk")
+	}
+}
+
+// Downgrade, both ways: the join command chose the version, a request cannot.
+func TestPairVersionIsNotNegotiable(t *testing.T) {
+	// a code stored for v2: the v1 proof OF THE SAME CODE gets nothing, in clear or otherwise
+	r := newPairRigV2(t, "power_control: {enabled: true}\n", "127.0.0.1")
+	for _, body := range []string{`{"proof":"` + r.proof + `"}`, `{"v":1,"proof":"` + r.proof + `"}`, `{"v":3,"proof":"` + r.proof + `"}`} {
+		st, raw := postJSON(t, r.srv.URL, []byte(body))
+		var m map[string]any
+		_ = json.Unmarshal(raw, &m)
+		if st != 400 || m["code"] != "wrong_version" || m["pair"] != float64(2) || bytes.Contains(raw, []byte(readTok)) || m["token"] != nil {
+			t.Fatalf("%s on a v2 code: %d %s", body, st, raw)
+		}
+	}
+	if s, _ := enroll.ReadState(r.path); !s.Active(r.now) || s.Failures != 0 || s.PairVersion() != 2 {
+		t.Fatalf("state: %+v", s)
+	}
+	// the right version still works afterwards
+	if st, resp, _, err := panelPairV2(t, r.srv.URL, r.key); st != 200 || err != nil || resp.Token != readTok {
+		t.Fatalf("v2 after refused v1 requests: %d %v", st, err)
+	}
+
+	// a code stored for v1 (an old panel's command): a v2 request, even with the right key, is refused; v1 works
+	r = newPairRig(t, "", "127.0.0.1")
+	st, _, raw, _ := panelPairV2(t, r.srv.URL, r.key)
+	var m map[string]any
+	_ = json.Unmarshal(raw, &m)
+	if st != 400 || m["code"] != "wrong_version" || m["pair"] != float64(1) {
+		t.Fatalf("v2 request on a v1 code: %d %s", st, raw)
+	}
+	if s, _ := enroll.ReadState(r.path); !s.Active(r.now) || s.Failures != 0 {
+		t.Fatalf("state: %+v", s)
+	}
+	if st, body := r.pair(t, r.proof); st != 200 || body["token"] != readTok {
+		t.Fatalf("v1 on a v1 code: %d %v", st, body)
+	}
+}
+
+func TestPairV2WrongCodeMalformedAndClose(t *testing.T) {
+	r := newPairRigV2(t, "", "127.0.0.1")
+	r.p.limit = newLimiter(1000, time.Minute)
+	// malformed requests are not guesses: 400, not counted
+	good, _ := enroll.NewRequestV2(r.key)
+	for name, q := range map[string]enroll.RequestV2{
+		"short nonce": {V: 2, Nonce: good.Nonce[:8], MAC: good.MAC},
+		"no mac":      {V: 2, Nonce: good.Nonce},
+		"short mac":   {V: 2, Nonce: good.Nonce, MAC: good.MAC[:16]},
+		"no nonce":    {V: 2, MAC: good.MAC},
+	} {
+		b, _ := json.Marshal(q)
+		if st, raw := postJSON(t, r.srv.URL, b); st != 400 || errCode(raw) != "bad_request" {
+			t.Fatalf("%s: %d %s", name, st, raw)
+		}
+	}
+	for _, body := range []string{`{}`, `[]`, `{"v":"2"}`, `{"v":2,"nonce":"!","mac":"!"}`, `not json`, ``} {
+		if st, raw := postJSON(t, r.srv.URL, []byte(body)); st != 400 || errCode(raw) != "bad_request" {
+			t.Fatalf("%q: %d %s", body, st, raw)
+		}
+	}
+	if s, _ := enroll.ReadState(r.path); s.Failures != 0 || !s.Active(r.now) {
+		t.Fatalf("malformed requests were counted: %+v", s)
+	}
+	// a request made with another code: 403, counted, and after enroll.MaxFailures the code is closed
+	other, _ := enroll.NewCode()
+	wrong, _ := enroll.PairingKey(other)
+	for i := 1; i < enroll.MaxFailures; i++ {
+		st, _, raw, _ := panelPairV2(t, r.srv.URL, wrong)
+		if st != 403 || errCode(raw) != "wrong_code" {
+			t.Fatalf("wrong code %d: %d %s", i, st, raw)
+		}
+		if s, _ := enroll.ReadState(r.path); s.Failures != i || !s.Active(r.now) {
+			t.Fatalf("after %d wrong codes: %+v", i, s)
+		}
+	}
+	// a right MAC over another nonce is a wrong MAC
+	forged := enroll.RequestV2{V: 2, Nonce: bytes.Repeat([]byte{7}, enroll.NonceSize), MAC: good.MAC}
+	b, _ := json.Marshal(forged)
+	if st, raw := postJSON(t, r.srv.URL, b); st != 403 || errCode(raw) != "wrong_code" {
+		t.Fatalf("MAC of another nonce: %d %s", st, raw)
+	}
+	if st, _, _, _ := panelPairV2(t, r.srv.URL, r.key); st != 404 {
+		t.Fatalf("after %d wrong codes the right one must not work: %d", enroll.MaxFailures, st)
+	}
+	if s, _ := enroll.ReadState(r.path); s.Closed != "too many wrong codes" || s.Key2 != "" {
+		t.Fatalf("state: %+v", s)
+	}
+}
+
+// Replay. Someone who recorded a panel request and can send from the panel's address gets an answer, but one
+// that only the code opens; an answer recorded earlier is useless against a later request.
+func TestPairV2Replay(t *testing.T) {
+	r := newPairRigV2(t, "power_control: {enabled: true}\n", "127.0.0.1")
+	recorded, _ := enroll.NewRequestV2(r.key) // what the panel sent, seen on the way
+	rb, _ := json.Marshal(recorded)
+	st, raw := postJSON(t, r.srv.URL, rb) // sent again by someone else, before the panel's next request
+	if st != 200 {
+		t.Fatalf("%d %s", st, raw)
+	}
+	if bytes.Contains(raw, []byte(readTok)) || bytes.Contains(raw, []byte(ctlTok)) {
+		t.Fatalf("the replayed request got readable tokens: %s", raw)
+	}
+	other, _ := enroll.NewCode()
+	wrong, _ := enroll.PairingKey(other)
+	if _, err := enroll.OpenAnswer(wrong, recorded, raw); !errors.Is(err, enroll.ErrUnauthentic) {
+		t.Fatalf("opened without the code: %v", err)
+	}
+	// the panel's NEXT request: the recorded answer does not open for it (and the agent is closed: known limit,
+	// the admin makes a new code)
+	next, _ := enroll.NewRequestV2(r.key)
+	if _, err := enroll.OpenAnswer(r.key, next, raw); !errors.Is(err, enroll.ErrUnauthentic) {
+		t.Fatalf("an old answer opened for a new request: %v", err)
+	}
+	if st, _ := postJSON(t, r.srv.URL, rb); st != 404 {
+		t.Fatalf("the same request twice: %d", st)
+	}
+	// two answers to the same request (pairing reopened by a new join) never reuse a key: the nonces differ
+	r2 := newPairRigV2(t, "", "127.0.0.1")
+	r2.key = r.key
+	s, _ := enroll.ReadState(r2.path)
+	s.Key2 = hex.EncodeToString(r.key)
+	if err := enroll.WriteState(r2.path, s); err != nil {
+		t.Fatal(err)
+	}
+	st2, raw2 := postJSON(t, r2.srv.URL, rb)
+	var a1, a2 enroll.AnswerV2
+	if st2 != 200 || json.Unmarshal(raw, &a1) != nil || json.Unmarshal(raw2, &a2) != nil || bytes.Equal(a1.Nonce, a2.Nonce) || bytes.Equal(a1.Sealed, a2.Sealed) {
+		t.Fatalf("same request, two agents: %d %s %s", st2, raw, raw2)
+	}
+}
+
+// Impostor (variant B of the audit): something else answers on the agent's port and does not know the code.
+// Whatever it answers, the panel's side gets an error and no tokens; it is never taken for the machine.
+func TestPairV2ImpostorIsNeverAccepted(t *testing.T) {
+	code, _ := enroll.NewCode()
+	key, _ := enroll.PairingKey(code)
+	// a real answer of the real agent to an earlier request with this code, which the impostor recorded
+	early, _ := enroll.NewRequestV2(key)
+	real, _ := enroll.SealAnswer(key, early, enroll.Response{AgentVersion: "0.6.0", Platform: "linux", Token: readTok})
+	recorded, _ := json.Marshal(real)
+	guess, _ := enroll.PairingKey("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
+
+	answers := map[string]func(body []byte) (int, []byte){
+		"an old agent's answer, tokens in clear": func([]byte) (int, []byte) {
+			b, _ := json.Marshal(enroll.Response{AgentVersion: "0.5.3", Hostname: "nas", Platform: "linux", Features: map[string]bool{}, Token: "impostor-read-token-0123456789"})
+			return 200, b
+		},
+		"the request sent back":  func(body []byte) (int, []byte) { return 200, body },
+		"a recorded real answer": func([]byte) (int, []byte) { return 200, recorded },
+		"a complete answer sealed with another code": func([]byte) (int, []byte) {
+			q, _ := enroll.NewRequestV2(guess)
+			a, _ := enroll.SealAnswer(guess, q, enroll.Response{AgentVersion: "0.6.0", Platform: "linux", Token: "impostor-read-token-0123456789"})
+			b, _ := json.Marshal(a)
+			return 200, b
+		},
+		"random bytes in the v2 shape": func([]byte) (int, []byte) {
+			a := enroll.AnswerV2{V: 2, Nonce: bytes.Repeat([]byte{1}, enroll.NonceSize), Sealed: bytes.Repeat([]byte{2}, 120)}
+			b, _ := json.Marshal(a)
+			return 200, b
+		},
+		"v2 shape with v1 fields": func([]byte) (int, []byte) {
+			return 200, []byte(`{"v":2,"nonce":"AAAAAAAAAAAAAAAAAAAAAA==","sealed":"","token":"impostor-read-token-0123456789","platform":"linux","agent_version":"0.6.0"}`)
+		},
+		"empty 200": func([]byte) (int, []byte) { return 200, nil },
+	}
+	for name, answer := range answers {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			body, _ := io.ReadAll(r.Body)
+			st, b := answer(body)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(st)
+			_, _ = w.Write(b)
+		}))
+		st, resp, raw, err := panelPairV2(t, srv.URL, key)
+		srv.Close()
+		if st != 200 || err == nil || !(errors.Is(err, enroll.ErrNotV2) || errors.Is(err, enroll.ErrUnauthentic)) {
+			t.Errorf("%s: accepted (%d, %v): %s", name, st, err, raw)
+		}
+		if resp.Token != "" || resp.AgentVersion != "" || resp.Platform != "" {
+			t.Errorf("%s: a refused answer returned %+v", name, resp)
+		}
+	}
+	// an agent that only knows v1 (0.5.x) reads a v2 request as "no proof": 400 bad_request, nothing to adopt.
+	// (The real 0.5.3 handler was run against this request outside the test suite; this is its decoding step.)
+	q, _ := enroll.NewRequestV2(key)
+	b, _ := json.Marshal(q)
+	var old enroll.Request
+	if err := json.Unmarshal(b, &old); err != nil || old.Proof != "" {
+		t.Fatalf("%+v %v", old, err)
+	}
+}
+
+// Listener on the path (variant A of the audit): it sees everything that crosses and can send it again.
+func TestPairV2ListenerLearnsNothing(t *testing.T) {
+	r := newPairRigV2(t, "power_control: {enabled: true}\n", "127.0.0.1")
+	target, _ := url.Parse(r.srv.URL)
+	var seen bytes.Buffer
+	proxy := httputil.NewSingleHostReverseProxy(target)
+	proxy.ModifyResponse = func(resp *http.Response) error {
+		b, err := io.ReadAll(resp.Body)
+		seen.Write(b)
+		resp.Body = io.NopCloser(bytes.NewReader(b))
+		return err
+	}
+	tap := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		b, _ := io.ReadAll(req.Body)
+		seen.Write(b)
+		req.Body = io.NopCloser(bytes.NewReader(b))
+		proxy.ServeHTTP(w, req)
+	}))
+	defer tap.Close()
+	st, resp, _, err := panelPairV2(t, tap.URL, r.key)
+	if st != 200 || err != nil || resp.Token != readTok || resp.ControlToken != ctlTok {
+		t.Fatalf("pair through the tap: %d %v", st, err)
+	}
+	for _, secret := range []string{readTok, ctlTok, r.proof, hex.EncodeToString(r.key), strings.ReplaceAll(r.code, "-", "")} {
+		if bytes.Contains(seen.Bytes(), []byte(secret)) {
+			t.Fatalf("the listener saw %q", secret)
+		}
+	}
+	if seen.Len() < 100 {
+		t.Fatalf("the tap recorded nothing: %q", seen.String())
+	}
+}
+
+func TestPairV2KeepsTheCodeWhenNothingWasSent(t *testing.T) {
+	// the agent cannot read its tokens: 500, the code stays usable
+	r := newPairRigV2(t, "", "127.0.0.1")
+	r.p.Tokens = func() (Tokens, error) { return Tokens{}, errors.New("no token file") }
+	if st, _, _, _ := panelPairV2(t, r.srv.URL, r.key); st != 500 {
+		t.Fatalf("want 500, got %d", st)
+	}
+	if s, _ := enroll.ReadState(r.path); !s.Active(r.now) || s.PairVersion() != 2 {
+		t.Fatalf("a failed pairing must keep the code usable: %+v", s)
+	}
+	// a damaged key in the state: 500, never an answer
+	r = newPairRigV2(t, "", "127.0.0.1")
+	s, _ := enroll.ReadState(r.path)
+	s.Key2 = "zz"
+	if err := enroll.WriteState(r.path, s); err != nil {
+		t.Fatal(err)
+	}
+	if st, _, raw, _ := panelPairV2(t, r.srv.URL, r.key); st != 500 || errCode(raw) != "state_unreadable" || bytes.Contains(raw, []byte(readTok)) {
+		t.Fatalf("damaged key: %d %s", st, raw)
+	}
+	// from another address: refused before anything is checked
+	r = newPairRigV2(t, "", "100.88.109.47")
+	if st, _, raw, _ := panelPairV2(t, r.srv.URL, r.key); st != 403 || errCode(raw) != "wrong_address" {
+		t.Fatalf("other address: %d %s", st, raw)
+	}
+	// expired
+	r = newPairRigV2(t, "", "127.0.0.1")
+	r.now = r.now.Add(enroll.TTL + time.Second)
+	if st, _, _, _ := panelPairV2(t, r.srv.URL, r.key); st != 404 {
+		t.Fatalf("expired: %d", st)
+	}
+}
+
+func TestPairV2HandsTheProxmoxTokenOutSealed(t *testing.T) {
+	r := newPairRigV2(t, "", "127.0.0.1")
+	grant := &enroll.ProxmoxGrant{TokenID: "fairy@pve!panel-asus-i7", TokenSecret: "0b7c4e2a-1111-2222-3333-444455556666",
+		CAPEM: "-----BEGIN CERTIFICATE-----\n" + strings.Repeat("QUJD", 500) + "\n-----END CERTIFICATE-----\n", Node: "asus-i7", URL: "https://asus-i7.ts.net:8006", ServerName: "asus-i7"}
+	s, _ := enroll.ReadState(r.path)
+	s.Proxmox = grant
+	if err := enroll.WriteState(r.path, s); err != nil {
+		t.Fatal(err)
+	}
+	st, resp, raw, err := panelPairV2(t, r.srv.URL, r.key)
+	if st != 200 || err != nil || resp.Proxmox == nil || *resp.Proxmox != *grant {
+		t.Fatalf("%d %v %+v", st, err, resp.Proxmox)
+	}
+	if bytes.Contains(raw, []byte(grant.TokenSecret)) || bytes.Contains(raw, []byte("fairy@pve")) {
+		t.Fatalf("the Proxmox token is readable in the answer: %s", raw)
+	}
+	if s, _ := enroll.ReadState(r.path); s.Proxmox != nil || s.Closed != "paired" {
+		t.Fatalf("the token stayed on disk: %+v", s)
 	}
 }

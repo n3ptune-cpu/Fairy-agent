@@ -2,6 +2,7 @@ package main
 
 import (
 	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"flag"
 	"fmt"
@@ -24,7 +25,8 @@ import (
 //   - writes a starter config.yaml when it is missing, and NEW read / control tokens every time (a Re-pair
 //     replaces the old ones, which stop working when the agent restarts: whoever had them loses access),
 //   - switches on the features the panel's dialog asked for, through the same checked edit as `config set`,
-//   - stores the join code's verifier, its expiry and the panel's address in the pairing state,
+//   - stores the join code's verifier (with --pair-v2: the pairing key made from the code, see pkg/enroll
+//     v2.go), its expiry and the panel's address in the pairing state,
 //
 // and prints no secret. The running agent then answers the panel's POST /pair once (see pkg/agent/pairing.go).
 
@@ -33,6 +35,7 @@ type joinOpts struct {
 	powerControl, selfUpdate, wol, ups      bool
 	coreTemp, ipmi                          bool
 	proxmox                                 bool
+	pairV2                                  bool
 	pve                                     *pveHost // nil: the real machine
 }
 
@@ -54,6 +57,7 @@ func parseJoin(args []string, stderr io.Writer) (joinOpts, error) {
 	fs.BoolVar(&o.coreTemp, "coretemp", false, "Windows: CPU core temperatures and watts from Core Temp")
 	fs.BoolVar(&o.ipmi, "ipmi", false, "BMC sensors over IPMI (Supermicro)")
 	fs.BoolVar(&o.proxmox, "proxmox", false, "Proxmox VE node: make a read-only API token for the panel (standalone nodes)")
+	fs.BoolVar(&o.pairV2, "pair-v2", false, "pairing v2: answer the panel encrypted, and only a panel that proves it has this code (the panel's command says so)")
 	if err := fs.Parse(args); err != nil {
 		return o, err
 	}
@@ -173,10 +177,23 @@ func join(o joinOpts, out io.Writer) error {
 	if err := prepareStateDir(o.stateDir); err != nil {
 		return fmt.Errorf("state folder %s: %w", o.stateDir, err)
 	}
-	proof, _ := enroll.Proof(o.code)
 	now := time.Now()
-	st := enroll.State{Version: 1, Verifier: enroll.Verifier(proof), Panel: o.panel, CreatedAt: now.Unix(),
-		ExpiresAt: now.Add(enroll.TTL).Unix()}
+	st := enroll.State{Version: 1, Panel: o.panel, CreatedAt: now.Unix(), ExpiresAt: now.Add(enroll.TTL).Unix()}
+	// The command decides the pairing version, and the state holds only that version's secret: with --pair-v2
+	// the agent never answers the old exchange (tokens in clear) for this code, whatever is asked.
+	if o.pairV2 {
+		key, err := enroll.PairingKey(o.code)
+		if err != nil {
+			return err
+		}
+		st.Key2 = hex.EncodeToString(key)
+	} else {
+		proof, err := enroll.Proof(o.code)
+		if err != nil {
+			return err
+		}
+		st.Verifier = enroll.Verifier(proof)
+	}
 	if o.proxmox {
 		h := realPVEHost()
 		if o.pve != nil {
@@ -205,6 +222,9 @@ func join(o joinOpts, out io.Writer) error {
 		return err
 	}
 	fmt.Fprintf(out, "join code stored: the panel (%s) can pair until %s\n", o.panel, time.Unix(st.ExpiresAt, 0).Format("15:04"))
+	if o.pairV2 {
+		fmt.Fprintln(out, "pairing v2: the tokens go to the panel encrypted, and only to a panel that has this code")
+	}
 	return nil
 }
 
