@@ -15,6 +15,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/n3ptune-cpu/Fairy-agent/pkg/devices"
 	"github.com/n3ptune-cpu/Fairy-agent/pkg/redact"
 )
 
@@ -189,14 +190,63 @@ func (l *Linux) Sample(context.Context) Sample {
 	s.Temps, s.Fans, s.Voltages = l.hwmon(now)
 	s.Power = l.power(now)
 	s.Battery = ReadBatteryStatus(l.sys)
+	cleanSample(&s)
 	return s
+}
+
+// cleanSample leaves out of a sample what cannot be a reading: a value that is not a number, an infinity, or
+// beyond devices.MaxMagnitude (the kernel's files are trusted, but a driver can write "nan", and sums and
+// ratios of large numbers can overflow), a percentage outside 0-100, a negative time. One such value would make
+// the whole /metrics answer impossible to write. The sensor lists are cleaned where they are read (hwmon).
+func cleanSample(s *Sample) {
+	s.CPUPercent = devices.NumIn(s.CPUPercent, 0, 100)
+	if s.UptimeS != nil && *s.UptimeS < 0 {
+		s.UptimeS = nil
+	}
+	for _, v := range s.LoadAvg {
+		if !(v >= 0 && devices.Finite(v)) {
+			s.LoadAvg = nil
+			break
+		}
+	}
+	s.Power.CPUPackageW, s.Power.GPUW = devices.Num(s.Power.CPUPackageW), devices.Num(s.Power.GPUW)
+	s.Power.BatteryW, s.Power.BMCW = devices.Num(s.Power.BatteryW), devices.Num(s.Power.BMCW)
+	if b := s.Battery; b != nil {
+		b.Percent, b.HealthPct = devices.NumIn(b.Percent, 0, 100), devices.NumIn(b.HealthPct, 0, devices.MaxMagnitude)
+		b.PowerW = devices.Num(b.PowerW)
+		if b.TimeRemainingS != nil && *b.TimeRemainingS < 0 {
+			b.TimeRemainingS = nil
+		}
+	}
+}
+
+// cleanSensors returns the sensor lists without the entries whose value is not a possible number.
+func cleanSensors(temps []Temp, fans []Fan, volts []Voltage) ([]Temp, []Fan, []Voltage) {
+	t, f, v := make([]Temp, 0, len(temps)), make([]Fan, 0, len(fans)), make([]Voltage, 0, len(volts))
+	for _, x := range temps {
+		if devices.Finite(x.Current) {
+			x.High, x.Critical = devices.Num(x.High), devices.Num(x.Critical)
+			t = append(t, x)
+		}
+	}
+	for _, x := range fans {
+		if devices.Finite(x.RPM) && x.RPM >= 0 {
+			f = append(f, x)
+		}
+	}
+	for _, x := range volts {
+		if devices.Finite(x.Volts) {
+			v = append(v, x)
+		}
+	}
+	return t, f, v
 }
 
 func (l *Linux) hwmon(now time.Time) ([]Temp, []Fan, []Voltage) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if l.sensors[0] == nil || now.Sub(l.sensorsAt) >= 2*time.Second {
-		t, f, v := ReadHwmon(l.sys)
+		t, f, v := cleanSensors(ReadHwmon(l.sys))
 		l.sensors, l.sensorsAt = [3]any{t, f, v}, now
 	}
 	return l.sensors[0].([]Temp), l.sensors[1].([]Fan), l.sensors[2].([]Voltage)
@@ -267,13 +317,16 @@ func (l *Linux) power(now time.Time) Power {
 	}
 	sort.Strings(names)
 	for _, n := range names {
+		if !devices.Finite(watts[n]) {
+			continue
+		}
 		p.Sensors = append(p.Sensors, PowerSensor{Name: "rapl " + n, Watts: watts[n]})
 		if n != "psys" {
 			pkg += watts[n]
-			p.CPUPackageW = P(Round(pkg, 1))
+			p.CPUPackageW = P(Round(pkg, 1)) // the sum is checked in cleanSample
 		}
 	}
-	if len(names) > 0 {
+	if len(p.Sensors) > 0 {
 		p.Source = append(p.Source, "rapl")
 	}
 	if b, ok := ReadBattery(l.sys); ok {

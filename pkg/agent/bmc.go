@@ -10,6 +10,7 @@ import (
 
 	"github.com/n3ptune-cpu/Fairy-agent/pkg/agent/collect"
 	"github.com/n3ptune-cpu/Fairy-agent/pkg/agent/ipmi"
+	"github.com/n3ptune-cpu/Fairy-agent/pkg/devices"
 )
 
 // BMC reads the board's sensors over IPMI in the background: the sensor list (SDR) once, then the readings every
@@ -98,16 +99,21 @@ func (b *BMC) Readings() []ipmi.Reading {
 }
 
 // Metrics converts the readings to the /metrics shapes (sensor "IPMI"; fans and voltages prefixed "IPMI").
+// A reading that is not a possible number (the conversion formulas of a broken sensor record can give NaN or
+// an infinity) is left out: one of them would make the whole /metrics answer impossible to write.
 func (b *BMC) Metrics() ([]collect.Temp, []collect.Fan, []collect.Voltage) {
 	var temps []collect.Temp
 	var fans []collect.Fan
 	var volts []collect.Voltage
 	for _, r := range b.Readings() {
+		if !devices.Finite(r.Value) {
+			continue
+		}
 		name := r.Sensor.Name
 		switch r.Sensor.Type {
 		case ipmi.TypeTemperature:
 			t := collect.Temp{Sensor: "IPMI", Label: collect.P(name), Current: collect.Round(r.Value, 1)}
-			if c := r.Sensor.UpperCritical(); c != nil && *c > 0 {
+			if c := r.Sensor.UpperCritical(); c != nil && *c > 0 && devices.Finite(*c) {
 				t.Critical = collect.P(collect.Round(*c, 1))
 			}
 			temps = append(temps, t)
@@ -120,11 +126,12 @@ func (b *BMC) Metrics() ([]collect.Temp, []collect.Fan, []collect.Voltage) {
 	return temps, fans, volts
 }
 
-// FanList is the fans for /fan/status (names as the BMC calls them: FAN1, FANA ...).
+// FanList is the fans for /fan/status (names as the BMC calls them: FAN1, FANA ...), without readings that
+// are not possible numbers.
 func (b *BMC) FanList() []collect.Fan {
 	fans := []collect.Fan{}
 	for _, r := range b.Readings() {
-		if r.Sensor.Type == ipmi.TypeFan {
+		if r.Sensor.Type == ipmi.TypeFan && devices.Finite(r.Value) {
 			fans = append(fans, collect.Fan{Name: r.Sensor.Name, RPM: r.Value})
 		}
 	}

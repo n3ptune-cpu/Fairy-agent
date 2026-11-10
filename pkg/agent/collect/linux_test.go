@@ -5,6 +5,8 @@ package collect
 import (
 	"bytes"
 	"context"
+	"encoding/json"
+	"math"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -178,5 +180,104 @@ func TestReadCmdline(t *testing.T) {
 	}
 	if a := cmdlineArgs(nil); a != nil {
 		t.Error(a)
+	}
+}
+
+// Audit 3, I35: the agent's own sources are trusted, but a driver can still report "nan" or "inf", and one such
+// value made the whole /metrics answer impossible to write. The sample leaves them out and keeps the rest.
+func TestSampleDropsImpossibleReadings(t *testing.T) {
+	l := fakeProc(t, nil)
+	write := func(path, data string) {
+		t.Helper()
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write(filepath.Join(l.proc, "loadavg"), "nan 0.50 0.10 1/100 4242\n")
+	write(filepath.Join(l.proc, "uptime"), "-5.00 1.00\n")
+	write(filepath.Join(l.proc, "meminfo"), "MemTotal: 16000000 kB\nMemAvailable: 8000000 kB\n")
+	hw := filepath.Join(l.sys, "class", "hwmon", "hwmon0")
+	write(filepath.Join(hw, "name"), "k10temp\n")
+	for file, v := range map[string]string{
+		"temp1_input": "nan", "temp1_label": "Tctl",
+		"temp2_input": "45000", "temp2_label": "Tccd1", "temp2_max": "nan", "temp2_crit": "95000",
+		"temp3_input": "inf", "temp4_input": "-inf", "temp5_input": "1e400", "temp6_input": "9e20",
+		"fan1_input": "nan", "fan1_label": "cpu", "fan2_input": "1200", "fan2_label": "rear", "fan3_input": "inf", "fan3_label": "x",
+		"fan4_input": "-1", "fan4_label": "y",
+		"in0_input": "inf", "in1_input": "12000", "in2_input": "nan",
+	} {
+		write(filepath.Join(hw, file), v+"\n")
+	}
+	bat := filepath.Join(l.sys, "class", "power_supply", "BAT0")
+	for file, v := range map[string]string{"type": "Battery", "status": "Discharging", "capacity": "nan", "energy_now": "1e308",
+		"energy_full": "1e308", "energy_full_design": "1e308", "power_now": "nan"} {
+		write(filepath.Join(bat, file), v+"\n")
+	}
+	bat1 := filepath.Join(l.sys, "class", "power_supply", "BAT1") // two batteries: their sums overflow
+	for file, v := range map[string]string{"type": "Battery", "status": "Discharging", "energy_now": "1e308",
+		"energy_full": "1e308", "energy_full_design": "1e308"} {
+		write(filepath.Join(bat1, file), v+"\n")
+	}
+
+	s := l.Sample(context.Background())
+	if _, err := json.Marshal(s); err != nil {
+		t.Fatalf("the sample cannot be written: %v\n%+v", err, s)
+	}
+	if s.LoadAvg != nil || s.UptimeS != nil {
+		t.Errorf("load %v uptime %v", s.LoadAvg, s.UptimeS)
+	}
+	if len(s.Temps) != 1 || s.Temps[0].Current != 45 || *s.Temps[0].Label != "Tccd1" || s.Temps[0].High != nil || *s.Temps[0].Critical != 95 {
+		t.Errorf("temps %+v", s.Temps)
+	}
+	if len(s.Fans) != 1 || s.Fans[0].RPM != 1200 || len(s.Voltages) != 1 || s.Voltages[0].Volts != 12 {
+		t.Errorf("fans %+v voltages %+v", s.Fans, s.Voltages)
+	}
+	if s.Battery == nil || s.Battery.State != "discharging" || s.Battery.Percent != nil || s.Battery.HealthPct != nil || s.Battery.PowerW != nil {
+		t.Errorf("battery %+v", s.Battery)
+	}
+	if s.Power.BatteryW != nil || s.Memory.Total != 16000000<<10 {
+		t.Errorf("power %+v memory %+v", s.Power, s.Memory)
+	}
+
+	// good values pass unchanged
+	write(filepath.Join(l.proc, "loadavg"), "1.25 0.50 0.10 1/100 4242\n")
+	write(filepath.Join(l.proc, "uptime"), "86400.55 1.00\n")
+	s = l.Sample(context.Background())
+	if len(s.LoadAvg) != 3 || s.LoadAvg[0] != 1.25 || s.UptimeS == nil || *s.UptimeS != 86400 {
+		t.Errorf("load %v uptime %v", s.LoadAvg, s.UptimeS)
+	}
+}
+
+func TestCleanSample(t *testing.T) {
+	nan, inf, big := math.NaN(), math.Inf(1), 1e308
+	s := Sample{CPUPercent: &nan, UptimeS: P(int64(-1)), LoadAvg: []float64{0.1, inf, 0.3},
+		Power:   Power{CPUPackageW: &inf, GPUW: &big, BatteryW: &nan, BMCW: P(180.0)},
+		Battery: &BatteryStatus{Percent: P(250.0), HealthPct: &nan, PowerW: &inf, TimeRemainingS: P(int64(-9))}}
+	cleanSample(&s)
+	if s.CPUPercent != nil || s.UptimeS != nil || s.LoadAvg != nil || s.Power.CPUPackageW != nil || s.Power.GPUW != nil ||
+		s.Power.BatteryW != nil || *s.Power.BMCW != 180 || s.Battery.Percent != nil || s.Battery.HealthPct != nil ||
+		s.Battery.PowerW != nil || s.Battery.TimeRemainingS != nil {
+		t.Fatalf("%+v %+v", s, s.Battery)
+	}
+	if _, err := json.Marshal(s); err != nil {
+		t.Fatal(err)
+	}
+	ok := Sample{CPUPercent: P(12.5), UptimeS: P(int64(600)), LoadAvg: []float64{0, 0.2, 0.3},
+		Power:   Power{CPUPackageW: P(45.5), BatteryW: P(-12.0)},
+		Battery: &BatteryStatus{Percent: P(100.0), HealthPct: P(103.2), PowerW: P(-30.0), TimeRemainingS: P(int64(0))}}
+	cleanSample(&ok)
+	if *ok.CPUPercent != 12.5 || *ok.UptimeS != 600 || len(ok.LoadAvg) != 3 || *ok.Power.CPUPackageW != 45.5 || *ok.Power.BatteryW != -12 ||
+		*ok.Battery.Percent != 100 || *ok.Battery.HealthPct != 103.2 || *ok.Battery.PowerW != -30 || *ok.Battery.TimeRemainingS != 0 {
+		t.Fatalf("good values changed: %+v %+v", ok, ok.Battery)
+	}
+	t1, f1, v1 := cleanSensors(
+		[]Temp{{Sensor: "a", Current: nan}, {Sensor: "b", Current: 40, High: &inf, Critical: P(90.0)}, {Sensor: "c", Current: big}},
+		[]Fan{{Name: "a", RPM: inf}, {Name: "b", RPM: 900}, {Name: "c", RPM: 0}},
+		[]Voltage{{Name: "a", Volts: -inf}, {Name: "b", Volts: 3.3}})
+	if len(t1) != 1 || t1[0].Sensor != "b" || t1[0].High != nil || *t1[0].Critical != 90 || len(f1) != 2 || len(v1) != 1 || v1[0].Volts != 3.3 {
+		t.Fatalf("%+v %+v %+v", t1, f1, v1)
 	}
 }

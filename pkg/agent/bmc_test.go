@@ -2,9 +2,11 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"math"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/n3ptune-cpu/Fairy-agent/pkg/agent/collect"
 	"github.com/n3ptune-cpu/Fairy-agent/pkg/agent/ipmi"
@@ -73,5 +75,34 @@ func TestWatchdogWithNaNReading(t *testing.T) {
 	last, _ := ev[len(ev)-1].(map[string]any)
 	if !strings.Contains(last["action"].(string), "watchdog") || !strings.Contains(last["detail"].(string), "CPU2 Temp 95.0") {
 		t.Errorf("event %v", last)
+	}
+}
+
+// Audit 3, I35 / M2: a BMC reading that is not a possible number is left out of /metrics and /fan/status
+// instead of making the whole answer impossible to write.
+func TestBMCMetricsDropImpossibleReadings(t *testing.T) {
+	rd := func(name string, typ byte, v float64) ipmi.Reading {
+		return ipmi.Reading{Sensor: ipmi.Sensor{Name: name, Type: typ}, Value: v}
+	}
+	b := NewBMC(nil, 10*time.Second)
+	b.readings = []ipmi.Reading{
+		rd("CPU Temp", ipmi.TypeTemperature, math.NaN()), rd("System Temp", ipmi.TypeTemperature, 35),
+		rd("PCH Temp", ipmi.TypeTemperature, math.Inf(1)), rd("VRM Temp", ipmi.TypeTemperature, 1e308),
+		rd("FAN1", ipmi.TypeFan, math.Inf(1)), rd("FAN2", ipmi.TypeFan, 1100), rd("FAN3", ipmi.TypeFan, math.NaN()),
+		rd("12V", ipmi.TypeVoltage, math.Inf(-1)), rd("5VCC", ipmi.TypeVoltage, 5.02), rd("VBAT", ipmi.TypeVoltage, math.NaN()),
+	}
+	b.readAt = time.Now()
+	temps, fans, volts := b.Metrics()
+	if len(temps) != 1 || temps[0].Current != 35 || *temps[0].Label != "System Temp" || len(fans) != 1 || fans[0].RPM != 1100 ||
+		len(volts) != 1 || volts[0].Volts != 5.02 {
+		t.Fatalf("%+v %+v %+v", temps, fans, volts)
+	}
+	if fl := b.FanList(); len(fl) != 1 || fl[0].Name != "FAN2" {
+		t.Fatalf("%+v", fl)
+	}
+	for _, v := range []any{temps, fans, volts, b.FanList()} {
+		if _, err := json.Marshal(v); err != nil {
+			t.Fatal(err)
+		}
 	}
 }
