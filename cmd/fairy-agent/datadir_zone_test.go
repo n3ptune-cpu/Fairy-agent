@@ -21,21 +21,21 @@ import (
 	"testing"
 )
 
-// racingFS runs a hook before every look (Stat, List): the agent's account, acting between two calls.
-type racingFS struct {
+// watchedFS runs a hook before every look (Stat, List): the agent's account, acting between two calls.
+type watchedFS struct {
 	*fakeFS
 	onStat func(path string)
 	onList func(dir string)
 }
 
-func (r *racingFS) Stat(path string) (secObj, error) {
+func (r *watchedFS) Stat(path string) (secObj, error) {
 	if r.onStat != nil {
 		r.onStat(path)
 	}
 	return r.fakeFS.Stat(path)
 }
 
-func (r *racingFS) List(dir string) ([]string, error) {
+func (r *watchedFS) List(dir string) ([]string, error) {
 	if r.onList != nil {
 		r.onList(dir)
 	}
@@ -163,7 +163,7 @@ func TestRepairWalkDoesNotFollowAFolderThatBecameALink(t *testing.T) {
 	p.fs.sddl[filepath.Join(zz, "Fairy", "fairy-agent.exe")] = "O:BAD:AI(A;ID;FA;;;SY)(A;ID;FA;;;BA)(A;ID;0x1200a9;;;BU)"
 
 	flipped := false
-	fs := &racingFS{fakeFS: p.fs}
+	fs := &watchedFS{fakeFS: p.fs}
 	fs.onStat = func(path string) {
 		if path == bait && !flipped { // the walk is inside logs\aaa; logs\zz was looked at a moment ago
 			flipped = true
@@ -257,7 +257,7 @@ func TestJunctionSwappedInBetweenCheckAndUse(t *testing.T) {
 					target = filepath.Dir(out.secret)
 				}
 				count, done := 0, false
-				fs := &racingFS{fakeFS: p.fs}
+				fs := &watchedFS{fakeFS: p.fs}
 				flip := func(string) {
 					if count++; count != n || done {
 						return
@@ -364,7 +364,7 @@ func TestFileReplacedByAFolder(t *testing.T) {
 				out := newOutside(t, p)
 				victim := filepath.Join(p.dir, filepath.FromSlash(rel))
 				count := 0
-				fs := &racingFS{fakeFS: p.fs}
+				fs := &watchedFS{fakeFS: p.fs}
 				flip := func(path string) {
 					if path != victim && path != filepath.Dir(victim) {
 						return
@@ -646,7 +646,7 @@ func TestEnsureNeverGoesInsideAnAgentFolder(t *testing.T) {
 		}
 	}
 	looked := 0
-	fs := &racingFS{fakeFS: p.fs}
+	fs := &watchedFS{fakeFS: p.fs}
 	fs.onList = func(string) { looked++ }
 	fs.onStat = func(path string) {
 		if path != state {
