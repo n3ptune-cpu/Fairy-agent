@@ -1249,6 +1249,25 @@ func fillDataDir(cfgPath string, rep dirReport, out io.Writer) error {
 	return nil
 }
 
+// repairOrRemoveService is the data folder step of a first `install`. The service has to exist before the
+// folder is repaired (the folder's permissions name the service's account, which Windows creates with the
+// service), and it starts with Windows. So when the repair fails, the service is removed again: left
+// installed, it would start at the next boot on a data folder that could not be made safe, with whatever
+// config.yaml and tokens are in it. Whoever prepared the folder can make the repair fail (a file held open
+// keeps the folder from being moved aside).
+func repairOrRemoveService(service string, repair, removeService func() error) error {
+	err := repair()
+	if err == nil {
+		return nil
+	}
+	if rerr := removeService(); rerr != nil {
+		return fmt.Errorf("%w. The %s service was created before that and could NOT be removed again (%v): it starts with Windows, "+
+			"on a data folder that is not safe. Remove it: & \"C:\\Program Files\\Fairy\\fairy-agent.exe\" uninstall", err, service, rerr)
+	}
+	return fmt.Errorf("%w. The %s service, created a moment ago, was removed again (it would have started with Windows on a data folder "+
+		"that is not safe). Run the installer once more when this is solved", err, service)
+}
+
 // rewriteMax is the largest file rewriteFile copies (config.yaml and the secrets file are a few KB).
 const rewriteMax = 4 << 20
 

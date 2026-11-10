@@ -258,7 +258,14 @@ func install(cfgPath, account string, withHelper bool) error {
 	// The data folder: created with its final permissions, or, when something is already there, checked file
 	// by file and repaired (setupFolders). A starter config.yaml and the tokens are written when missing;
 	// existing ones are kept unless they could not be trusted.
-	if err := setupFolders(cfgPath); err != nil {
+	// When that fails, the service created above is removed again (repairOrRemoveService says why).
+	if err := repairOrRemoveService(serviceName, func() error { return setupFolders(cfgPath) }, func() error {
+		if err := s.Delete(); err != nil {
+			return err
+		}
+		_ = eventlog.Remove(serviceName)
+		return nil
+	}); err != nil {
 		return err
 	}
 	if err := setup(cfgPath, withHelper, false); err != nil {

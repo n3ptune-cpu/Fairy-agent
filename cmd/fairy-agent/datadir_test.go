@@ -1124,3 +1124,42 @@ func TestInheritOnlyEntryIsNotTrusted(t *testing.T) {
 	}
 	p.usable(t)
 }
+
+// N4 (review of the Windows side): a first `install` creates the service (it starts with Windows) and then
+// repairs the data folder. When the repair failed, the service stayed: at the next boot the agent started on
+// the folder someone else had prepared, with their config.yaml and tokens. Now the service is removed again.
+func TestFailedFirstInstallRemovesTheService(t *testing.T) {
+	// the repair fails for real: a prepared folder that cannot be moved aside (its planter holds a file open)
+	p := newPC(t)
+	p.put(t, "", sddlUserMadeDir, "")
+	p.put(t, "config.yaml", sddlPlantedFile, "power_control:\n  enabled: true\n")
+	p.fs.moveErr = errors.New("Access is denied.")
+	repair := func() error { _, err := repairDataDir(p.fs, p.cfgPath, tSvc); return err }
+	removed := 0
+	err := repairOrRemoveService("fairy-agent", repair, func() error { removed++; return nil })
+	if err == nil || removed != 1 {
+		t.Fatalf("the service was removed %d times, error %v", removed, err)
+	}
+	for _, want := range []string{"owned by " + tUser, "Stop-Service", "fairy-agent service, created a moment ago, was removed again", "Run the installer once more"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the message does not say %q: %v", want, err)
+		}
+	}
+	// the service cannot be removed either: the administrator is told, with what to run
+	gone := errors.New("The specified service has been marked for deletion.")
+	err = repairOrRemoveService("fairy-agent", repair, func() error { return gone })
+	if err == nil || !strings.Contains(err.Error(), "could NOT be removed") || !strings.Contains(err.Error(), "fairy-agent.exe\" uninstall") ||
+		!strings.Contains(err.Error(), gone.Error()) || !strings.Contains(err.Error(), "owned by "+tUser) {
+		t.Fatal(err)
+	}
+	// a repair that works leaves the service alone (also when it had something to repair)
+	p.fs.moveErr = nil
+	if err := repairOrRemoveService("fairy-agent", repair, func() error { t.Error("the service was removed after a repair that worked"); return nil }); err != nil {
+		t.Fatal(err)
+	}
+	// errors.Is still finds the repair's own error
+	inner := errors.New("inner")
+	if err := repairOrRemoveService("x", func() error { return inner }, func() error { return nil }); !errors.Is(err, inner) {
+		t.Fatal(err)
+	}
+}
