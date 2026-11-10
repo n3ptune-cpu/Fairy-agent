@@ -303,10 +303,29 @@ func TestDutyRefusedWhileHot(t *testing.T) {
 	if st, body := duty(35); st != 200 {
 		t.Fatal(st, body)
 	}
-	// the watchdog's "no temperature" 100 % starts the hold-off as well
+	// no temperature at all: nothing below 100 % is accepted (before, the watchdog undid it 30 s later)
+	r.fan.localTemps = func() []collect.Temp { return nil }
+	if st, body := duty(35); st != 409 || body["code"] != "fan_no_temperature" {
+		t.Fatal("no temperature: refused", st, body)
+	}
+	if st, body := duty(100); st != 200 {
+		t.Fatal("no temperature: 100 % accepted", st, body)
+	}
+	if st, body := r.do(t, "POST", "/fan/duty", ctlTok, map[string]any{"zone": 1, "percent": 100}); st != 200 {
+		t.Fatal(st, body)
+	}
+	// the watchdog's "no temperature" 100 % starts the hold-off as well (a duty set while there was a reading)
+	r.fan.localTemps = func() []collect.Temp { return cores(40) }
+	clock = clock.Add(time.Hour)
+	if st, body := duty(35); st != 200 {
+		t.Fatal(st, body)
+	}
 	r.fan.localTemps = func() []collect.Temp { return nil }
 	for i := 0; i < 3; i++ {
 		r.fan.WatchdogOnce(ctx)
+	}
+	if _, d := r.bmc.State(); d != [2]byte{100, 100} {
+		t.Fatal(d)
 	}
 	r.fan.localTemps = func() []collect.Temp { return cores(40) }
 	if st, body := duty(35); st != 409 || body["code"] != "fan_watchdog_hold" {
@@ -315,26 +334,27 @@ func TestDutyRefusedWhileHot(t *testing.T) {
 }
 
 // L17 with L35's MaxCPUTemp (which leaves out a reading that is not a number): a CPU sensor that reports NaN or
-// -Inf is still not "below the limit", also next to a cool sensor that is not the CPU's. With no sensor at all
-// the request is accepted as before (the watchdog's 30 s rule covers that case).
+// -Inf is still not "below the limit", also next to a cool sensor that is not the CPU's (code "fan_too_hot").
+// With no sensor at all the request is refused as well, with the code "fan_no_temperature".
 func TestDutyRefusedWhenTheCPUReadingIsUnusable(t *testing.T) {
 	board := collect.Temp{Sensor: "acpitz", Current: 35}
 	for name, tc := range map[string]struct {
 		temps []collect.Temp
 		want  int
+		code  string
 	}{
-		"NaN only":             {cores(math.NaN()), 409},
-		"-Inf only":            {cores(math.Inf(-1)), 409},
-		"NaN CPU, cool board":  {append(cores(math.NaN()), board), 409},
-		"NaN and a cool core":  {cores(math.NaN(), 40), 200},
-		"cool board only":      {[]collect.Temp{board}, 200},
-		"no temperature known": {nil, 200},
+		"NaN only":             {cores(math.NaN()), 409, "fan_too_hot"},
+		"-Inf only":            {cores(math.Inf(-1)), 409, "fan_too_hot"},
+		"NaN CPU, cool board":  {append(cores(math.NaN()), board), 409, "fan_too_hot"},
+		"NaN and a cool core":  {cores(math.NaN(), 40), 200, ""},
+		"cool board only":      {[]collect.Temp{board}, 200, ""},
+		"no temperature known": {nil, 409, "fan_no_temperature"},
 	} {
 		r := manualRig(t, 40)
 		r.fan.localTemps = func() []collect.Temp { return tc.temps }
 		st, body := r.fan.SetDuty(context.Background(), 0, 35, "test")
-		if st != tc.want || (st == 409 && body["code"] != "fan_too_hot") {
-			t.Errorf("%s: %d %v, want %d", name, st, body, tc.want)
+		if st != tc.want || (st == 409 && body["code"] != tc.code) {
+			t.Errorf("%s: %d %v, want %d %s", name, st, body, tc.want, tc.code)
 		}
 		if _, d := r.bmc.State(); st == 409 && d[0] != 40 {
 			t.Errorf("%s: a refused request changed the fans: %v", name, d)

@@ -113,8 +113,15 @@ func TestRunStopHandsFansBack(t *testing.T) {
 		t.Fatal(st)
 	}
 	for _, z := range []string{"0", "1"} {
-		if st := ctlPost(t, addr, "/fan/duty", `{"zone":`+z+`,"percent":30}`); st != 200 {
-			t.Fatal(st)
+		// 409 until the BMC's sensors have been read once (a duty needs a temperature reading)
+		for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(10 * time.Millisecond) {
+			st := ctlPost(t, addr, "/fan/duty", `{"zone":`+z+`,"percent":30}`)
+			if st == 200 {
+				break
+			}
+			if st != 409 || time.Now().After(deadline) {
+				t.Fatal(st)
+			}
 		}
 	}
 	if m, d := bmc.State(); m != modeFull || d != [2]byte{30, 30} {

@@ -107,6 +107,12 @@ func (r *rig) setManual(t *testing.T, pct int) {
 	}
 }
 
+// leftManual puts the BMC in mode "full" with both zones at pct, as a duty set earlier (while there was a
+// temperature reading) leaves it. Only for a rig without the BMC reader: nothing else touches the fake then.
+func (r *rig) leftManual(pct byte) {
+	r.bmc.Mode, r.bmc.Duty = 1, [2]byte{pct, pct}
+}
+
 func itoa(i int) string { b, _ := json.Marshal(i); return string(b) }
 
 func TestRejectsUnknownVerbsAndBadParams(t *testing.T) {
@@ -198,7 +204,15 @@ func TestWatchdogAt80C(t *testing.T) {
 
 func TestWatchdogWithoutTemperatureFor30s(t *testing.T) {
 	r := newRig(t, false, fanCfg) // no BMC readings, no Core Temp: no temperature at all
-	r.setManual(t, 40)
+	if resp := r.call(t, `{"v":1,"verb":"fan_mode","mode":"full","by":"test"}`); resp.Status != 200 {
+		t.Fatal(resp)
+	}
+	// without a temperature nothing below 100 % is accepted any more ...
+	if resp := r.call(t, `{"v":1,"verb":"fan_set","zone":0,"percent":40,"by":"test"}`); resp.Status != 409 || r.duty(t, 0) != 100 {
+		t.Fatal("a duty was accepted without any temperature:", resp, r.duty(t, 0))
+	}
+	// ... so the case left for the watchdog is a duty set while there still was one
+	r.leftManual(40)
 	if agent.WatchdogInterval != 10*time.Second {
 		t.Fatal("the watchdog checks every 10 s; 3 checks = 30 s")
 	}
@@ -229,7 +243,7 @@ func TestWatchdogUsesCoreTemp(t *testing.T) {
 }
 
 func TestShutdownHandsFansBackToTheBMC(t *testing.T) {
-	r := newRig(t, false, fanCfg)
+	r := newRig(t, true, fanCfg)
 	r.setManual(t, 50)
 	r.srv.Shutdown(context.Background())
 	if m := r.mode(t); m != "optimal" {
@@ -239,7 +253,7 @@ func TestShutdownHandsFansBackToTheBMC(t *testing.T) {
 		t.Fatal(r.audit.String())
 	}
 	// a board without "optimal": standard instead
-	r2 := newRig(t, false, fanCfg)
+	r2 := newRig(t, true, fanCfg)
 	r2.bmc.RefuseMode(2, 0xCC)
 	r2.setManual(t, 50)
 	r2.srv.Shutdown(context.Background())

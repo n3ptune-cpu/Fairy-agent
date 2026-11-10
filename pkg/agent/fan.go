@@ -168,9 +168,9 @@ func (f *Fan) SetMode(ctx context.Context, mode, who string) (int, map[string]an
 const FanHoldOff = 5 * time.Minute
 
 // dutyRefusal says why a duty below 100 % cannot be set now ("" when it can): the hottest CPU reading is at or
-// above MaxTempC (or is not a number), or the watchdog acted less than FanHoldOff ago. Without this a request
-// for the minimum right after the watchdog's 100 % was accepted, and repeating it kept the fans low while the
-// CPU stayed over the limit. Caller holds f.mu.
+// above MaxTempC (or is not a number), there is no temperature reading at all, or the watchdog acted less than
+// FanHoldOff ago. Without this a request for the minimum right after the watchdog's 100 % was accepted, and
+// repeating it kept the fans low while the CPU stayed over the limit. Caller holds f.mu.
 func (f *Fan) dutyRefusal() (code, msg string) {
 	if !f.actedAt.IsZero() {
 		if left := FanHoldOff - f.now().Sub(f.actedAt); left > 0 {
@@ -193,6 +193,8 @@ func (f *Fan) dutyRefusal() (code, msg string) {
 		if name, v, bad := unusableTemp(readings, local); bad {
 			return "fan_too_hot", tooHot(name, v, f.cfg.MaxTempC) + ": only 100 % is accepted until it reads a temperature"
 		}
+		return "fan_no_temperature", "no temperature reading (neither from the BMC nor from the operating system; " +
+			"right after a start the BMC's sensors take a moment): only 100 % is accepted until there is one"
 	}
 	return "", ""
 }
