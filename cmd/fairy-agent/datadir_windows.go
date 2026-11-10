@@ -44,6 +44,34 @@ func init() {
 	// the helper (LocalSystem) checks config.yaml and its folder before it serves what that file switches on
 	// (its own folder helper\ is checked where it is used: the log and the record of a pending shutdown)
 	helper.TrustedConfig = func(cfgPath string) error { return trustedDataDir(cfgPath) }
+	// join writes the pairing state relative to the opened state folder (datadir_state.go)
+	writeStateIn = writePairingState
+	folderItself = openFolderItself
+}
+
+// openFolderItself opens dir itself (FILE_FLAG_OPEN_REPARSE_POINT: a junction is opened as the junction, not
+// followed), refuses a link, and returns the folder's identity (volume and file id) as read from that handle.
+// The handle stays open until done: while it is, no other folder can get that file id.
+func openFolderItself(dir string) (os.FileInfo, func(), error) {
+	h, info, err := openObject(dir, windows.FILE_READ_ATTRIBUTES)
+	if err != nil {
+		return nil, nil, err
+	}
+	f := os.NewFile(uintptr(h), dir) // owns the handle from here
+	if f == nil {
+		windows.CloseHandle(h)
+		return nil, nil, fmt.Errorf("%s: cannot use the opened folder", dir)
+	}
+	if isLink(info) || info.FileAttributes&windows.FILE_ATTRIBUTE_DIRECTORY == 0 {
+		f.Close()
+		return nil, nil, fmt.Errorf("%s is not a plain folder (a link, or a file): nothing was written%s", dir, repairHint)
+	}
+	fi, err := f.Stat()
+	if err != nil {
+		f.Close()
+		return nil, nil, &os.PathError{Op: "stat", Path: dir, Err: err}
+	}
+	return fi, func() { f.Close() }, nil
 }
 
 // agentSIDString is the agent's service SID ("" while the service does not exist).

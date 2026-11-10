@@ -271,6 +271,8 @@ func join(o joinOpts, out io.Writer) error {
 	path := filepath.Join(o.stateDir, "pairing.json")
 	if uid, gid, ok := agentIDs(); ok {
 		err = enroll.WriteStateOwned(path, st, uid, gid)
+	} else if writeStateIn != nil { // Windows: relative to the opened state folder, see datadir_state.go
+		err = writeStateIn(o.stateDir, st)
 	} else {
 		err = enroll.WriteState(path, st)
 	}
