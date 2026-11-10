@@ -53,7 +53,7 @@ func TestJoinStateNeverFollowsALink(t *testing.T) {
 	}
 	code, _ := enroll.NewCode()
 	var out bytes.Buffer
-	o := joinOpts{code: code, panel: "100.88.109.47", cfgPath: filepath.Join(dir, "config.yaml"), stateDir: state}
+	o := joinOpts{code: code, panel: "100.64.0.10", cfgPath: filepath.Join(dir, "config.yaml"), stateDir: state}
 	if err := join(o, &out); err != nil {
 		t.Fatal(err, out.String())
 	}
@@ -73,7 +73,7 @@ func TestJoinStateNeverFollowsALink(t *testing.T) {
 	if u, g := fileOwner(t, state); u != uid || g != gid {
 		t.Fatalf("state folder owner %d:%d, want the agent %d:%d", u, g, uid, gid)
 	}
-	if st, err := enroll.ReadState(path); err != nil || st.Panel != "100.88.109.47" {
+	if st, err := enroll.ReadState(path); err != nil || st.Panel != "100.64.0.10" {
 		t.Fatalf("%+v %v", st, err)
 	}
 	if ents, _ := os.ReadDir(state); len(ents) != 1 {

@@ -118,7 +118,7 @@ func TestPairNoControlTokenWhenReadOnly(t *testing.T) {
 }
 
 func TestPairWrongAddressExpiredAndMissing(t *testing.T) {
-	r := newPairRig(t, "", "100.88.109.47")
+	r := newPairRig(t, "", "100.64.0.10")
 	if st, body := r.pair(t, r.proof); st != 403 || body["code"] != "wrong_address" {
 		t.Fatalf("other address: %d %v", st, body)
 	}
@@ -188,7 +188,7 @@ func (r *pairRig) from(addr, ctype, body string) (int, map[string]any) {
 // L15: the budget used to be one for everybody and was counted before the address check, so any machine that
 // reached the port could keep the panel out for the whole Add host window.
 func TestPairBudgetOfOthersDoesNotStopThePanel(t *testing.T) {
-	const panel = "100.88.109.47"
+	const panel = "100.64.0.10"
 	r := newPairRig(t, "", panel)
 	good := `{"proof":"` + r.proof + `"}`
 	// one machine, 100 requests, any content: refused, and after its own budget not even looked at
@@ -224,7 +224,7 @@ func TestPairBudgetOfOthersDoesNotStopThePanel(t *testing.T) {
 
 // The panel's own budget is still enroll.RatePerMin a minute, and other addresses are told so independently.
 func TestPairPanelBudgetIsItsOwn(t *testing.T) {
-	const panel = "100.88.109.47"
+	const panel = "100.64.0.10"
 	r := newPairRig(t, "", panel)
 	for i := 0; i < enroll.RatePerMin; i++ {
 		if st, body := r.from(panel, "application/json", `{"proof":"x"}`); st != 403 || body["code"] != "wrong_code" {
@@ -799,7 +799,7 @@ func TestPairV2KeepsTheCodeWhenNothingWasSent(t *testing.T) {
 		t.Fatalf("damaged key: %d %s", st, raw)
 	}
 	// from another address: refused before anything is checked
-	r = newPairRigV2(t, "", "100.88.109.47")
+	r = newPairRigV2(t, "", "100.64.0.10")
 	if st, _, raw, _ := panelPairV2(t, r.srv.URL, r.key); st != 403 || errCode(raw) != "wrong_address" {
 		t.Fatalf("other address: %d %s", st, raw)
 	}

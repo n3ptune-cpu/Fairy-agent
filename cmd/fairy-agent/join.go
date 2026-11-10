@@ -137,7 +137,7 @@ func parseJoin(args []string, stderr io.Writer) (joinOpts, error) {
 		return o, err
 	}
 	if ip := net.ParseIP(o.panel); ip == nil || ip.To4() == nil {
-		return o, errors.New("--panel must be the panel's Tailscale IPv4 address, e.g. 100.88.109.47")
+		return o, errors.New("--panel must be the panel's Tailscale IPv4 address, e.g. 100.64.0.10")
 	}
 	if o.upsName != "" {
 		if !upsNameRe.MatchString(o.upsName) {

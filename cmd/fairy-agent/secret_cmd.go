@@ -47,7 +47,7 @@ func secretCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 
 func secretSet(cfgPath, name string, stdin io.Reader, stdout io.Writer) error {
 	if !secretNameRe.MatchString(name) || strings.HasPrefix(strings.ToUpper(name), "FAIRY_") {
-		return errors.New("NAME must be letters, digits and _ (not starting with FAIRY_), e.g. BMC_CYRENE_PASSWORD")
+		return errors.New("NAME must be letters, digits and _ (not starting with FAIRY_), e.g. BMC_SERVER_PASSWORD")
 	}
 	if !isAdmin() {
 		return errors.New("run it as root / in an Administrator PowerShell (the secrets file is theirs)")
@@ -176,7 +176,7 @@ func bmcRelayCmd(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("bmc-relay add", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	cfgPath := fs.String("config", agent.DefaultConfigPath(), "path of config.yaml")
-	id := fs.String("id", "", "target id, e.g. cyrene-bmc")
+	id := fs.String("id", "", "target id, e.g. server-bmc")
 	host := fs.String("host", "", "ipmitool: the BMC's IP")
 	u := fs.String("url", "", "redfish: https://<BMC IP>")
 	user := fs.String("username", "", "BMC account")

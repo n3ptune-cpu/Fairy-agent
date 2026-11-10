@@ -55,70 +55,70 @@ func fakeIpmitool(mode string, args []string) int {
 const bmcCfg = `bmc_relay:
   enabled: true
   targets:
-    - {id: cyrene-bmc, backend: ipmitool, host: 192.168.254.254, username: fairy, password_env: BMC_CYRENE_PASSWORD, cipher_suite: 17}
+    - {id: server-bmc, backend: ipmitool, host: 192.168.1.5, username: fairy, password_env: BMC_SERVER_PASSWORD, cipher_suite: 17}
 control_rate_per_min: 30
 `
 
 func TestBMCRelayIpmitool(t *testing.T) {
 	args := filepath.Join(t.TempDir(), "args")
 	t.Setenv("FAKE_IPMITOOL_ARGS", args)
-	t.Setenv("BMC_CYRENE_PASSWORD", "hunter2")
+	t.Setenv("BMC_SERVER_PASSWORD", "hunter2")
 	t.Setenv("FAIRY_AGENT_TOKEN", "must-not-leak")
 	r := newRig(t, bmcCfg)
 	_, m := r.do(t, "GET", "/metrics", readTok, nil)
 	if f := m["features"].(map[string]any); f["bmc_relay"] != true {
 		t.Fatal(f)
 	}
-	if b := fmt.Sprint(m["bmc_relay"]); !strings.Contains(b, "cyrene-bmc") || strings.Contains(b, "192.168") || strings.Contains(b, "fairy") {
+	if b := fmt.Sprint(m["bmc_relay"]); !strings.Contains(b, "server-bmc") || strings.Contains(b, "192.168") || strings.Contains(b, "fairy") {
 		t.Fatal("metrics must list target ids only", b)
 	}
-	if st, _ := r.do(t, "POST", "/bmc/power", readTok, map[string]any{"target": "cyrene-bmc", "action": "on"}); st != 401 {
+	if st, _ := r.do(t, "POST", "/bmc/power", readTok, map[string]any{"target": "server-bmc", "action": "on"}); st != 401 {
 		t.Fatal("read token", st)
 	}
 	t.Setenv("FAKE_IPMITOOL_MODE", "ok")
-	st, b := r.do(t, "POST", "/bmc/power", ctlTok, map[string]any{"target": "cyrene-bmc", "action": "on", "requested_by": "neptune"})
+	st, b := r.do(t, "POST", "/bmc/power", ctlTok, map[string]any{"target": "server-bmc", "action": "on", "requested_by": "admin"})
 	if st != 200 || b["power"] != "on" || b["backend"] != "ipmitool" {
 		t.Fatal(st, b)
 	}
 	got, _ := os.ReadFile(args)
-	if string(got) != "-I lanplus -H 192.168.254.254 -U fairy -E -C 17 chassis power on" {
+	if string(got) != "-I lanplus -H 192.168.1.5 -U fairy -E -C 17 chassis power on" {
 		t.Fatal(string(got))
 	}
-	if st, b := r.do(t, "POST", "/bmc/power", ctlTok, map[string]any{"target": "cyrene-bmc", "action": "status"}); st != 200 || b["power"] != "off" {
+	if st, b := r.do(t, "POST", "/bmc/power", ctlTok, map[string]any{"target": "server-bmc", "action": "status"}); st != 200 || b["power"] != "off" {
 		t.Fatal(st, b)
 	}
 	t.Setenv("FAKE_IPMITOOL_MODE", "badpass")
-	if st, b := r.do(t, "POST", "/bmc/power", ctlTok, map[string]any{"target": "cyrene-bmc", "action": "on"}); st != 502 || b["code"] != "bmc_refused" {
+	if st, b := r.do(t, "POST", "/bmc/power", ctlTok, map[string]any{"target": "server-bmc", "action": "on"}); st != 502 || b["code"] != "bmc_refused" {
 		t.Fatal(st, b)
 	}
 	t.Setenv("FAKE_IPMITOOL_MODE", "down")
-	if st, b := r.do(t, "POST", "/bmc/power", ctlTok, map[string]any{"target": "cyrene-bmc", "action": "on"}); st != 502 || b["code"] != "bmc_unreachable" ||
+	if st, b := r.do(t, "POST", "/bmc/power", ctlTok, map[string]any{"target": "server-bmc", "action": "on"}); st != 502 || b["code"] != "bmc_unreachable" ||
 		!strings.Contains(b["error"].(string), "cabled") {
 		t.Fatal(st, b)
 	}
 	t.Setenv("FAKE_IPMITOOL_MODE", "role") // was reported as "not reachable (is the relay cabled to it?)"
-	if st, b := r.do(t, "POST", "/bmc/power", ctlTok, map[string]any{"target": "cyrene-bmc", "action": "on"}); st != 502 || b["code"] != "bmc_privilege" ||
+	if st, b := r.do(t, "POST", "/bmc/power", ctlTok, map[string]any{"target": "server-bmc", "action": "on"}); st != 502 || b["code"] != "bmc_privilege" ||
 		strings.Contains(b["error"].(string), "cabled") || strings.Contains(b["error"].(string), "IANA") || !strings.Contains(b["error"].(string), "Administrator") {
 		t.Fatal(st, b)
 	}
 	// a configured ipmitool_path that others may replace is not run
-	r.a.d.BMCRelay.targets["cyrene-bmc"] = func(t BMCTarget) BMCTarget { t.IpmitoolPath = os.Args[0]; return t }(r.a.d.BMCRelay.targets["cyrene-bmc"])
+	r.a.d.BMCRelay.targets["server-bmc"] = func(t BMCTarget) BMCTarget { t.IpmitoolPath = os.Args[0]; return t }(r.a.d.BMCRelay.targets["server-bmc"])
 	r.a.d.BMCRelay.CheckExe = func(string) error { return errors.New(`C:\ipmitool may be changed by S-1-5-11`) }
-	if st, b := r.do(t, "POST", "/bmc/power", ctlTok, map[string]any{"target": "cyrene-bmc", "action": "on"}); st != 409 || b["code"] != "ipmitool_untrusted" {
+	if st, b := r.do(t, "POST", "/bmc/power", ctlTok, map[string]any{"target": "server-bmc", "action": "on"}); st != 409 || b["code"] != "ipmitool_untrusted" {
 		t.Fatal(st, b)
 	}
 	r.a.d.BMCRelay.CheckExe = func(string) error { return nil }
-	if st, b := r.do(t, "POST", "/bmc/power", ctlTok, map[string]any{"target": "cyrene-bmc", "action": "status"}); st == 409 {
+	if st, b := r.do(t, "POST", "/bmc/power", ctlTok, map[string]any{"target": "server-bmc", "action": "status"}); st == 409 {
 		t.Fatal(st, b)
 	}
 	if st, b := r.do(t, "POST", "/bmc/power", ctlTok, map[string]any{"target": "nope", "action": "on"}); st != 404 || b["code"] != "unknown_target" {
 		t.Fatal(st, b)
 	}
-	if st, _ := r.do(t, "POST", "/bmc/power", ctlTok, map[string]any{"target": "cyrene-bmc", "action": "off"}); st != 400 {
+	if st, _ := r.do(t, "POST", "/bmc/power", ctlTok, map[string]any{"target": "server-bmc", "action": "off"}); st != 400 {
 		t.Fatal("only on / status", st)
 	}
-	t.Setenv("BMC_CYRENE_PASSWORD", "")
-	if st, b := r.do(t, "POST", "/bmc/power", ctlTok, map[string]any{"target": "cyrene-bmc", "action": "on"}); st != 409 || b["code"] != "bmc_password_missing" {
+	t.Setenv("BMC_SERVER_PASSWORD", "")
+	if st, b := r.do(t, "POST", "/bmc/power", ctlTok, map[string]any{"target": "server-bmc", "action": "on"}); st != 409 || b["code"] != "bmc_password_missing" {
 		t.Fatal(st, b)
 	}
 }
@@ -222,7 +222,7 @@ func TestBMCRelayRedfish(t *testing.T) {
 // session" decides; the IANA PEN warning is noise.
 func TestClassifyIpmitool(t *testing.T) {
 	cs := 17
-	tg := BMCTarget{ID: "x", Host: "192.168.254.254", Username: "fairy", PasswordEnv: "BMC_PW", CipherSuite: &cs}
+	tg := BMCTarget{ID: "x", Host: "192.168.1.5", Username: "fairy", PasswordEnv: "BMC_PW", CipherSuite: &cs}
 	pen := "IANA PEN registry open failed: No such file or directory\n"
 	for out, code := range map[string]string{
 		pen + "Error in open session response message : invalid role\nError: Unable to establish IPMI v2 / RMCP+ session":                                      "bmc_privilege",
@@ -236,8 +236,8 @@ func TestClassifyIpmitool(t *testing.T) {
 		"Error in open session response message : insufficient resources to create a session":                                   "bmc_busy",
 		"RAKP 4 message indicates an error : invalid session ID in request\nError: Unable to establish IPMI v2 / RMCP+ session": "bmc_session",
 		pen + "Error: Unable to establish IPMI v2 / RMCP+ session":                                                              "bmc_unreachable",
-		"Address lookup for 192.168.254.254 failed":                                                                             "bmc_unreachable",
-		"Error: something new": "bmc_error",
+		"Address lookup for 192.168.1.5 failed":                                                                                 "bmc_unreachable",
+		"Error: something new":                                                                                                  "bmc_error",
 	} {
 		err := classifyIpmitool(tg, cleanIpmitoolOutput(out, "hunter2"))
 		var be *bmcError

@@ -215,8 +215,8 @@ func TestProcParsers(t *testing.T) {
 	if uid, ok := ParseStatusUID([]byte("Name:\tx\nUid:\t1000\t1000\t1000\t1000\n")); !ok || uid != 1000 {
 		t.Fatal(uid)
 	}
-	users := ParsePasswd([]byte("root:x:0:0::/root:/bin/sh\nneptune:x:1000:1000::/home/n:/bin/sh\nbad\n"))
-	if users[0] != "root" || users[1000] != "neptune" || len(users) != 2 {
+	users := ParsePasswd([]byte("root:x:0:0::/root:/bin/sh\nalice:x:1000:1000::/home/n:/bin/sh\nbad\n"))
+	if users[0] != "root" || users[1000] != "alice" || len(users) != 2 {
 		t.Fatal(users)
 	}
 	cmd := []byte("/usr/bin/llama-server\x00-m\x00/models/x.gguf\x00")

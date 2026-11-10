@@ -102,7 +102,7 @@ func TestJoinNeverEchoesTheCode(t *testing.T) {
 	if got := hideCode("unexpected \"" + code + "\" and " + bare + " and " + strings.ToLower(code)); showsCode(got, code) {
 		t.Fatal(got)
 	}
-	if got := hideCode("--panel must be the panel's Tailscale IPv4 address, e.g. 100.88.109.47"); !strings.Contains(got, "Tailscale IPv4 address") {
+	if got := hideCode("--panel must be the panel's Tailscale IPv4 address, e.g. 100.64.0.10"); !strings.Contains(got, "Tailscale IPv4 address") {
 		t.Fatal("an ordinary message was changed:", got)
 	}
 }

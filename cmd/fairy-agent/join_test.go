@@ -31,7 +31,7 @@ func TestJoin(t *testing.T) {
 	cfgPath := filepath.Join(dir, "config.yaml")
 	code, _ := enroll.NewCode()
 	join := func(a []string, o, e *bytes.Buffer) int { return joinCmd(a, o, e) }
-	args := []string{"--code", strings.ToLower(code), "--panel", "100.88.109.47", "--config", cfgPath, "--state-dir", state,
+	args := []string{"--code", strings.ToLower(code), "--panel", "100.64.0.10", "--config", cfgPath, "--state-dir", state,
 		"--power-control", "--self-update", "--wol", "--ups-name", "cyberpower"}
 	rc, out, errs := runJoin(t, join, args...)
 	if rc != 0 {
@@ -59,7 +59,7 @@ func TestJoin(t *testing.T) {
 	}
 	st, err := enroll.ReadState(filepath.Join(state, "pairing.json"))
 	proof, _ := enroll.Proof(code)
-	if err != nil || !st.Active(time.Now()) || st.Panel != "100.88.109.47" || !enroll.Check(proof, st.Verifier) {
+	if err != nil || !st.Active(time.Now()) || st.Panel != "100.64.0.10" || !enroll.Check(proof, st.Verifier) {
 		t.Fatalf("state: %+v %v", st, err)
 	}
 	if b, _ := os.ReadFile(filepath.Join(state, "pairing.json")); bytes.Contains(b, []byte(strings.ReplaceAll(code, "-", ""))) {
@@ -145,8 +145,8 @@ func TestJoinPairV2(t *testing.T) {
 	proof, _ := enroll.Proof(code)
 	key, _ := enroll.PairingKey(code)
 
-	st, raw, out := joinDirect(t, "--code", code, "--panel", "100.88.109.47", "--pair-v2")
-	if st.PairVersion() != 2 || st.Verifier != "" || !st.Active(time.Now()) || st.Panel != "100.88.109.47" {
+	st, raw, out := joinDirect(t, "--code", code, "--panel", "100.64.0.10", "--pair-v2")
+	if st.PairVersion() != 2 || st.Verifier != "" || !st.Active(time.Now()) || st.Panel != "100.64.0.10" {
 		t.Fatalf("v2 state: %+v", st)
 	}
 	if k, err := st.PairingKey2(); err != nil || !bytes.Equal(k, key) {
@@ -167,7 +167,7 @@ func TestJoinPairV2(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	st, raw, out = joinDirect(t, "--code", code, "--panel", "100.88.109.47")
+	st, raw, out = joinDirect(t, "--code", code, "--panel", "100.64.0.10")
 	if st.PairVersion() != 1 || st.Key2 != "" || !enroll.Check(proof, st.Verifier) || bytes.Contains(raw, []byte("key2")) || strings.Contains(out, "pairing v2") {
 		t.Fatalf("v1 state: %+v\n%s", st, out)
 	}
@@ -187,7 +187,7 @@ func TestJoinCodeNotInArgv(t *testing.T) {
 	}
 	parse := func(args ...string) (joinOpts, string, error) {
 		var errb bytes.Buffer
-		o, err := parseJoin(append(args, "--panel", "100.88.109.47", "--config", filepath.Join(t.TempDir(), "config.yaml"), "--state-dir", t.TempDir()), &errb)
+		o, err := parseJoin(append(args, "--panel", "100.64.0.10", "--config", filepath.Join(t.TempDir(), "config.yaml"), "--state-dir", t.TempDir()), &errb)
 		return o, errb.String(), err
 	}
 	same := func(o joinOpts) bool { n, err := enroll.Normalize(o.code); return err == nil && n == bare }
@@ -242,13 +242,13 @@ func TestJoinCodeNotInArgv(t *testing.T) {
 	// joinCmd reports these as usage errors (2) and never echoes what it read
 	stdin(bare[:31] + "!\n")
 	var out, errb bytes.Buffer
-	if rc := joinCmd([]string{"--code-stdin", "--panel", "100.88.109.47"}, &out, &errb); rc != 2 || strings.Contains(out.String()+errb.String(), bare[:31]) {
+	if rc := joinCmd([]string{"--code-stdin", "--panel", "100.64.0.10"}, &out, &errb); rc != 2 || strings.Contains(out.String()+errb.String(), bare[:31]) {
 		t.Fatalf("bad code on stdin: %d %q %q", rc, out.String(), errb.String())
 	}
 
 	// end to end: the state is the same as with --code, and the code is in no argument
 	stdin(code + "\n")
-	args := []string{"--code-stdin", "--panel", "100.88.109.47"}
+	args := []string{"--code-stdin", "--panel", "100.64.0.10"}
 	st, raw, outText := joinDirect(t, args...)
 	if !enroll.Check(proof, st.Verifier) || bytes.Contains(raw, []byte(bare)) || strings.Contains(outText, bare) || strings.Contains(outText, code) {
 		t.Fatalf("state: %+v\n%s", st, outText)
@@ -257,7 +257,7 @@ func TestJoinCodeNotInArgv(t *testing.T) {
 		t.Fatal("the code is on the command line")
 	}
 	stdin(code + "\n")
-	if st, _, _ := joinDirect(t, "--code-stdin", "--pair-v2", "--panel", "100.88.109.47"); st.PairVersion() != 2 {
+	if st, _, _ := joinDirect(t, "--code-stdin", "--pair-v2", "--panel", "100.64.0.10"); st.PairVersion() != 2 {
 		t.Fatalf("--code-stdin with --pair-v2: %+v", st)
 	}
 }

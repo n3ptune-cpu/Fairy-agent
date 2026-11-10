@@ -112,7 +112,7 @@ func TestUpdateEndpointAuth(t *testing.T) {
 	if r.applied.Load() != 0 {
 		t.Fatal("applied without a valid control token")
 	}
-	st, b := post(t, r.srv.URL, ctlTok, map[string]any{"requested_by": "Neptune <admin>"})
+	st, b := post(t, r.srv.URL, ctlTok, map[string]any{"requested_by": "Owner <admin>"})
 	if st != 202 || b["state"] != "downloading" {
 		t.Fatalf("%d %v", st, b)
 	}
@@ -126,7 +126,7 @@ func TestUpdaterStagesVerifiedRelease(t *testing.T) {
 	r := newUpdRig(t, "41-aaaaaaa", nil)
 	bin := []byte("fairy-agent build 42")
 	r.gh.Publish("build-42", "fairy-agent", "42-bbbbbbb", map[string][]byte{testAsset: bin, "fairy-agent-linux-arm64": []byte("arm")}, nil)
-	if st, _ := r.u.Start(UpdateRequest{RequestedBy: "Neptune"}); st != 202 {
+	if st, _ := r.u.Start(UpdateRequest{RequestedBy: "Owner"}); st != 202 {
 		t.Fatal(st)
 	}
 	if st, b := r.u.Start(UpdateRequest{}); st != 409 {
@@ -142,7 +142,7 @@ func TestUpdaterStagesVerifiedRelease(t *testing.T) {
 	}
 	var req stageRequest
 	b, _ := os.ReadFile(filepath.Join(r.stage, stageRequestFile))
-	if json.Unmarshal(b, &req) != nil || req.From != "41-aaaaaaa" || req.To != "42-bbbbbbb" || req.RequestedBy != "Neptune" || req.ID == "" {
+	if json.Unmarshal(b, &req) != nil || req.From != "41-aaaaaaa" || req.To != "42-bbbbbbb" || req.RequestedBy != "Owner" || req.ID == "" {
 		t.Fatalf("%s", b)
 	}
 	if _, err := os.Stat(filepath.Join(r.stage, "fairy-agent-linux-arm64")); err == nil {

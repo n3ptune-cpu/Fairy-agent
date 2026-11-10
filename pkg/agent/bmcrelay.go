@@ -105,7 +105,7 @@ func (c BMCRelayConfig) validate(add func(string)) {
 		switch t.EffectiveBackend() {
 		case "ipmitool":
 			if !privateIP(t.Host) {
-				add(where + ".host must be the BMC's private IP address (e.g. 192.168.254.254)")
+				add(where + ".host must be the BMC's private IP address (e.g. 192.168.1.5)")
 			}
 			if t.CipherSuite != nil && (*t.CipherSuite < 0 || *t.CipherSuite > 17) {
 				add(where + ".cipher_suite must be 0-17")

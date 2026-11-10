@@ -186,7 +186,7 @@ func CounterLUIDs(names ...[]string) map[string]bool {
 //
 //   - an adapter whose PCI location Windows' kernel could not give (D3DKMT failed or answered
 //     ffffffff:ffff.ffff), when another adapter with the same PCI ids (vendor, device, subsystem, revision) has
-//     a location: the leftover LUID of a card after a driver reset (NSX-FURINA: two "Intel(R) UHD Graphics",
+//     a location: the leftover LUID of a card after a driver reset (one laptop: two "Intel(R) UHD Graphics",
 //     one at 00:02.0, one without a location and without any GPU counter). This needs no counter, so it also
 //     works when the agent cannot read them. It is kept if it has a `\GPU Adapter Memory` instance (Windows
 //     drives it; GroupAdapters decides);

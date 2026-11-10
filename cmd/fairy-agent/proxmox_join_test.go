@@ -156,8 +156,8 @@ func TestProxmoxGrantSkips(t *testing.T) {
 	if _, err := proxmoxGrant(f.host(), &out); err != nil {
 		t.Fatal(err)
 	}
-	if pveTokenName("NSX Kachina_01") != "panel-nsx-kachina-01" {
-		t.Fatal(pveTokenName("NSX Kachina_01"))
+	if pveTokenName("LAB Node_01") != "panel-lab-node-01" {
+		t.Fatal(pveTokenName("LAB Node_01"))
 	}
 }
 
@@ -172,7 +172,7 @@ func TestJoinProxmoxStoresTheGrant(t *testing.T) {
 	code, _ := enroll.NewCode()
 	f := &fakePVE{files: map[string][]byte{pveRootCA: certPEM(t, "Proxmox Virtual Environment"), pveNodeCert: certPEM(t, "asus-i7")}}
 	h := f.host()
-	o, err := parseJoin([]string{"--code", code, "--panel", "100.88.109.47", "--config", filepath.Join(dir, "config.yaml"),
+	o, err := parseJoin([]string{"--code", code, "--panel", "100.64.0.10", "--config", filepath.Join(dir, "config.yaml"),
 		"--state-dir", state, "--proxmox"}, os.Stderr)
 	if err != nil || !o.proxmox {
 		t.Fatal(err)

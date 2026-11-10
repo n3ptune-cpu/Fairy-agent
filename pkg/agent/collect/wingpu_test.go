@@ -188,20 +188,20 @@ func TestDropGhostsIntelUHDAndTwins(t *testing.T) {
 	}
 }
 
-// NSX-FURINA (Windows 11 laptop, i7-12650H's Intel UHD + RTX 3050 Laptop): PDH has three LUIDs, ALL with
+// AGENT-2 (Windows 11 laptop, i7-12650H's Intel UHD + RTX 3050 Laptop): PDH has three LUIDs, ALL with
 // `GPU Adapter Memory` and `GPU Engine` instances (0x...FA66 the NVIDIA card: 624 engine instances, 0x...FEAA
 // and 0x...FE16 the Intel UHD: 182 and 170). DXGI lists the Intel UHD twice. Windows' kernel puts both Intel
 // LUIDs at the same PCI location 00:02.0, so they are one card, with the counters of both.
 const (
-	furinaNV    = "0x00000000_0x0000FA66"
-	furinaUHD1  = "0x00000000_0x0000FEAA"
-	furinaUHD2  = "0x00000000_0x0000FE16"
-	furinaNVBus = 0x01
+	laptopNV    = "0x00000000_0x0000FA66"
+	laptopUHD1  = "0x00000000_0x0000FEAA"
+	laptopUHD2  = "0x00000000_0x0000FE16"
+	laptopNVBus = 0x01
 )
 
-// furinaCounters builds the counter instances: per LUID n engine instances (processes x engines, the engine
+// laptopCounters builds the counter instances: per LUID n engine instances (processes x engines, the engine
 // types an Intel / NVIDIA driver names), and one memory instance each.
-func furinaCounters(t *testing.T) (eng []string, engVals []float64, mem []string, memVals []float64) {
+func laptopCounters(t *testing.T) (eng []string, engVals []float64, mem []string, memVals []float64) {
 	t.Helper()
 	types := []string{"3D", "VideoDecode", "VideoProcessing", "Copy", "Compute_0", "VideoEncode", "Security"}
 	add := func(luid string, n int, busy func(pid, eng int) float64) {
@@ -212,15 +212,15 @@ func furinaCounters(t *testing.T) (eng []string, engVals []float64, mem []string
 			engVals = append(engVals, busy(pid, e))
 		}
 	}
-	add(furinaNV, 624, func(pid, e int) float64 { return 0 })
+	add(laptopNV, 624, func(pid, e int) float64 { return 0 })
 	// the browser (pid 1000) renders through the first Intel LUID, dwm.exe (pid 1001) through the second
-	add(furinaUHD1, 182, func(pid, e int) float64 {
+	add(laptopUHD1, 182, func(pid, e int) float64 {
 		if pid == 1000 && e == 0 {
 			return 12
 		}
 		return 0
 	})
-	add(furinaUHD2, 170, func(pid, e int) float64 {
+	add(laptopUHD2, 170, func(pid, e int) float64 {
 		if pid == 1001 && e == 0 {
 			return 7
 		}
@@ -232,14 +232,14 @@ func furinaCounters(t *testing.T) (eng []string, engVals []float64, mem []string
 	if len(eng) != 624+182+170 {
 		t.Fatal(len(eng))
 	}
-	for _, l := range []string{furinaNV, furinaUHD1, furinaUHD2} {
+	for _, l := range []string{laptopNV, laptopUHD1, laptopUHD2} {
 		mem = append(mem, "luid_"+l+"_phys_0")
 	}
 	memVals = []float64{1288 << 20, 40 << 20, 8 << 20}
 	return
 }
 
-func furinaAdapters(loc bool) []WinAdapter {
+func laptopAdapters(loc bool) []WinAdapter {
 	at := func(bus, dev uint32) *PCILoc {
 		if !loc {
 			return nil
@@ -250,19 +250,19 @@ func furinaAdapters(loc bool) []WinAdapter {
 		// DXGI's order on a laptop: the iGPU that drives the panel first, then the NVIDIA card, then the second
 		// Intel entry, which reports other subsystem / revision ids (as the RX 5600 XT's leftover did)
 		{Name: "Intel(R) UHD Graphics", VendorID: 0x8086, DeviceID: 0x46a3, SubSysID: 0x3f9a17aa, Revision: 0x0c,
-			VRAMTotal: 128 << 20, LUID: furinaUHD2, Loc: at(0, 2)},
+			VRAMTotal: 128 << 20, LUID: laptopUHD2, Loc: at(0, 2)},
 		{Name: "NVIDIA GeForce RTX 3050 Laptop GPU", VendorID: 0x10de, DeviceID: 0x25a2, SubSysID: 0x3f9a17aa, Revision: 0xa1,
-			VRAMTotal: 4 << 30, LUID: furinaNV, Loc: at(furinaNVBus, 0)},
-		{Name: "Intel(R) UHD Graphics", VendorID: 0x8086, DeviceID: 0x46a3, VRAMTotal: 128 << 20, LUID: furinaUHD1, Loc: at(0, 2)},
+			VRAMTotal: 4 << 30, LUID: laptopNV, Loc: at(laptopNVBus, 0)},
+		{Name: "Intel(R) UHD Graphics", VendorID: 0x8086, DeviceID: 0x46a3, VRAMTotal: 128 << 20, LUID: laptopUHD1, Loc: at(0, 2)},
 		{Name: "Microsoft Basic Render Driver", VendorID: 0x1414, DeviceID: 0x8c, Software: true, LUID: "0x00000000_0x0000F00D"},
 	}
 }
 
-func TestFurinaOneIntelUHD(t *testing.T) {
-	eng, engVals, mem, memVals := furinaCounters(t)
+func TestLaptopOneIntelUHD(t *testing.T) {
+	eng, engVals, mem, memVals := laptopCounters(t)
 	memLUIDs := MemoryLUIDs(mem)
 	for _, nvidiaSMI := range []bool{true, false} {
-		shown := ShownAdapters(furinaAdapters(true), nvidiaSMI)
+		shown := ShownAdapters(laptopAdapters(true), nvidiaSMI)
 		if got := DropGhosts(shown, memLUIDs); len(got) != len(shown) {
 			t.Fatalf("precondition: every LUID has a memory instance, DropGhosts keeps all: %+v", got)
 		}
@@ -276,7 +276,7 @@ func TestFurinaOneIntelUHD(t *testing.T) {
 		}
 		uhd := grouped[0]
 		// the busier LUID (182 engine instances) represents the card, the other one is merged into it
-		if uhd.LUID != furinaUHD1 || len(uhd.Also) != 1 || uhd.Also[0] != furinaUHD2 {
+		if uhd.LUID != laptopUHD1 || len(uhd.Also) != 1 || uhd.Also[0] != laptopUHD2 {
 			t.Fatalf("Intel entry %+v", uhd)
 		}
 		gpus := WinGPUs(grouped, EngineLoads(eng, engVals), AdapterMemory(mem, memVals))
@@ -293,33 +293,33 @@ func TestFurinaOneIntelUHD(t *testing.T) {
 		}
 		// per-process GPU memory on either Intel LUID goes to that one card
 		idx := GPULUIDIndex(gpus, nil)
-		if idx[furinaUHD1] != 0 || idx[furinaUHD2] != 0 {
+		if idx[laptopUHD1] != 0 || idx[laptopUHD2] != 0 {
 			t.Fatalf("LUID index %v", idx)
 		}
 	}
 }
 
 // The same with the DXGI order reversed: still one card, represented by the busier LUID.
-func TestFurinaOrderDoesNotMatter(t *testing.T) {
-	eng, _, mem, _ := furinaCounters(t)
-	ad := furinaAdapters(true)
+func TestLaptopOrderDoesNotMatter(t *testing.T) {
+	eng, _, mem, _ := laptopCounters(t)
+	ad := laptopAdapters(true)
 	ad[0], ad[2] = ad[2], ad[0]
 	got := GroupAdapters(ShownAdapters(ad, true), CounterActivity(eng, mem))
-	if len(got) != 1 || got[0].LUID != furinaUHD1 || !slices.Equal(got[0].Also, []string{furinaUHD2}) {
+	if len(got) != 1 || got[0].LUID != laptopUHD1 || !slices.Equal(got[0].Also, []string{laptopUHD2}) {
 		t.Fatalf("%+v", got)
 	}
 	// before the counters are read: grouped by location alone, the first DXGI entry represents it
-	got = GroupAdapters(ShownAdapters(furinaAdapters(true), true), nil)
-	if len(got) != 1 || got[0].LUID != furinaUHD2 || !slices.Equal(got[0].Also, []string{furinaUHD1}) {
+	got = GroupAdapters(ShownAdapters(laptopAdapters(true), true), nil)
+	if len(got) != 1 || got[0].LUID != laptopUHD2 || !slices.Equal(got[0].Also, []string{laptopUHD1}) {
 		t.Fatalf("not read yet: %+v", got)
 	}
 }
 
 // D3DKMT could not give locations: the rule before applies (DXGI's ids differ, both have counters: two
 // entries). Documented fallback; no merging on guesses.
-func TestFurinaWithoutLocations(t *testing.T) {
-	eng, _, mem, _ := furinaCounters(t)
-	if got := GroupAdapters(ShownAdapters(furinaAdapters(false), true), CounterActivity(eng, mem)); len(got) != 2 {
+func TestLaptopWithoutLocations(t *testing.T) {
+	eng, _, mem, _ := laptopCounters(t)
+	if got := GroupAdapters(ShownAdapters(laptopAdapters(false), true), CounterActivity(eng, mem)); len(got) != 2 {
 		t.Fatalf("%+v", got)
 	}
 }
@@ -346,21 +346,21 @@ func TestEngineLoadsIntelNames(t *testing.T) {
 		"pid_7_luid_0x00000000_0x0000FEAA_phys_0_eng_9", // no engtype at all
 	}
 	l := EngineLoads(names, []float64{30, 30, 25, 40, 45})
-	if got := l.Util(furinaUHD1); got != 45 {
+	if got := l.Util(laptopUHD1); got != 45 {
 		t.Fatalf("one LUID: %v (%v)", got, l)
 	}
-	if got := l.Util(furinaUHD1, furinaUHD2); got != 55 { // eng 3 Copy: 30 + 25
+	if got := l.Util(laptopUHD1, laptopUHD2); got != 55 { // eng 3 Copy: 30 + 25
 		t.Fatalf("both LUIDs: %v", got)
 	}
 	if got := l.Util("0x00000000_0x00009999"); got != 0 {
 		t.Fatal(got)
 	}
-	if u := EngineUtil(names, []float64{30, 30, 25, 40, 45}); u[furinaUHD2] != 25 || u[furinaUHD1] != 45 {
+	if u := EngineUtil(names, []float64{30, 30, 25, 40, 45}); u[laptopUHD2] != 25 || u[laptopUHD1] != 45 {
 		t.Fatal(u)
 	}
 }
 
-// NSX-FURINA on fairy-agent build 12, as its log shows the DXGI adapters (the agent running as
+// AGENT-2 on fairy-agent build 12, as its log shows the DXGI adapters (the agent running as
 // NT SERVICE\fairy-agent, which could not read the GPU counters):
 //
 //	name="Intel(R) UHD Graphics" luid=0x00000000_0x00018323 ids=8086:46a3:30581043:0c pci=ffffffff:ffff.ffff software=false
@@ -370,7 +370,7 @@ func TestEngineLoadsIntelNames(t *testing.T) {
 //
 // 0x18323 is a leftover of the Intel UHD (a driver reset): no GPU counter instance at all (an administrator's
 // PDH listing had instances for FA66, FEAA and FE16 only). Two GPUs: the Intel UHD at 00:02.0 and the NVIDIA card.
-func build12Furina() []WinAdapter {
+func build12Laptop() []WinAdapter {
 	none := &PCILoc{Bus: 0xFFFFFFFF, Device: 0xFFFF, Function: 0xFFFF}
 	return []WinAdapter{
 		{Name: "Intel(R) UHD Graphics", VendorID: 0x8086, DeviceID: 0x46a3, SubSysID: 0x30581043, Revision: 0x0c,
@@ -384,8 +384,8 @@ func build12Furina() []WinAdapter {
 	}
 }
 
-func TestBuild12FurinaLeftoverIntelLUID(t *testing.T) {
-	all := build12Furina()
+func TestBuild12LaptopLeftoverIntelLUID(t *testing.T) {
+	all := build12Laptop()
 	if all[0].Loc.Known() || all[0].Loc.String() != "" || !all[1].Loc.Known() || all[1].Loc.String() != "00:02.0" {
 		t.Fatalf("locations: %q %q", all[0].Loc.String(), all[1].Loc.String())
 	}

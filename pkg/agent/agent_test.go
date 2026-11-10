@@ -503,9 +503,9 @@ func TestPower(t *testing.T) {
 	if st, _ := r.do(t, "POST", "/power", ctlTok, map[string]any{"action": "halt"}); st != 400 {
 		t.Fatal(st)
 	}
-	st, b := r.do(t, "POST", "/power", ctlTok, map[string]any{"action": "reboot", "delay_s": 120, "requested_by": "neptune@example.com<script>"})
+	st, b := r.do(t, "POST", "/power", ctlTok, map[string]any{"action": "reboot", "delay_s": 120, "requested_by": "admin@example.com<script>"})
 	p := b["pending"].(map[string]any)
-	if st != 200 || p["action"] != "reboot" || p["delay_s"] != 120.0 || p["requested_by"] != "neptune@example.comscript" {
+	if st != 200 || p["action"] != "reboot" || p["delay_s"] != 120.0 || p["requested_by"] != "admin@example.comscript" {
 		t.Fatal(st, b)
 	}
 	if st, _ := r.do(t, "POST", "/power", ctlTok, map[string]any{"action": "shutdown", "delay_s": 60}); st != 409 {
@@ -744,7 +744,7 @@ func TestPowerSleep(t *testing.T) {
 	if pc := m["power_control"].(map[string]any); pc["sleep"] != true || pc["sleep_note"] != nil {
 		t.Fatal(pc)
 	}
-	st, b := r.do(t, "POST", "/power", ctlTok, map[string]any{"action": "sleep", "delay_s": 15, "requested_by": "neptune"})
+	st, b := r.do(t, "POST", "/power", ctlTok, map[string]any{"action": "sleep", "delay_s": 15, "requested_by": "admin"})
 	if st != 200 || b["pending"].(map[string]any)["action"] != "sleep" {
 		t.Fatal(st, b)
 	}

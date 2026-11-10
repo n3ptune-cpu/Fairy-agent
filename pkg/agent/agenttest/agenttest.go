@@ -29,9 +29,9 @@ func NewCollector() *Collector {
 	return &Collector{NetStep: 1_000_000, net: collect.Net{BytesRecv: 5e9, BytesSent: 2e9}, Total: 212,
 		Temps: []collect.Temp{{Sensor: "acpi", Label: collect.P("ACPI thermal zone TZ00"), Current: 27.8}},
 		Procs: []collect.Process{
-			{PID: 4120, Name: collect.P("obs64.exe"), Username: collect.P(`NSX-CYRENE\neptune`), Status: collect.P("running"),
+			{PID: 4120, Name: collect.P("obs64.exe"), Username: collect.P(`AGENT-1\user`), Status: collect.P("running"),
 				CPUPercent: collect.P(9.5), RSS: collect.P(int64(620 << 20)), Cmdline: collect.P(`C:\Program Files\obs-studio\bin\64bit\obs64.exe`)},
-			{PID: 5000, Name: collect.P("backup.exe"), Username: collect.P(`NSX-CYRENE\neptune`), Status: collect.P("running"),
+			{PID: 5000, Name: collect.P("backup.exe"), Username: collect.P(`AGENT-1\user`), Status: collect.P("running"),
 				CPUPercent: collect.P(3.0), RSS: collect.P(int64(80 << 20)), Cmdline: collect.P("backup.exe --password=hunter2 --target s3")},
 			{PID: 6000, Name: collect.P("Ollama.exe"), Status: collect.P("running"), CPUPercent: collect.P(30.0),
 				RSS: collect.P(int64(5200 << 20))},
@@ -41,7 +41,7 @@ func NewCollector() *Collector {
 
 // Static describes the PC.
 func (c *Collector) Static() collect.Static {
-	return collect.Static{Hostname: "NSX-CYRENE", Platform: collect.Platform{System: "Windows", Pretty: "Windows 11 Enterprise 24H2"},
+	return collect.Static{Hostname: "AGENT-1", Platform: collect.Platform{System: "Windows", Pretty: "Windows 11 Enterprise 24H2"},
 		Logical: 16, Physical: collect.P(8),
 		Hardware: &collect.Hardware{SystemVendor: collect.P("System manufacturer"), SystemModel: collect.P("System Product Name"),
 			BoardVendor: collect.P("Supermicro"), BoardModel: collect.P("X11SCA-F"), BIOSVersion: collect.P("1.8"),
