@@ -55,12 +55,12 @@ func TestBatteryChargeUnitsCharging(t *testing.T) {
 
 func TestBatteryMinimal(t *testing.T) {
 	// capacity and status only (no energy, no rate): percent and state, nothing invented
+	// (with a USB-C supply, under the name Linux gives it: TestBatteryUSBCSupply)
 	root := psTree(t, map[string]map[string]string{
-		"BAT0":                        {"type": "Battery", "status": "Not charging", "capacity": "60"},
-		"ucsi-source-psy-USBC000:001": {"type": "USB", "online": "1"},
+		"BAT0": {"type": "Battery", "status": "Not charging", "capacity": "60"},
 	})
 	b := ReadBatteryStatus(root)
-	if b == nil || *b.Percent != 60 || b.State != "idle" || !*b.ACOnline || b.PowerW != nil || b.TimeRemainingS != nil || b.HealthPct != nil {
+	if b == nil || *b.Percent != 60 || b.State != "idle" || b.ACOnline != nil || b.PowerW != nil || b.TimeRemainingS != nil || b.HealthPct != nil {
 		t.Fatalf("%+v", b)
 	}
 	// "Full" and an unknown status with AC

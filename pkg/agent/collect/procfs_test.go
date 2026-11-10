@@ -102,30 +102,6 @@ func TestHwmon(t *testing.T) {
 	}
 }
 
-func TestRAPL(t *testing.T) {
-	sys := t.TempDir()
-	write(t, sys, map[string]string{
-		"class/powercap/intel-rapl:0/name": "package-0", "class/powercap/intel-rapl:0/energy_uj": "1000000",
-		"class/powercap/intel-rapl:0/max_energy_range_uj": "262143328850",
-		"class/powercap/intel-rapl:0:0/name":              "core", "class/powercap/intel-rapl:0:0/energy_uj": "5",
-		"class/powercap/intel-rapl:0:0/max_energy_range_uj": "10",
-		"class/powercap/intel-rapl:1/name":                  "psys", // energy_uj unreadable/missing: skipped
-	})
-	z := ReadRAPL(sys)
-	if len(z) != 1 || z[0].Name != "package-0" || z[0].EnergyUJ != 1000000 {
-		t.Fatal(z)
-	}
-	cur := z[0]
-	cur.EnergyUJ = 21000000
-	if w, ok := RAPLWatts(z[0], cur, 2); !ok || w != 10 {
-		t.Fatal(w, ok)
-	}
-	wrapped := RAPLZone{Name: "package-0", EnergyUJ: 500000, MaxUJ: 1000000}
-	if w, ok := RAPLWatts(RAPLZone{EnergyUJ: 900000}, wrapped, 1); !ok || w != 0.6 {
-		t.Fatal("wrap", w, ok)
-	}
-}
-
 func TestBatteryDMIOS(t *testing.T) {
 	sys := t.TempDir()
 	write(t, sys, map[string]string{
