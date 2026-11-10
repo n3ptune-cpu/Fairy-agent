@@ -168,6 +168,13 @@ type ProcOptions struct {
 	MemTotal  int64                  // for mem_percent
 	Interval  time.Duration          // CPU sampling interval when there is no recent previous sample
 	GPUMem    func() map[int][]int64 // pid -> VRAM bytes per GPU index (nil = unknown)
+	// Top > 0 tells the collector that the caller will sort the rows (by CPU, by memory, or by something it
+	// adds itself to the rows Keep names) and use at most Top of them. The collector may then leave out every
+	// row that cannot be among the Top highest by CPU, the Top highest by memory or the Top lowest by pid, and
+	// that Keep does not name. A collector may also ignore this and return every process (Windows does). The
+	// total it returns is always the number of all processes.
+	Top  int
+	Keep func(pid int) bool
 }
 
 // Collector reads this machine. Implementations are safe for concurrent use.

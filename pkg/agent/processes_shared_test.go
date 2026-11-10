@@ -164,3 +164,37 @@ func TestSlowReadsHaveACap(t *testing.T) {
 		t.Fatal(fmt.Sprint(cap(r.a.procWaiters), maxFanStatus, MaxConnsPanel))
 	}
 }
+
+// optionProcs is a collector that keeps the options it was asked with.
+type optionProcs struct {
+	collect.Collector
+	got chan collect.ProcOptions
+}
+
+func (o optionProcs) Processes(ctx context.Context, opt collect.ProcOptions) ([]collect.Process, int, error) {
+	o.got <- opt
+	return o.Collector.Processes(ctx, opt)
+}
+
+// Review N8: the server tells the collector how many rows a request can use and which rows it will add GPU
+// memory to, so that the collector need not keep every process.
+func TestProcessListingAsksForTheRowsItCanUse(t *testing.T) {
+	r := newRig(t, "")
+	got := make(chan collect.ProcOptions, 1)
+	r.a.d.Collector = optionProcs{Collector: r.a.d.Collector, got: got}
+	st, b := r.do(t, "GET", "/processes?sort=gpu&limit=200", readTok, nil)
+	if st != 200 {
+		t.Fatal(st, b)
+	}
+	o := <-got
+	if o.Top != maxProcessRows || maxProcessRows != 200 || o.Keep == nil {
+		t.Fatalf("%+v", o)
+	}
+	if !o.Keep(6000) || o.Keep(4120) { // 6000 is the one process with GPU memory (agenttest.GPU)
+		t.Fatal("Keep does not name the processes with GPU memory")
+	}
+	rows := b["processes"].([]any)
+	if first := rows[0].(map[string]any); first["pid"] != 6000.0 || first["gpu_mem"] == nil {
+		t.Fatal(first)
+	}
+}

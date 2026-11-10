@@ -93,6 +93,7 @@ type Linux struct {
 	prevRAPLAt time.Time
 	lastRAPL   map[string]float64
 	procPrev   map[int]procSample
+	trackProcs int // maxTrackedProcs unless a test sets it
 	procPrevAt time.Time
 	users      map[int]string
 	usersAt    time.Time
@@ -344,85 +345,167 @@ func (l *Linux) usernames(now time.Time) map[int]string {
 	return l.users
 }
 
+// What a process listing may cost the agent in memory, however many processes there are (a local user can
+// start tens of thousands, and the agent's unit has a hard limit of 64 MiB).
+const (
+	// procDirBatch is how many names of /proc are read at a time: the directory is never held as a whole.
+	procDirBatch = 512
+	// maxTrackedProcs is how many processes' CPU times are kept from one listing to the next (two numbers
+	// each). A process beyond that is listed with 0 % CPU.
+	maxTrackedProcs = 32768
+	// maxKeptProcs is how many rows are kept for ProcOptions.Keep.
+	maxKeptProcs = 200
+)
+
+// procRow is what one scan keeps of a process before it is known whether the process will be listed: a few
+// numbers and the kernel's short name, never the command line.
 type procRow struct {
-	p     Process
-	ticks uint64
-	start uint64
+	pid    int
+	ticks  uint64
+	start  uint64
+	rss    int64 // pages
+	cpu    float64
+	hasCPU bool
+	state  byte
+	comm   string
 }
 
-func (l *Linux) scanProcs(now time.Time, o ProcOptions) ([]procRow, int) {
-	ents, _ := os.ReadDir(l.proc)
-	l.mu.Lock()
-	users := l.usernames(now)
-	btime := l.btime
-	l.mu.Unlock()
-	page := int64(os.Getpagesize())
-	var rows []procRow
-	total := 0
-	cmdBuf := make([]byte, maxCmdlineRead) // one buffer for every process of this scan
-	for _, e := range ents {
-		pid, err := strconv.Atoi(e.Name())
-		if err != nil {
-			continue
-		}
-		total++
-		dir := filepath.Join(l.proc, e.Name())
-		b, err := os.ReadFile(filepath.Join(dir, "stat"))
-		if err != nil {
-			continue // exited, or hidden from us: skip silently
-		}
-		st, err := ParseProcPIDStat(b)
-		if err != nil {
-			continue
-		}
-		cmd, cut := readCmdline(filepath.Join(dir, "cmdline"), cmdBuf)
-		name := ProcName(st.Comm, cmd)
-		p := Process{PID: pid, Name: &name, RSS: P(st.RSSPages * page),
-			CreateTime: P(Round(float64(btime)+float64(st.StartTime)/clockTicks, 2))}
-		if w, ok := ProcStates[st.State]; ok {
-			p.Status = &w
-		}
-		if sb, err := os.ReadFile(filepath.Join(dir, "status")); err == nil {
-			if uid, ok := ParseStatusUID(sb); ok {
-				u, known := users[uid]
-				if !known {
-					u = strconv.Itoa(uid)
-				}
-				p.Username = &u
-			}
-		}
-		if o.Cmdline {
-			// Secrets are hidden here, argument by argument, and the text is cut to its final length here:
-			// a full command line is never kept, however many processes there are.
-			if args := cmdlineArgs(cmd); len(args) > 0 {
-				if cut {
-					args = append(args, "…")
-				}
-				if c := strings.TrimSpace(redact.Args(args, maxCmdlineLen)); c != "" {
-					p.Cmdline = &c
-				}
-			}
-		}
-		if o.MemTotal > 0 {
-			p.MemPercent = P(Round(float64(*p.RSS)/float64(o.MemTotal)*100, 2))
-		}
-		rows = append(rows, procRow{p: p, ticks: st.UTime + st.STime, start: st.StartTime})
+// procTop keeps the n highest rows of one order while the scan runs: it holds at most 2n rows at any time.
+type procTop struct {
+	n    int
+	less func(a, b *procRow) bool // a comes before b
+	rows []procRow
+}
+
+func (t *procTop) add(r procRow) {
+	if t.n <= 0 {
+		return
 	}
-	return rows, total
+	t.rows = append(t.rows, r)
+	if len(t.rows) >= 2*t.n {
+		t.cut()
+	}
 }
 
-// Processes lists every process with CPU use since the previous listing (or over o.Interval when there is no
-// recent one).
+func (t *procTop) cut() {
+	sort.Slice(t.rows, func(i, j int) bool { return t.less(&t.rows[i], &t.rows[j]) })
+	if len(t.rows) > t.n {
+		t.rows = t.rows[:t.n]
+	}
+}
+
+// readSmall reads a small /proc file into buf (what does not fit is left off).
+func readSmall(path string, buf []byte) ([]byte, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	n, err := io.ReadFull(f, buf)
+	if err != nil && err != io.EOF && err != io.ErrUnexpectedEOF {
+		return nil, err
+	}
+	return buf[:n], nil
+}
+
+// scanProcs reads /proc/<pid>/stat of every process and calls each with its row. It returns how many
+// processes there are. Nothing is kept here.
+func (l *Linux) scanProcs(each func(procRow)) (total int) {
+	d, err := os.Open(l.proc)
+	if err != nil {
+		return 0
+	}
+	defer d.Close()
+	buf := make([]byte, 2048) // one buffer for every process of this scan; a stat line is some 300 bytes
+	for {
+		names, err := d.Readdirnames(procDirBatch)
+		for _, name := range names {
+			pid, perr := strconv.Atoi(name)
+			if perr != nil {
+				continue
+			}
+			total++
+			b, rerr := readSmall(filepath.Join(l.proc, name, "stat"), buf)
+			if rerr != nil {
+				continue // exited, or hidden from us: skip silently
+			}
+			st, serr := ParseProcPIDStat(b)
+			if serr != nil {
+				continue
+			}
+			each(procRow{pid: pid, ticks: st.UTime + st.STime, start: st.StartTime, rss: st.RSSPages, state: st.State,
+				comm: strings.Clone(st.Comm)})
+		}
+		if err != nil || len(names) == 0 {
+			return total
+		}
+	}
+}
+
+// describe reads the rest of one listed process: its command line (for the name, and for the listing when
+// o.Cmdline is on) and its user.
+func (l *Linux) describe(r procRow, o ProcOptions, users map[int]string, btime, page int64, cmdBuf, statusBuf []byte) Process {
+	dir := filepath.Join(l.proc, strconv.Itoa(r.pid))
+	cmd, cut := readCmdline(filepath.Join(dir, "cmdline"), cmdBuf)
+	name := ProcName(r.comm, cmd)
+	p := Process{PID: r.pid, Name: &name, RSS: P(r.rss * page),
+		CreateTime: P(Round(float64(btime)+float64(r.start)/clockTicks, 2))}
+	if r.hasCPU {
+		p.CPUPercent = P(r.cpu)
+	}
+	if w, ok := ProcStates[r.state]; ok {
+		p.Status = &w
+	}
+	if sb, err := readSmall(filepath.Join(dir, "status"), statusBuf); err == nil {
+		if uid, ok := ParseStatusUID(sb); ok {
+			u, known := users[uid]
+			if !known {
+				u = strconv.Itoa(uid)
+			}
+			p.Username = &u
+		}
+	}
+	if o.Cmdline {
+		// Secrets are hidden here, argument by argument, and the text is cut to its final length here:
+		// a full command line is never kept.
+		if args := cmdlineArgs(cmd); len(args) > 0 {
+			if cut {
+				args = append(args, "…")
+			}
+			if c := strings.TrimSpace(redact.Args(args, maxCmdlineLen)); c != "" {
+				p.Cmdline = &c
+			}
+		}
+	}
+	if o.MemTotal > 0 {
+		p.MemPercent = P(Round(float64(*p.RSS)/float64(o.MemTotal)*100, 2))
+	}
+	return p
+}
+
+// Processes lists the processes with CPU use since the previous listing (or over o.Interval when there is no
+// recent one): all of them, or with o.Top the rows a caller that sorts and cuts can need (see ProcOptions).
+//
+// It works in two steps so that its memory does not grow with the number of processes (review N8: 20000
+// processes with long command lines held 43 MiB after one listing). The scan reads one small file per process
+// and keeps a few numbers of the rows that may be listed; only for those are the command line and the user
+// read afterwards. With o.Top that is at most 3 x Top + maxKeptProcs rows, each with at most maxCmdlineLen
+// characters of command line.
 func (l *Linux) Processes(ctx context.Context, o ProcOptions) ([]Process, int, error) {
 	l.mu.Lock()
 	prev, prevAt := l.procPrev, l.procPrevAt
 	l.mu.Unlock()
+	track := l.trackProcs
+	if track <= 0 {
+		track = maxTrackedProcs
+	}
 	if prev == nil || time.Since(prevAt) > 30*time.Second {
-		rows, _ := l.scanProcs(time.Now(), ProcOptions{})
 		prev, prevAt = map[int]procSample{}, time.Now()
-		for _, r := range rows {
-			prev[r.p.PID] = procSample{r.ticks, r.start}
-		}
+		l.scanProcs(func(r procRow) {
+			if len(prev) < track {
+				prev[r.pid] = procSample{r.ticks, r.start}
+			}
+		})
 		select {
 		case <-ctx.Done():
 			return nil, 0, ctx.Err()
@@ -430,21 +513,79 @@ func (l *Linux) Processes(ctx context.Context, o ProcOptions) ([]Process, int, e
 		}
 	}
 	now := time.Now()
-	rows, total := l.scanProcs(now, o)
 	dt := now.Sub(prevAt).Seconds()
-	cur := map[int]procSample{}
-	out := make([]Process, 0, len(rows))
-	for _, r := range rows {
-		cur[r.p.PID] = procSample{r.ticks, r.start}
-		if pr, ok := prev[r.p.PID]; ok && pr.start == r.start && r.ticks >= pr.ticks && dt > 0 {
-			r.p.CPUPercent = P(Round(float64(r.ticks-pr.ticks)/clockTicks/dt*100, 1))
-		} else if dt > 0 {
-			r.p.CPUPercent = P(0.0)
+	cur := make(map[int]procSample, min(len(prev)+64, track))
+	// the orders a caller sorts by (server.go SortProcesses): highest first, unknown last, then by pid
+	byCPU := &procTop{n: o.Top, less: func(a, b *procRow) bool {
+		if a.hasCPU != b.hasCPU {
+			return a.hasCPU
 		}
-		out = append(out, r.p)
-	}
+		if a.cpu != b.cpu {
+			return a.cpu > b.cpu
+		}
+		return a.pid < b.pid
+	}}
+	byMem := &procTop{n: o.Top, less: func(a, b *procRow) bool {
+		if a.rss != b.rss {
+			return a.rss > b.rss
+		}
+		return a.pid < b.pid
+	}}
+	byPID := &procTop{n: o.Top, less: func(a, b *procRow) bool { return a.pid < b.pid }}
+	var all, kept []procRow
+	total := l.scanProcs(func(r procRow) {
+		if len(cur) < track {
+			cur[r.pid] = procSample{r.ticks, r.start}
+		}
+		if dt > 0 {
+			r.hasCPU = true
+			if pr, ok := prev[r.pid]; ok && pr.start == r.start && r.ticks >= pr.ticks {
+				r.cpu = Round(float64(r.ticks-pr.ticks)/clockTicks/dt*100, 1)
+			}
+		}
+		if o.Top <= 0 {
+			all = append(all, r)
+			return
+		}
+		byCPU.add(r)
+		byMem.add(r)
+		byPID.add(r)
+		if o.Keep != nil && len(kept) < maxKeptProcs && o.Keep(r.pid) {
+			kept = append(kept, r)
+		}
+	})
 	l.mu.Lock()
 	l.procPrev, l.procPrevAt = cur, now
+	users := l.usernames(now)
+	btime := l.btime
 	l.mu.Unlock()
+
+	rows := all
+	if o.Top > 0 {
+		seen := make(map[int]bool, 3*o.Top+len(kept))
+		for _, t := range []*procTop{byCPU, byMem, byPID} {
+			t.cut()
+			for _, r := range t.rows {
+				if !seen[r.pid] {
+					seen[r.pid] = true
+					rows = append(rows, r)
+				}
+			}
+		}
+		for _, r := range kept {
+			if !seen[r.pid] {
+				seen[r.pid] = true
+				rows = append(rows, r)
+			}
+		}
+	}
+	sort.Slice(rows, func(i, j int) bool { return rows[i].pid < rows[j].pid })
+	page := int64(os.Getpagesize())
+	cmdBuf := make([]byte, maxCmdlineRead) // one buffer for every process of this listing
+	statusBuf := make([]byte, 2048)        // "Uid:" is in the first lines of /proc/<pid>/status
+	out := make([]Process, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, l.describe(r, o, users, btime, page, cmdBuf, statusBuf))
+	}
 	return out, total, nil
 }

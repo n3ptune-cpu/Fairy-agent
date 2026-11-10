@@ -800,23 +800,27 @@ func (a *Agent) processList(ctx context.Context) (*procList, error) {
 // with their secrets hidden.
 func (a *Agent) listProcesses(ctx context.Context) (*procList, error) {
 	mem := a.d.Collector.Sample(ctx).Memory.Total
-	o := collect.ProcOptions{Cmdline: a.cfg.CmdlineEnabled(), NeverOpen: a.never, MemTotal: mem, Interval: 500 * time.Millisecond}
+	var apps map[int][]int64 // pid -> GPU memory per card
+	if a.d.GPU != nil {
+		apps = a.d.GPU.ComputeApps(ctx)
+	}
+	// The collector may leave out every row that no request can be answered with (maxProcessRows is the most a
+	// request may ask for): its memory then does not grow with the number of processes. The rows that use GPU
+	// memory are named, because that order is made here.
+	o := collect.ProcOptions{Cmdline: a.cfg.CmdlineEnabled(), NeverOpen: a.never, MemTotal: mem, Interval: 500 * time.Millisecond,
+		Top: maxProcessRows, Keep: func(pid int) bool { _, ok := apps[pid]; return ok }}
 	procs, total, err := a.d.Collector.Processes(ctx, o)
 	if err != nil {
 		return nil, err
 	}
 	at := time.Now()
-	if a.d.GPU != nil {
-		if apps := a.d.GPU.ComputeApps(ctx); apps != nil {
-			for i := range procs {
-				if by, ok := apps[procs[i].PID]; ok {
-					var sum int64
-					for _, v := range by {
-						sum += v
-					}
-					procs[i].GPUMem, procs[i].GPUMemByGPU = collect.P(sum), by
-				}
+	for i := range procs {
+		if by, ok := apps[procs[i].PID]; ok {
+			var sum int64
+			for _, v := range by {
+				sum += v
 			}
+			procs[i].GPUMem, procs[i].GPUMemByGPU = collect.P(sum), by
 		}
 	}
 	// before sorting: a value that is not a number has no place in an order either (it sorts last, as unknown)
