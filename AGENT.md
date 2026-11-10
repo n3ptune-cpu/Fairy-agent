@@ -64,7 +64,7 @@ What it does **not** do on Windows as a result: see [What it can and cannot show
 Like adding a machine to Tailscale: no editor, no token copying.
 
 1. In the panel (admins): **Add host** on the Overview page. Fill in the machine's **Tailscale name** (as in
-   the Tailscale admin console, e.g. `nsx-furina`; the panel reaches it at `http://<name>:9101`, or give its
+   the Tailscale admin console, e.g. `agent-1`; the panel reaches it at `http://<name>:9101`, or give its
    100.x address), its site, Linux or Windows, and tick what the agent may do: shutdown / reboot,
    self-update, Wake-on-LAN relay, reading the UPS of a local NUT server, Core Temp (Windows), attaching it to
    a Proxmox node, and the MAC addresses to wake it with.
@@ -542,24 +542,24 @@ On the panel, two files change: `/etc/fairy/fairy.env` (the secrets) and `/etc/f
 2. On the panel, add it to `/etc/fairy/fairy.env` under a name of your choice, one per machine:
 
    ```sh
-   AGENT_TOKEN_NSX_CYRENE=paste-the-token-here
+   AGENT_TOKEN_AGENT_1=paste-the-token-here
    # only if you enable fan control, shutdown/reboot or Wake-on-LAN on that machine:
-   AGENT_CONTROL_TOKEN_NSX_CYRENE=paste-the-control-token-here
+   AGENT_CONTROL_TOKEN_AGENT_1=paste-the-control-token-here
    ```
 3. Add the machine to `agents:` in `/etc/fairy/config.yaml` (the address is the machine's Tailscale address):
 
    ```yaml
    agents:
-     - id: nsx-cyrene
-       name: NSX-CYRENE
+     - id: agent-1
+       name: AGENT-1
        url: http://100.64.0.10:9101
-       token_env: AGENT_TOKEN_NSX_CYRENE
-       group: Neptune
-       site: Neptune
+       token_env: AGENT_TOKEN_AGENT_1
+       group: Home
+       site: Home
        # optional, each must also be switched on in the agent's config.yaml:
-       # fan_control: {vendor: supermicro, control_token_env: AGENT_CONTROL_TOKEN_NSX_CYRENE}
+       # fan_control: {vendor: supermicro, control_token_env: AGENT_CONTROL_TOKEN_AGENT_1}
        # power_control: true
-       # control_token_env: AGENT_CONTROL_TOKEN_NSX_CYRENE   # (needed for power_control / wol_relay)
+       # control_token_env: AGENT_CONTROL_TOKEN_AGENT_1   # (needed for power_control / wol_relay)
    ```
    For an agent on a Proxmox node, add `node: <node name>` so its details are shown on that node.
 4. Restart the panel: `systemctl restart fairy`. The machine appears within a second or two.
@@ -633,7 +633,7 @@ card's "Allow this device to wake the computer" / "Wake on Magic Packet" (Window
 ```yaml
 wol:
   enabled: true
-  allowed_macs: ["3c:ec:ef:00:11:22"]   # optional: only these machines
+  allowed_macs: ["00:00:5e:00:53:01"]   # optional: only these machines
 ```
 
 Panel: `wol_relay: true` and `control_token_env:` in this agent's entry, and `wol: {mac: ..., relay: <this
@@ -673,8 +673,8 @@ left out of the message; it says nothing about the BMC.
 bmc_relay:
   enabled: true
   targets:
-    - {id: cyrene-bmc, backend: ipmitool, host: 192.168.254.254, username: fairy, password_env: BMC_CYRENE_PASSWORD}
-env_file: C:\ProgramData\fairy-agent\secrets.env    # BMC_CYRENE_PASSWORD=... (written by `fairy-agent secret set`)
+    - {id: server-bmc, backend: ipmitool, host: 192.168.1.5, username: fairy, password_env: BMC_SERVER_PASSWORD}
+env_file: C:\ProgramData\fairy-agent\secrets.env    # BMC_SERVER_PASSWORD=... (written by `fairy-agent secret set`)
 ```
 
 The password is never typed on a command line: `fairy-agent secret set NAME` asks for it (no echo) or reads one
@@ -682,20 +682,21 @@ line from stdin, writes it into `env_file` (setting `env_file` to `secrets.env` 
 not set) with tight permissions (Windows: SYSTEM and Administrators full control, the agent's service account
 read-only, nobody else; Linux: 0640 root:fairy-agent). IPMI over LAN without ipmitool is not built in (future).
 
-Neptune's NSX-FURINA (cabled to NSX-CYRENE's BMC port, BMC at 192.168.254.254, ipmitool installed), in an
-Administrator PowerShell:
+An example. `agent-2` is an always-on Windows PC, cabled to the BMC port of the server `agent-1` (the BMC has
+the address 192.168.1.5, ipmitool is installed on `agent-2`). All names and the address are example values. On
+`agent-2`, in an Administrator PowerShell:
 
 ```powershell
-& "C:\Program Files\Fairy\fairy-agent.exe" bmc-relay add --id cyrene-bmc --backend ipmitool --host 192.168.254.254 --username <BMC user> --password-env BMC_CYRENE_PASSWORD
-& "C:\Program Files\Fairy\fairy-agent.exe" secret set BMC_CYRENE_PASSWORD
+& "C:\Program Files\Fairy\fairy-agent.exe" bmc-relay add --id server-bmc --backend ipmitool --host 192.168.1.5 --username <BMC user> --password-env BMC_SERVER_PASSWORD
+& "C:\Program Files\Fairy\fairy-agent.exe" secret set BMC_SERVER_PASSWORD
 Restart-Service fairy-agent
 ```
 
 (add `--cipher-suite <n>` to the first line if the BMC needs a particular cipher suite, and
 `--ipmitool-path "C:\Program Files\<folder>\ipmitool.exe"` if it is not in `C:\Program Files\ipmitool\`).
-Panel (`config.yaml`), on the machine to wake: `systems: [{id: nsx-cyrene, bmc_power: {relay: nsx-furina-agent,
-target: cyrene-bmc}}]`; the relay agent's entry needs `control_token_env:`. The panel then offers "Power on (via
-BMC, through NSX-FURINA)" while NSX-CYRENE is offline and NSX-FURINA is online.
+Panel (`config.yaml`), on the machine to wake: `systems: [{id: agent-1, bmc_power: {relay: agent-2,
+target: server-bmc}}]`; the relay agent's entry needs `control_token_env:`. The panel then offers "Power on (via
+BMC, through AGENT-2)" while `agent-1` is offline and `agent-2` is online.
 
 ### Plugs and UPSes on this machine's network
 
@@ -706,7 +707,7 @@ read it and pass the readings on. The entries are the same as in the panel's `po
 only for an agent that is a host of its own: for an agent merged into a Proxmox node (`node:` in the panel) it
 does not work, because the panel shows that machine under the node's id. There, and whenever the panel should
 decide, use `power_links:` in the panel's agent entry (`power_links: {<device id>: <system id>}`, e.g.
-`{asus-i7-ups: straw-node-asus-i7}`), plus `ups_powers:` / `ups_names:` for UPSes, as for any agent.
+`{office-ups: node-office}`), plus `ups_powers:` / `ups_names:` for UPSes, as for any agent.
 
 ## Updates (the panel's Update button)
 
@@ -1017,8 +1018,8 @@ on the first install and report anything odd:
   administrator's `C:\Program Files\ipmitool`) written as SDDL, but not yet run on a PC;
 * leaving out leftover GPU entries ("GPU Adapter Memory" counter per adapter), checked against unit tests built
   from the RX 5600 XT and Intel UHD reports, not yet on those PCs; 0.5.1's merging of entries at one PCI
-  location (D3DKMT `KMTQAITYPE_ADAPTERADDRESS`, then `..._RENDER`) and the added counters, tested with NSX-FURINA's
-  LUIDs (FA66 / FEAA / FE16) only; the PDH counters set up again after a failure at start;
+  location (D3DKMT `KMTQAITYPE_ADAPTERADDRESS`, then `..._RENDER`) and the added counters, tested with the adapter
+  ids of one laptop only; the PDH counters set up again after a failure at start;
 * self-update on Windows: `setup-self-update` (removing 0.4.2's program-folder entry, the update / stage folder
   permissions, creating the fairy-agent-update service and its start right for the agent), the updater service
   starting, stopping and starting the agent's service, renaming the running exe, rolling back, its log file,

@@ -2,8 +2,8 @@
 
 0.5.0 moves the Windows agent to its own low-rights account and adds the **fairy-agent-helper** service (see
 AGENT.md, "Two services"). None of this has run on real Windows yet. Try it on **one** PC first, ideally one
-with Core Temp or power control switched on so the helper gets installed. **Not on NSX-CYRENE** (its fans)
-until this list has passed somewhere else.
+with Core Temp or power control switched on so the helper gets installed. **Not on the PC whose fans Fairy
+controls** until this list has passed somewhere else.
 
 Everything below is in **PowerShell as Administrator**. `$fa` is short for the program:
 
@@ -18,8 +18,9 @@ release), or by hand with the release files in one folder:
 
 ```powershell
 Set-ExecutionPolicy -Scope Process Bypass
-.\install-fairy-agent.ps1 -PanelAddress 100.88.109.47            # add -Helper if config.yaml has none of
-                                                                 # Core Temp / IPMI / power control yet
+.\install-fairy-agent.ps1 -PanelAddress 100.64.0.2    # EXAMPLE VALUE: the panel's Tailscale address.
+                                                       # Add -Helper if config.yaml has none of
+                                                       # Core Temp / IPMI / power control yet
 & $fa version                                     # fairy-agent 11-xxxxxxx ... (build 11 or later = 0.5.0)
 ```
 
@@ -107,9 +108,9 @@ their speed and the helper's watchdog keeps watching (helper.log). `Start-Servic
 
 ## 8. Self-migration (0.5.1): a LocalSystem PC moves itself when you press Update
 
-Take **one** PC that runs build 7 (0.4.2) or build 10 (0.4.4) **as LocalSystem** (e.g. NSX-FURINA or Project
-Rebuild; not NSX-CYRENE first). LocalService PCs (Varesa, Escoffier, maybe MSI-5600X) do **not** move
-themselves: for those only check the `needs_admin` part at the end.
+Take **one** PC that runs build 7 (0.4.2) or build 10 (0.4.4) **as LocalSystem** (not the PC whose fans Fairy
+controls first). LocalService PCs do **not** move themselves: for those only check the `needs_admin` part at
+the end.
 
 Before, in an Administrator PowerShell on the PC (keep the output):
 
@@ -171,9 +172,9 @@ PowerShell: `/metrics` then says `not_needed` and `sc.exe qc` shows `NT SERVICE\
 password), `Start-Service fairy-agent`, and send `migration\state.json`, `agent.log` and `installer.log`. To keep
 the agent from trying again for now, leave `state.json` as it is (it waits for `next_try`).
 
-## 9. GPUs on NSX-FURINA (one Intel UHD, not two)
+## 9. GPUs on a laptop with Intel and NVIDIA graphics (one Intel UHD, not two)
 
-After updating to 0.5.1: the host's page shows **one** "Intel(R) UHD Graphics" (plus the RTX 3050 from
+After updating to 0.5.1: the host's page shows **one** "Intel(R) UHD Graphics" (plus the NVIDIA card from
 nvidia-smi), with a number for Util (0 % when idle, not "–") and VRAM like "40 MiB / 128 MiB". Compare with
 Task Manager's Intel GPU page. agent.log at start lists every DXGI entry:
 
@@ -187,10 +188,10 @@ not ready at start (it is tried again every minute, "counter readable now" follo
 
 ## 10. Performance counters and leftover GPU entries (0.5.2, build 13)
 
-On a PC that runs as `NT SERVICE\fairy-agent` on build 12 (NSX-FURINA, NSX-CYRENE): press **Update**. 0.5.1's
+On a PC that runs as `NT SERVICE\fairy-agent` on build 12: press **Update**. 0.5.1's
 installer puts 0.5.2 in place (it does not know the group yet); about a minute later the new agent asks the
 fairy-agent-update service, which adds the account to Performance Monitor Users and restarts the agent once
-(the panel may show it offline for a few seconds). On FURINA, where the group was added by hand already,
+(the panel may show it offline for a few seconds). On a PC where the group was added by hand already,
 nothing restarts. Check:
 
 ```powershell
@@ -200,16 +201,16 @@ Get-Content C:\ProgramData\fairy-agent\logs\agent.log | Select-String "DXGI adap
 ```
 
 Expected: no `0xC0000BC8` / "performance counters not readable" line after the restart; GPU Util and VRAM in
-use show numbers; Processes shows per-process GPU memory. FURINA: one Intel UHD (the `0x...18323` line says
-`pci=unknown` and is left out) plus the RTX 3050; VARESA: one RX 5600 XT (two `pci=unknown` lines left out),
+use show numbers; Processes shows per-process GPU memory. The laptop of section 9: one Intel UHD (the leftover entry's line says
+`pci=unknown` and is left out) plus the NVIDIA card; a PC with an RX 5600 XT: one RX 5600 XT (two `pci=unknown` lines left out),
 and the `AMD GPU sensors (ADL)` line (send it: it says why there is no Radeon temperature yet).
 
-LocalService PCs (ESCOFFIER, VARESA): `& "C:\Program Files\Fairy\fairy-agent.exe" setup-self-update` as
+LocalService PCs: `& "C:\Program Files\Fairy\fairy-agent.exe" setup-self-update` as
 Administrator moves them and adds the group in one go. `uninstall` removes the membership again.
 
 ## 11. Radeon temperature through ADL (0.5.3, build 14)
 
-On STWS-VARESA (RX 5600 XT, `NT SERVICE\fairy-agent`): press **Update**, then
+On a PC with an RX 5600 XT (agent running as `NT SERVICE\fairy-agent`): press **Update**, then
 
 ```powershell
 Get-Content C:\ProgramData\fairy-agent\logs\agent.log | Select-String "ADL"
@@ -231,7 +232,8 @@ Get-NetFirewallRule -DisplayName "Fairy agent helper (no network)" -ErrorAction 
 # then, in a folder with build 10's files (fairy-agent-windows-amd64.exe, SHA256SUMS and install-fairy-agent.ps1
 # from https://github.com/n3ptune-cpu/Fairy-agent/releases/tag/v0.4.4):
 Set-ExecutionPolicy -Scope Process Bypass
-.\install-fairy-agent.ps1 -PanelAddress 100.88.109.47 -LocalSystem   # -LocalSystem only if this PC used Core Temp / fans
+.\install-fairy-agent.ps1 -PanelAddress 100.64.0.2 -LocalSystem   # 100.64.0.2 is an EXAMPLE VALUE: the panel's Tailscale
+                                                                   # address. -LocalSystem only if this PC used Core Temp / fans
 ```
 
 Report back: the output of section 2, the last 30 lines of both logs (and for section 8 `installer.log` and

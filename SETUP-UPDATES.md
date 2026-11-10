@@ -13,13 +13,12 @@ After this setup:
 Nothing ever installs on its own. You do the steps below **once**. Part 1 is on your Windows PC (PowerShell),
 part 2 is on each machine, part 3 on the panel.
 
-| Machine | System | Agent file |
+| Machine | System | Release file |
 | --- | --- | --- |
-| NSX-KACHINA | Proxmox VE (Debian), amd64 | `fairy-agent-linux-amd64` |
-| NSX-FONTAINE, NSX-SNEZHNAYA | Proxmox VE (Debian), arm64 | `fairy-agent-linux-arm64` |
-| NSX-PERLICA | Fedora (SELinux), amd64 | `fairy-agent-linux-amd64` |
+| Linux machines with an Intel or AMD processor | Proxmox VE, Debian, Fedora (SELinux) ..., amd64 | `fairy-agent-linux-amd64` |
+| Linux machines with an ARM processor | Proxmox VE, Debian ..., arm64 | `fairy-agent-linux-arm64` |
 | Windows PCs | Windows 10/11 | `fairy-agent-windows-amd64.exe` |
-| Panel, CT 124 | Debian container, amd64 | `fairy-linux-amd64` (the panel) |
+| The panel host | Debian (machine or container), amd64 | `fairy-linux-amd64` (the panel) |
 
 ---
 
@@ -490,7 +489,7 @@ The control token is in `C:\ProgramData\fairy-agent\control-token`.
 
 ---
 
-## Part 3: the panel (CT 124, as root)
+## Part 3: the panel (on the panel host, as root)
 
 ### 3.1 Install the release build of the panel once
 
@@ -537,20 +536,20 @@ In `/etc/fairy/fairy.env`, each agent with self-update needs its control token (
 power control):
 
 ```sh
-AGENT_CONTROL_TOKEN_KACHINA=paste-the-agent's-control-token
+AGENT_CONTROL_TOKEN_AGENT_1=paste-the-agent's-control-token
 ```
 
 In `/etc/fairy/config.yaml`, add to each such agent entry:
 
 ```yaml
-  - id: kachina-agent
+  - id: agent-1
     # ...as before...
-    control_token_env: AGENT_CONTROL_TOKEN_KACHINA
+    control_token_env: AGENT_CONTROL_TOKEN_AGENT_1
     self_update: true
 ```
 
 The panel looks up the newest Fairy-agent release on GitHub (at most every 10 minutes, only while the Updates
-page is open). If CT 124 has no internet access, add `updates: {check_latest: false}`; the page then shows no
+page is open). If the panel host has no internet access, add `updates: {check_latest: false}`; the page then shows no
 "latest" but Update still works (the agents download themselves). Then:
 
 ```sh
@@ -602,7 +601,7 @@ This works even where `self_update` is off (it is you at the machine, not the pa
 
 ### The panel: `fairy update`
 
-On CT 124, as root:
+On the panel host, as root:
 
 ```sh
 fairy update --check     # installed vs latest
