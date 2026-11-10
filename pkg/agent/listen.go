@@ -196,6 +196,11 @@ const (
 	// LocalReservedConns of ReservedConns are for this machine alone: whatever the panel and everybody else
 	// have open, the update's health check finds a slot.
 	LocalReservedConns = 4
+	// An agent whose tokens were set up by hand has no panel address on record. There, an address that showed
+	// a valid token counts as the panel (the cap, the reserved slots, the waiting) for knownSenderFor after
+	// its last request with one; at most maxKnownSenders addresses are remembered.
+	maxKnownSenders = 8
+	knownSenderFor  = time.Hour
 )
 
 // ConnLimits configures LimitConns. Zero numbers mean the defaults above.
@@ -224,10 +229,12 @@ type ConnLimits struct {
 const NoPanelRefusal = "only_from_panel is on and this agent has no panel address on record: only this machine itself is " +
 	"accepted (run the panel's Add host or Re-pair command on this machine, or remove only_from_panel from config.yaml)"
 
-// The keys the panel's and this machine's connections are counted under.
+// The keys the panel's and this machine's connections are counted under; knownPrefix starts the key of an
+// address that showed a valid token while no panel address is on record.
 const (
-	panelKey = "panel"
-	localKey = "local"
+	panelKey    = "panel"
+	localKey    = "local"
+	knownPrefix = "token "
 )
 
 // LimitConns wraps ln so that at most o.Total connections are open, at most o.PerSender per sending address
@@ -267,7 +274,8 @@ func LimitConns(ln net.Listener, o ConnLimits) *LimitListener {
 		}
 	}
 	return &LimitListener{Listener: ln, o: o, open: map[string]int{}, conns: map[*limitedConn]struct{}{}, ready: make(chan net.Conn, o.Total),
-		errs: make(chan error), done: make(chan struct{})}
+		known: map[netip.Addr]time.Time{},
+		errs:  make(chan error), done: make(chan struct{})}
 }
 
 // LimitListener is a listener with the caps of LimitConns.
@@ -287,6 +295,7 @@ type LimitListener struct {
 	trusted int                       // open connections of the panel and this machine
 	others  int                       // open connections of everybody else
 	waiting []*waitingConn            // the panel's and this machine's connections that wait for a slot, oldest first
+	known   map[netip.Addr]time.Time  // addresses that showed a valid token, and when last (no panel on record)
 	peak    int
 	refused uint64
 	waited  uint64
@@ -391,7 +400,7 @@ func (l *LimitListener) Close() error {
 // arrive counts a new connection in and passes it to Accept, keeps it waiting, or closes it.
 func (l *LimitListener) arrive(c net.Conn) {
 	key, trusted := l.sender(c)
-	lc := &limitedConn{Conn: c, l: l, sender: key, trusted: trusted}
+	lc := &limitedConn{Conn: c, l: l, sender: key, trusted: trusted, remote: addrOf(c.RemoteAddr())}
 	why := l.panelOnly(trusted)
 	l.mu.Lock()
 	if l.closed {
@@ -405,8 +414,8 @@ func (l *LimitListener) arrive(c net.Conn) {
 	var idle *limitedConn
 	if why != "" {
 		// An idle connection is one whose request was answered and that was kept open for a next one. Closing
-		// it is always allowed, and a sender whose slots are all taken by such connections is not locked out:
-		// the oldest of them makes room.
+		// it is always allowed, and nobody is locked out by slots that such connections hold: the oldest of
+		// them makes room (idleConn says whose).
 		if idle = l.idleConn(key, why); idle != nil {
 			l.uncount(idle)
 			l.evicted++
@@ -444,26 +453,39 @@ func (l *LimitListener) arrive(c net.Conn) {
 }
 
 // idleConn picks the connection that is closed to make room for a new one of sender key that check refused
-// with why: this machine's own oldest idle connection, when this machine has all of its slots in use. (Eight
-// idle connections of a local user used to keep the update's health check out for as long as they were held:
-// review N2.) nil: there is none. Caller holds l.mu.
+// with why. nil: there is none. Caller holds l.mu.
+//
+//   - This machine has all of its slots in use: its own oldest idle connection, one that never showed a token
+//     before one that did. (Eight idle connections of a local user used to keep the update's health check out
+//     for as long as they were held: review N2.)
+//   - No slot is left for the newcomer for another reason (every slot strangers may have is taken, or every
+//     slot): the oldest idle connection of a stranger that never showed a valid token. (Six senders with eight
+//     idle connections each used to keep everybody else out, the panel of a hand-configured agent included:
+//     review N3.) A connection that showed a valid token is never closed for a stranger.
 func (l *LimitListener) idleConn(key, why string) *limitedConn {
-	if key != localKey || why != tooManyOfSender {
+	var pick func(c *limitedConn) bool
+	switch {
+	case why == tooManyOfSender && key == localKey:
+		pick = func(c *limitedConn) bool { return c.sender == localKey }
+	case why == tooManyOfSender:
 		return nil
+	default:
+		pick = func(c *limitedConn) bool { return !c.trusted && !c.vouched }
 	}
 	var oldest *limitedConn
 	for c := range l.conns {
-		if c.sender != key || c.idleSince.IsZero() {
+		if c.idleSince.IsZero() || !pick(c) {
 			continue
 		}
-		if oldest == nil || c.idleSince.Before(oldest.idleSince) {
+		if oldest == nil || (!c.vouched && oldest.vouched) || (c.vouched == oldest.vouched && c.idleSince.Before(oldest.idleSince)) {
 			oldest = c
 		}
 	}
 	return oldest
 }
 
-// room is how many connections of a trusted sender may wait at once.
+// room is how many connections may wait at once: this machine's, or the panel's (with no panel on record:
+// those of all the addresses that showed a valid token, together).
 func (l *LimitListener) room(key string) int {
 	if key == localKey {
 		return l.o.Waiting / 4
@@ -471,10 +493,10 @@ func (l *LimitListener) room(key string) int {
 	return l.o.Waiting
 }
 
-// waitingOf counts the waiting connections of one sender. Caller holds l.mu.
+// waitingOf counts the waiting connections that share key's room. Caller holds l.mu.
 func (l *LimitListener) waitingOf(key string) (n int) {
 	for _, w := range l.waiting {
-		if w.c.sender == key {
+		if (w.c.sender == localKey) == (key == localKey) {
 			n++
 		}
 	}
@@ -516,8 +538,12 @@ func (l *LimitListener) sender(c net.Conn) (key string, trusted bool) {
 	if l.o.Local(remote, addrOf(c.LocalAddr())) {
 		return localKey, true
 	}
-	if panel := l.panel(); panel.IsValid() && remote == panel {
+	panel := l.panel()
+	if panel.IsValid() && remote == panel {
 		return panelKey, true
+	}
+	if !panel.IsValid() && l.knownSender(remote) {
+		return knownPrefix + remote.String(), true
 	}
 	if remote.Is6() { // one machine owns a whole /64
 		if p, err := remote.Prefix(64); err == nil {
@@ -538,6 +564,54 @@ func (l *LimitListener) panel() netip.Addr {
 	return a.Unmap().WithZone("")
 }
 
+// knownSender reports whether remote showed a valid token within knownSenderFor. It is asked only while no
+// panel address is on record, and never with only_from_panel (which then accepts this machine alone).
+func (l *LimitListener) knownSender(remote netip.Addr) bool {
+	if l.o.PanelOnly {
+		return false
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	at, ok := l.known[remote]
+	return ok && time.Since(at) < knownSenderFor
+}
+
+// vouch is called for a connection on which a request with a valid token arrived. Such a connection is never
+// closed to make room for a stranger. On an agent with no panel address on record (tokens set up by hand, so
+// the panel is a stranger by its address) the sender's address counts as the panel from now on, this
+// connection included: the reserved slots are for whoever holds a token there.
+func (l *LimitListener) vouch(c *limitedConn) {
+	now := time.Now()
+	l.mu.Lock()
+	recent := c.vouched && now.Sub(c.vouchedAt) < time.Minute
+	l.mu.Unlock()
+	if recent {
+		return
+	}
+	noPanel := !l.o.PanelOnly && !l.panel().IsValid() // reads the pairing state (at most every five seconds)
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	c.vouched, c.vouchedAt = true, now
+	if !noPanel || !c.remote.IsValid() || c.sender == localKey || c.sender == panelKey {
+		return
+	}
+	if _, ok := l.known[c.remote]; !ok && len(l.known) >= maxKnownSenders {
+		var oldest netip.Addr
+		for a, at := range l.known {
+			if !oldest.IsValid() || at.Before(l.known[oldest]) {
+				oldest = a
+			}
+		}
+		delete(l.known, oldest)
+	}
+	l.known[c.remote] = now
+	if _, counted := l.conns[c]; counted && !c.trusted {
+		l.forget(c.sender, false)
+		c.sender, c.trusted = knownPrefix+c.remote.String(), true
+		l.count(c.sender, true)
+	}
+}
+
 // panelOnly is why only_from_panel refuses a sender ("" when it does not, or when the setting is off).
 func (l *LimitListener) panelOnly(trusted bool) string {
 	switch {
@@ -551,7 +625,7 @@ func (l *LimitListener) panelOnly(trusted bool) string {
 
 // capOf is how many connections one sender key may have open.
 func (l *LimitListener) capOf(key string, trusted bool) int {
-	if trusted && key == panelKey {
+	if trusted && key != localKey { // the panel, or with no panel on record an address that showed a token
 		return l.o.PerPanel
 	}
 	return l.o.PerSender
@@ -697,8 +771,12 @@ type limitedConn struct {
 	l       *LimitListener
 	sender  string // the key it is counted under
 	trusted bool
+	remote  netip.Addr
 	// idleSince is when its last request was answered, zero while a request is being read or served (l.mu).
 	idleSince time.Time
+	// vouched: a request with a valid token arrived on it (l.mu); vouchedAt is when vouch last looked.
+	vouched   bool
+	vouchedAt time.Time
 }
 
 func (c *limitedConn) Close() error {
@@ -706,6 +784,9 @@ func (c *limitedConn) Close() error {
 	c.l.connClosed(c)
 	return err
 }
+
+// Vouch is called by the agent when a request with a valid token arrived on the connection.
+func (c *limitedConn) Vouch() { c.l.vouch(c) }
 
 // ConnState is told by the HTTP server (Agent.Server) what the connection is doing.
 func (c *limitedConn) ConnState(s http.ConnState) {

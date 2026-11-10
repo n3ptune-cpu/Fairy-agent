@@ -418,6 +418,11 @@ func (a *Agent) Handler() http.Handler {
 			writeJSON(w, 401, map[string]any{"error": "unauthorized"})
 			return
 		}
+		// the connection carried a valid token: LimitConns does not close it for a stranger, and on an agent
+		// without a panel address on record its sender gets the panel's share from now on
+		if c, ok := r.Context().Value(connKey{}).(interface{ Vouch() }); ok {
+			c.Vouch()
+		}
 		if rt.control {
 			if !a.control.allow("control") {
 				a.logOnce("rate", "control request rate limited", "remote", ip, "path", r.URL.Path)
@@ -1052,13 +1057,18 @@ func (a *Agent) update(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, st, body)
 }
 
+// connKey is the context key under which Server keeps a request's connection.
+type connKey struct{}
+
 // Server wraps the handler with the timeouts every connection gets. A request's header must arrive within two
 // seconds and fit in 4 KiB (the panel's is a few hundred bytes): an unfinished request holds little memory and
 // not for long. How many connections may be open at all is LimitConns' part.
 func (a *Agent) Server() *http.Server {
 	return &http.Server{Handler: a.Handler(), ReadHeaderTimeout: 2 * time.Second, ReadTimeout: 10 * time.Second,
 		WriteTimeout: 45 * time.Second, IdleTimeout: 90 * time.Second, MaxHeaderBytes: 4096,
-		// LimitConns' connections learn when they are idle (kept open after an answer, for a next request)
+		// LimitConns' connections learn when they are idle (kept open after an answer, for a next request) and
+		// when a request with a valid token arrived on them (Handler)
+		ConnContext: func(ctx context.Context, c net.Conn) context.Context { return context.WithValue(ctx, connKey{}, c) },
 		ConnState: func(c net.Conn, s http.ConnState) {
 			if lc, ok := c.(interface{ ConnState(http.ConnState) }); ok {
 				lc.ConnState(s)
