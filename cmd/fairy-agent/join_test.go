@@ -173,6 +173,95 @@ func TestJoinPairV2(t *testing.T) {
 	}
 }
 
+// L20: the join code does not have to be on the command line (where every local user can read it while the
+// installer runs): --code-stdin reads it from standard input, FAIRY_JOIN_CODE from the environment. --code
+// stays for the commands of older panels.
+func TestJoinCodeNotInArgv(t *testing.T) {
+	code, _ := enroll.NewCode()
+	bare := strings.ReplaceAll(code, "-", "")
+	proof, _ := enroll.Proof(code)
+	stdin := func(text string) {
+		old := joinStdin
+		joinStdin = strings.NewReader(text)
+		t.Cleanup(func() { joinStdin = old })
+	}
+	parse := func(args ...string) (joinOpts, string, error) {
+		var errb bytes.Buffer
+		o, err := parseJoin(append(args, "--panel", "100.88.109.47", "--config", filepath.Join(t.TempDir(), "config.yaml"), "--state-dir", t.TempDir()), &errb)
+		return o, errb.String(), err
+	}
+	same := func(o joinOpts) bool { n, err := enroll.Normalize(o.code); return err == nil && n == bare }
+
+	// standard input, in the spellings an installer or a person produces
+	for _, text := range []string{code, code + "\n", code + "\r\n", strings.ToLower(code) + "\n", "  " + bare + "  \n", "\ufeff" + code + "\r\n", code + "\nsecond line\n"} {
+		t.Setenv(joinCodeEnv, "")
+		stdin(text)
+		o, _, err := parse("--code-stdin")
+		if err != nil || !same(o) {
+			t.Fatalf("stdin %q: %q %v", text, o.code, err)
+		}
+	}
+	// the environment variable, which join takes out of its own environment (its child processes do not get it)
+	t.Setenv(joinCodeEnv, code)
+	stdin("")
+	if o, _, err := parse(); err != nil || !same(o) {
+		t.Fatalf("environment: %q %v", o.code, err)
+	}
+	if v, ok := os.LookupEnv(joinCodeEnv); ok {
+		t.Fatalf("%s still set after parsing: %q", joinCodeEnv, v)
+	}
+	// --code-stdin and --code win over the environment
+	other, _ := enroll.NewCode()
+	t.Setenv(joinCodeEnv, other)
+	stdin(code + "\n")
+	if o, _, err := parse("--code-stdin"); err != nil || !same(o) {
+		t.Fatalf("stdin over environment: %q %v", o.code, err)
+	}
+	t.Setenv(joinCodeEnv, other)
+	if o, _, err := parse("--code", code); err != nil || !same(o) {
+		t.Fatalf("--code over environment: %q %v", o.code, err)
+	}
+	if _, ok := os.LookupEnv(joinCodeEnv); ok {
+		t.Fatal("the environment variable outlived a join that did not use it")
+	}
+	// refused: nothing to read, a code with a line break inside, a wrong code, both sources, none
+	t.Setenv(joinCodeEnv, "")
+	for _, bad := range []string{"", "\n", "\n" + code + "\n", bare[:16] + "\n" + bare[16:] + "\n", "nope\n", code + "A\n", strings.Repeat("A", 5000)} {
+		stdin(bad)
+		if o, _, err := parse("--code-stdin"); err == nil {
+			t.Fatalf("stdin %q accepted as %q", bad, o.code)
+		}
+	}
+	stdin(code + "\n")
+	if _, _, err := parse("--code-stdin", "--code", code); err == nil || !strings.Contains(err.Error(), "exclude") {
+		t.Fatalf("both: %v", err)
+	}
+	if _, _, err := parse(); err == nil || !strings.Contains(err.Error(), "--code-stdin") {
+		t.Fatalf("no code at all: %v", err)
+	}
+	// joinCmd reports these as usage errors (2) and never echoes what it read
+	stdin(bare[:31] + "!\n")
+	var out, errb bytes.Buffer
+	if rc := joinCmd([]string{"--code-stdin", "--panel", "100.88.109.47"}, &out, &errb); rc != 2 || strings.Contains(out.String()+errb.String(), bare[:31]) {
+		t.Fatalf("bad code on stdin: %d %q %q", rc, out.String(), errb.String())
+	}
+
+	// end to end: the state is the same as with --code, and the code is in no argument
+	stdin(code + "\n")
+	args := []string{"--code-stdin", "--panel", "100.88.109.47"}
+	st, raw, outText := joinDirect(t, args...)
+	if !enroll.Check(proof, st.Verifier) || bytes.Contains(raw, []byte(bare)) || strings.Contains(outText, bare) || strings.Contains(outText, code) {
+		t.Fatalf("state: %+v\n%s", st, outText)
+	}
+	if strings.Contains(strings.Join(args, " "), bare) || strings.Contains(strings.Join(args, " "), code) {
+		t.Fatal("the code is on the command line")
+	}
+	stdin(code + "\n")
+	if st, _, _ := joinDirect(t, "--code-stdin", "--pair-v2", "--panel", "100.88.109.47"); st.PairVersion() != 2 {
+		t.Fatalf("--code-stdin with --pair-v2: %+v", st)
+	}
+}
+
 func TestVerifyRelease(t *testing.T) {
 	pub, priv, err := release.GenerateKey()
 	if err != nil {

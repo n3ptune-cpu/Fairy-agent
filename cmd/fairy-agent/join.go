@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -29,6 +30,8 @@ import (
 //     v2.go), its expiry and the panel's address in the pairing state,
 //
 // and prints no secret. The running agent then answers the panel's POST /pair once (see pkg/agent/pairing.go).
+// The join code comes from standard input (--code-stdin), from FAIRY_JOIN_CODE, or from --code (older commands;
+// a command line can be read by every local user while the program runs).
 
 type joinOpts struct {
 	code, panel, cfgPath, stateDir, upsName string
@@ -41,11 +44,33 @@ type joinOpts struct {
 
 var upsNameRe = regexp.MustCompile(`^[A-Za-z0-9_.-]{1,64}$`)
 
+// joinCodeEnv carries the join code when it is neither on standard input nor on the command line.
+const joinCodeEnv = "FAIRY_JOIN_CODE"
+
+// joinStdin is where --code-stdin reads the join code (tests replace it).
+var joinStdin io.Reader = os.Stdin
+
+// readJoinCode reads the join code from the first line of r. A command line is readable by every local user
+// while the program runs (ps, /proc/PID/cmdline); standard input and the environment are not.
+func readJoinCode(r io.Reader) (string, error) {
+	line, err := bufio.NewReader(io.LimitReader(r, 1024)).ReadString('\n')
+	if err != nil && !errors.Is(err, io.EOF) {
+		return "", fmt.Errorf("--code-stdin: %w", err)
+	}
+	line = strings.TrimSpace(strings.TrimPrefix(line, "\ufeff")) // PowerShell may put a byte order mark first
+	if line == "" {
+		return "", errors.New("--code-stdin: no join code on standard input")
+	}
+	return line, nil
+}
+
 func parseJoin(args []string, stderr io.Writer) (joinOpts, error) {
 	var o joinOpts
+	var codeStdin bool
 	fs := flag.NewFlagSet("join", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	fs.StringVar(&o.code, "code", "", "the join code shown by the panel's Add host dialog")
+	fs.StringVar(&o.code, "code", "", "the join code shown by the panel's Add host dialog (visible to other local users while this runs: prefer --code-stdin)")
+	fs.BoolVar(&codeStdin, "code-stdin", false, "read the join code from standard input (first line); without it and --code, from the environment variable "+joinCodeEnv)
 	fs.StringVar(&o.panel, "panel", "", "the panel's Tailscale IP address (only it may pair)")
 	fs.StringVar(&o.cfgPath, "config", agent.DefaultConfigPath(), "path of config.yaml")
 	fs.StringVar(&o.stateDir, "state-dir", "", "folder of the pairing state (default: the agent's state folder)")
@@ -64,8 +89,20 @@ func parseJoin(args []string, stderr io.Writer) (joinOpts, error) {
 	if fs.NArg() > 0 {
 		return o, fmt.Errorf("unexpected %q", fs.Arg(0))
 	}
+	switch {
+	case codeStdin && o.code != "":
+		return o, errors.New("--code and --code-stdin exclude each other")
+	case codeStdin:
+		var err error
+		if o.code, err = readJoinCode(joinStdin); err != nil {
+			return o, err
+		}
+	case o.code == "":
+		o.code = os.Getenv(joinCodeEnv)
+	}
+	_ = os.Unsetenv(joinCodeEnv) // not for the programs join starts (pvesh)
 	if o.code == "" || o.panel == "" {
-		return o, errors.New("--code and --panel are required (copy the whole command from the panel's Add host dialog)")
+		return o, errors.New("a join code (--code-stdin, " + joinCodeEnv + " or --code) and --panel are required (copy the whole command from the panel's Add host dialog)")
 	}
 	if _, err := enroll.Normalize(o.code); err != nil {
 		return o, err
