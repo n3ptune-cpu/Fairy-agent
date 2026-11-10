@@ -14,8 +14,18 @@ import (
 	"time"
 )
 
+// MaxResponseHeaderBytes is how much response header Fairy reads from a device, a BMC, a Proxmox API, an agent
+// or a release server before it gives the answer up. net/http's own limit, when none is set, is 10 MiB for
+// every answer, read into memory before the first byte of the body: nine or ten hostile devices or agents
+// answering at once took the panel past its memory limit with headers alone (the body limits do not count
+// them), and the agent has 64 MiB in all. What these senders really send: a Tasmota or Shelly plug a few
+// hundred bytes, a Redfish BMC and the Proxmox API one to two KiB (session cookies, links), an agent 150 bytes,
+// GitHub about 5 KiB. 64 KiB leaves all of them more than ten times that.
+const MaxResponseHeaderBytes = 64 << 10
+
 var lanTransport = &http.Transport{Proxy: nil, MaxIdleConnsPerHost: 2, IdleConnTimeout: 90 * time.Second,
-	DialContext: (&net.Dialer{Timeout: 5 * time.Second}).DialContext}
+	MaxResponseHeaderBytes: MaxResponseHeaderBytes,
+	DialContext:            (&net.Dialer{Timeout: 5 * time.Second}).DialContext}
 
 // noRedirect makes a client hand back a 3xx answer instead of following it. A device, a BMC or a Proxmox API
 // that answers with a redirect could otherwise send Fairy to any address and scheme it can reach, and to the
@@ -34,7 +44,7 @@ func TLSClient(timeout time.Duration, cfg *tls.Config) *http.Client {
 	return ClientWith(timeout, TLSTransport(cfg))
 }
 
-// TLSTransport is a LAN transport (no proxy) with these TLS settings.
+// TLSTransport is a LAN transport (no proxy, the same limit on response headers) with these TLS settings.
 func TLSTransport(cfg *tls.Config) *http.Transport {
 	tr := lanTransport.Clone()
 	tr.TLSClientConfig = cfg

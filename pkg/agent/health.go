@@ -211,7 +211,7 @@ func checkRunning(ctx context.Context, cfg *Config, want string) error {
 	}
 	// No Authorization header, no proxy, no redirect followed, no connection kept: whoever holds the port gets
 	// one random nonce and the ask for it, and nothing else.
-	tr := &http.Transport{Proxy: nil, DisableKeepAlives: true}
+	tr := &http.Transport{Proxy: nil, DisableKeepAlives: true, MaxResponseHeaderBytes: 16 << 10} // the agent's answer has 150 bytes of header
 	defer tr.CloseIdleConnections()
 	client := &http.Client{Transport: tr, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	resp, err := client.Do(req)

@@ -37,6 +37,7 @@ import (
 	"time"
 
 	"github.com/n3ptune-cpu/Fairy-agent/pkg/agent/collect"
+	"github.com/n3ptune-cpu/Fairy-agent/pkg/devices"
 )
 
 // BMCRelayConfig is the `bmc_relay:` block.
@@ -424,7 +425,7 @@ func (b *BMCRelay) client(t BMCTarget) (*http.Client, *string) {
 			}
 			return nil
 		}},
-		Proxy: nil, DisableKeepAlives: true}
+		Proxy: nil, DisableKeepAlives: true, MaxResponseHeaderBytes: devices.MaxResponseHeaderBytes}
 	return &http.Client{Transport: tr, Timeout: 10 * time.Second,
 		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}, seen
 }

@@ -55,15 +55,21 @@ type Client struct {
 	Hosts                 []string
 }
 
+// maxResponseHeaderBytes: see NewClient (the same number as devices.MaxResponseHeaderBytes).
+const maxResponseHeaderBytes = 64 << 10
+
 // NewClient returns a client for repo ("owner/name") with time limits and the host allow-list for redirects.
 func NewClient(repo, userAgent string) (*Client, error) {
 	if !ValidRepo(repo) {
 		return nil, fmt.Errorf("%q is not a GitHub repository name (owner/name)", repo)
 	}
 	c := &Client{Repo: repo, UserAgent: userAgent, APIBase: "https://api.github.com", DownloadBase: "https://github.com"}
+	// MaxResponseHeaderBytes: without it net/http reads up to 10 MiB of header per answer into memory, and the
+	// agent that asks runs inside 64 MiB. GitHub's answers carry about 5 KiB.
 	tr := &http.Transport{Proxy: http.ProxyFromEnvironment, ForceAttemptHTTP2: true, MaxIdleConns: 4,
-		DialContext:         (&net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
-		TLSHandshakeTimeout: 10 * time.Second, ResponseHeaderTimeout: 30 * time.Second, IdleConnTimeout: 30 * time.Second}
+		MaxResponseHeaderBytes: maxResponseHeaderBytes,
+		DialContext:            (&net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
+		TLSHandshakeTimeout:    10 * time.Second, ResponseHeaderTimeout: 30 * time.Second, IdleConnTimeout: 30 * time.Second}
 	c.HTTP = &http.Client{Transport: tr}
 	return c, nil
 }
