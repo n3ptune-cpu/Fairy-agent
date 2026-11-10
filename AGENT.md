@@ -15,6 +15,7 @@ from source, and a map of the code, are in [README.md](README.md).
 * [What it never touches (anti-cheat safety)](#what-it-never-touches-anti-cheat-safety)
 * [Add a host from the panel (one command)](#add-a-host-from-the-panel-one-command): the easy way
 * [Install on Windows](#install-on-windows)
+  * [Running the installer again (0.6.0): what is kept, what is moved aside](#running-the-installer-again-060-what-is-kept-what-is-moved-aside)
   * [Two services: the agent and its helper](#two-services-the-agent-and-its-helper)
 * [Install on Linux](#install-on-linux)
   * [Check your Linux agents: are the sandbox lines still on?](#check-your-linux-agents-are-the-sandbox-lines-still-on)
@@ -241,6 +242,78 @@ See [Two services](#two-services-the-agent-and-its-helper) for the accounts and 
 By default the agent listens on this PC's Tailscale address, port 9101 (it finds it by itself). It never listens
 on your home network or the internet unless you set `listen:` yourself. Until Tailscale is up the agent waits
 (as long as it takes; the log says so once a minute) and then starts answering by itself.
+
+### Running the installer again (0.6.0): what is kept, what is moved aside
+
+"The installer" here is `install-fairy-agent.ps1`, the panel's Add host / Re-pair command (which runs it),
+`fairy-agent install` and `fairy-agent setup-self-update`. Since 0.6.0 they do not take the data folder
+`C:\ProgramData\fairy-agent` on trust. The folder runs through a **trust check** first.
+
+**Trusted means**, for the folder and for every file and folder in it:
+
+1. it is a plain file or folder: no link, no junction, and a file has one name only;
+2. its owner is Administrators, SYSTEM or TrustedInstaller;
+3. nobody else can change it. (Inside `logs\`, `state\` and `update\stage\` the agent's own account may write;
+   that is what those three folders are for.)
+
+**A healthy PC passes, and nothing is written.** `config.yaml`, the tokens and the pairing stay exactly as
+they are. Running `install-fairy-agent.ps1` again by hand does not unpair the PC. The output has no line that
+starts with `repaired:` or `IMPORTANT:`.
+
+(The panel's **Re-pair** always makes new tokens and hands them to the panel. That is what Re-pair is for, and
+it is not a sign of a failed check.)
+
+**When something fails the check**, the installer never keeps using it:
+
+| What failed | What the installer does | What you see |
+| --- | --- | --- |
+| the data folder itself (someone else owns it or can change it) | renames the whole folder to `C:\ProgramData\fairy-agent.untrusted-<UTC date and time>`, makes a new one, writes a starter `config.yaml` with everything that can change the PC switched off, and new tokens | `repaired:` lines, then `IMPORTANT: config.yaml could not be trusted and was replaced by a starter ...` |
+| a file or folder inside (someone else owns it or can change it) | renames it to `<its name>.untrusted-<UTC date and time>` next to where it was, and makes Fairy's own folders anew | a `repaired:` line for each |
+| a link or junction inside | removes the link (not what it points to) | a `repaired:` line |
+| a file that another account could read, but not change | writes it anew with the folder's permissions | a `repaired:` line |
+| a token file that another account could read, or that went aside | writes a new token | `IMPORTANT: the tokens are new. Pair this PC with the panel again (Re-pair in the panel).` |
+
+If a rename fails (for example because a program holds a file in the folder open), the installer stops and
+says so. The installer only repairs a folder named `fairy-agent`. With another `--config` folder it reports
+what is wrong and changes nothing in it.
+
+**What "moved aside" means.** Nothing was deleted. The folder or file is still on the disk under its new name,
+for example `C:\ProgramData\fairy-agent.untrusted-20261110-142530`. Fairy never reads it again. It was moved
+because Fairy could not tell who had prepared it: an untrusted `config.yaml` can name another token file or
+switch features on, and the services that read it run with high rights. What to do:
+
+1. Do what the `IMPORTANT:` line says: **Re-pair** the PC in the panel. If `config.yaml` was replaced, switch
+   the features on again, in the panel or in the new `config.yaml`.
+2. If you want to see your old settings, open the old `config.yaml` in Notepad and read it. Type what you need
+   into the new file. Do not copy the old file back, and do not run anything from the old folder.
+3. List what was moved aside (read-only), in PowerShell as Administrator:
+
+   ```powershell
+   Get-ChildItem C:\ProgramData -Force -Filter 'fairy-agent.untrusted-*'
+   Get-ChildItem C:\ProgramData\fairy-agent -Recurse -Force -Filter '*.untrusted-*'
+   ```
+
+4. When you no longer need it, delete it. The name below is an **example**: use a name from step 3.
+
+   ```powershell
+   Remove-Item -Recurse -Force 'C:\ProgramData\fairy-agent.untrusted-20261110-142530'
+   ```
+
+5. If you did not expect this on that PC, treat it as a finding: some other account or program had prepared or
+   changed Fairy's data folder. Report it with the installer's output.
+
+**After an update through the Update button only** (the installer has not run yet), the new program checks the
+folder but repairs nothing:
+
+* A healthy folder: nothing changes.
+* An untrusted folder: `agent.log` has the warning `the agent's data folder is not safe: self-update and the
+  helper will not work until it is repaired`. The helper refuses to work, `fairy-agent join` refuses, and the
+  updater service does nothing: it writes `fairy-agent-update did nothing: ...` to the Windows Event Log
+  (Windows Logs > Application, source fairy-agent) and ends with exit code 3. The cure is to run the installer:
+  Re-pair in the panel, or `& "C:\Program Files\Fairy\fairy-agent.exe" setup-self-update` in PowerShell as
+  Administrator.
+
+On Windows `fairy-agent join` also refuses a `config.yaml` that names a token file outside the data folder.
 
 ### Two services: the agent and its helper
 
@@ -696,6 +769,26 @@ signed out" warning and counts down (like `shutdown /s /t 60`; open programs are
 the panel aborts it. On Linux the agent waits and then runs `systemctl poweroff` / `reboot` (needs the polkit
 rule above); if the agent is restarted in the meantime, the pending action is dropped.
 
+**Cancel on Windows cancels only Fairy's own shutdown (0.6.0).**
+
+* The helper writes a shutdown or reboot that was asked for through the panel to
+  `C:\ProgramData\fairy-agent\helper\power-pending.json` (administrators and SYSTEM only). So the panel still
+  shows it, and Cancel still works, after the agent or the helper has restarted. Before 0.6.0 Cancel did
+  nothing after an agent restart.
+* Cancel aborts that shutdown and nothing else. A shutdown that Fairy did not start (for example
+  `shutdown /s /t 600` typed by hand) is not shown as pending, and Cancel does not touch it.
+* The record ends when the action's time has passed (plus one minute), on Cancel, and when Windows has been
+  started again since.
+* While one action is pending, a second one is refused with HTTP 409 (`a shutdown is already pending; cancel it
+  first`).
+* While the helper is stopped, Cancel answers 503 `helper_stopped` instead of "ok": the agent cannot tell
+  whether a shutdown is pending. Start the helper, then cancel.
+* Two limits. A Fairy shutdown that you abort by hand (`shutdown /a`) stays shown in the panel until its time
+  or until you press Cancel, because Windows offers no way to ask. A pending **sleep** is a timer inside the
+  helper: it is lost when the helper restarts.
+* The helper enforces `power_control.min_delay_s` itself: a shorter delay is refused. It reads the setting when
+  it starts, so after changing it run `Restart-Service fairy-agent-helper, fairy-agent`.
+
 **Sleep** (suspend to RAM, not hibernate) works the same way (delay, Cancel, one pending action at a time), but
 the agent itself waits on Windows too and then calls `SetSuspendState` (powrprof.dll). The agent reports in
 `/metrics` (`power_control.sleep`, and `sleep_note` with the reason when not) whether the machine can sleep, and
@@ -928,7 +1021,10 @@ carries on without those readings (and picks them up again when Core Temp comes 
 needed). The log says "Core Temp readings available" once it has found them.
 
 The agent looks for `Global\CoreTempMappingObjectEx` first, then the older `CoreTempMappingObject`, then the
-same names in the signed-in user's session (the helper does the looking). Core Temp has no CPU package *temperature* in its shared block, so
+same names in the signed-in user's session (the helper does the looking). Since 0.6.0 a session name is used
+only when its shared-memory object belongs to Administrators or SYSTEM. If it belongs to another account, the
+readings are not used, and `agent.log` names the object, its owner and the fix: switch on **Enable global
+shared memory (SNMP)** (step 2 above). With that option on, nothing changes for you. Core Temp has no CPU package *temperature* in its shared block, so
 only the cores are shown. Core Temp's Fahrenheit and "distance to Tj. Max" display options are converted back to
 °C. Package watts appear only when Core Temp shows a "Power" value for your CPU.
 
