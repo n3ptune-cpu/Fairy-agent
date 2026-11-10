@@ -637,6 +637,45 @@ Safety: the agent refuses any speed below 30 % (the panel does too). While you h
 the CPU temperature every 10 seconds; at 80 °C, or if it cannot read any temperature for 30 seconds, it sets
 both zones back to 100 % and writes that in the fan log the panel shows.
 
+**When a lower speed is refused (0.6.0).** A fixed speed of 100 % is always accepted. A speed below 100 % is
+refused with HTTP 409 in three cases. The answer carries a `code` and a sentence that the panel shows:
+
+| `code` | When | What to do |
+| --- | --- | --- |
+| `fan_too_hot` | the hottest CPU reading is at or above `max_temp_c`, or a temperature sensor reports something that is not a number | wait until it is cooler; only 100 % is accepted until then |
+| `fan_watchdog_hold` | the watchdog set the fans to 100 % less than 5 minutes ago | wait; the answer says how many seconds are left |
+| `fan_no_temperature` | no temperature is known at all, neither from the BMC nor from the operating system | wait a moment and try again. This is normal right after the agent or the helper has started, until the BMC's first sensor reading is in. If it stays, look at the BMC sensors in the panel |
+
+A 409 without a `code` means the BMC is not in mode "full" (a speed is ignored in the other modes): choose
+"full" first.
+
+**On Linux a fixed speed ends when the agent ends (0.6.0).** The watchdog lives in the agent, so a fixed speed
+must not outlive it:
+
+1. When the agent stops (stop, restart, update, reboot of the machine), it first hands the fans back to the
+   BMC's automatic mode (`auto_mode`). If the BMC does not take that mode, both zones go to 100 %.
+2. When the agent starts and finds mode "full" left over (after a crash or a power cut), it hands the fans back
+   in the same way, right at its start.
+3. `fairy-agent.service` has the line `ExecStopPost=-/usr/local/bin/fairy-agent fans-auto`. systemd runs it
+   after the agent has ended for **any** reason, also when it was killed. `fairy-agent fans-auto` takes no
+   options, reads `/etc/fairy-agent/config.yaml` and does nothing when fan control is off.
+
+So after an agent restart or update the fans are in the BMC's automatic mode, and a fixed speed has to be set
+again in the panel. A mode you chose yourself (standard, optimal, heavy IO) is left as it is. Mode "full"
+counts as a fixed speed, also at 100 %.
+
+Steps 1 and 2 come with the program (the Update button is enough). Step 3 is in the service file, which only
+the install script replaces. Check (read-only):
+
+```sh
+grep -c 'ExecStopPost=-/usr/local/bin/fairy-agent fans-auto' /etc/systemd/system/fairy-agent.service
+```
+
+`1`: the line is there. `0`: run the panel's Re-pair command on that machine once
+([SETUP-UPDATES.md, 2.2](SETUP-UPDATES.md#22-service-files-and-rules-of-a-newer-release-re-pair)). On Windows
+the watchdog lives in the helper, which hands the fans back when it stops, see
+[Two services](#two-services-the-agent-and-its-helper).
+
 On Windows this uses Windows' own IPMI support through one `powershell.exe` that the helper service starts
 when needed (and stops after 5 idle minutes): Windows lets only administrators use it, so it runs in
 [fairy-agent-helper](#two-services-the-agent-and-its-helper), together with the watchdog
