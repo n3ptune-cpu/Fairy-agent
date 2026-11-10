@@ -80,7 +80,8 @@ func Run(ctx context.Context, cfg *agent.Config, version string, logErr func(str
 		func(ctx context.Context, c *winpipe.Conn, who winpipe.Client) { srv.ServeConn(ctx, c, who.String()) },
 		func(who winpipe.Client, why string) {
 			audit.Warn("refused client", "client", who.String(), "reason", why)
-		})
+		},
+		pipeHeld(audit, logErr))
 	if serveErr != nil {
 		audit.Error("pipe", "error", serveErr.Error())
 		logErr("fairy-agent-helper: " + serveErr.Error())
@@ -90,6 +91,28 @@ func Run(ctx context.Context, cfg *agent.Config, version string, logErr func(str
 	srv.Shutdown(sdctx)
 	stop()
 	return serveErr
+}
+
+// pipeHeld reports that another process holds the helper's pipe name (winpipe.Serve keeps trying): every try
+// goes to the audit log, the first one and the recovery also to the Event Log. The fan watchdog and the BMC
+// reader run meanwhile; only the agent cannot reach the helper (it refuses to talk to the other process).
+func pipeHeld(audit *slog.Logger, logErr func(string)) func(holder string, err error, retryIn time.Duration) {
+	reported := false
+	return func(holder string, err error, retryIn time.Duration) {
+		if err == nil {
+			audit.Warn("pipe: the name is free again, serving", "pipe", proto.PipeName)
+			logErr("fairy-agent-helper: the pipe " + proto.PipeName + " is free again; the helper serves the agent")
+			reported = false
+			return
+		}
+		audit.Error("pipe: another process holds the name; trying again", "pipe", proto.PipeName, "held_by", holder,
+			"error", err.Error(), "retry_in", retryIn.String())
+		if !reported {
+			reported = true
+			logErr("fairy-agent-helper: another process holds the pipe " + proto.PipeName + " (" + holder +
+				"); the helper keeps trying and the fan watchdog keeps running, but the agent cannot reach the helper until that process ends")
+		}
+	}
 }
 
 // ErrNotService is returned when the helper is started outside the service manager.

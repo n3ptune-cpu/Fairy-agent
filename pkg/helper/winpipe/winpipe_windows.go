@@ -190,8 +190,15 @@ type Allowed func(tok windows.Token) bool
 // instance is created with FILE_FLAG_FIRST_PIPE_INSTANCE (fails if anyone else already owns the name), and one
 // instance is always kept listening, so the name is never free for another process to take over. Remote
 // clients are refused by the pipe itself (PIPE_REJECT_REMOTE_CLIENTS) and by the DACL.
+//
+// When another process already holds the name (it can be taken while the helper is stopped: during an update,
+// after Stop in the panel, after a crash), Serve does not give up: it tries again after RetryDelay, for as long
+// as it takes, and tells held who holds the name (holder), why creating failed and when the next try is. When
+// the name is finally its own, held is called once more with a nil error. The agent never talks to such a
+// process (Dial checks the server's process id against the service manager's).
 func Serve(ctx context.Context, name, sddl string, maxConns int, allow Allowed,
-	handle func(ctx context.Context, c *Conn, who Client), reject func(who Client, why string)) error {
+	handle func(ctx context.Context, c *Conn, who Client), reject func(who Client, why string),
+	held func(holder string, err error, retryIn time.Duration)) error {
 	sd, err := windows.SecurityDescriptorFromString(sddl)
 	if err != nil {
 		return fmt.Errorf("pipe security descriptor: %w", err)
@@ -210,9 +217,27 @@ func Serve(ctx context.Context, name, sddl string, maxConns int, allow Allowed,
 			windows.PIPE_TYPE_BYTE|windows.PIPE_READMODE_BYTE|windows.PIPE_WAIT|windows.PIPE_REJECT_REMOTE_CLIENTS,
 			uint32(maxConns+2), 64<<10, 64<<10, 0, sa)
 	}
-	h, err := create(true)
-	if err != nil {
-		return fmt.Errorf("creating the pipe %s (is another process using the name?): %w", name, err)
+	var h windows.Handle
+	for attempt := 0; ; attempt++ {
+		h, err = create(true)
+		if err == nil {
+			if attempt > 0 && held != nil {
+				held("", nil, 0)
+			}
+			break
+		}
+		if !nameHeld(err) {
+			return fmt.Errorf("creating the pipe %s: %w", name, err)
+		}
+		d := RetryDelay(attempt)
+		if held != nil {
+			held(pipeHolder(n16), err, d)
+		}
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-time.After(d):
+		}
 	}
 	sem := make(chan struct{}, maxConns)
 	var wg sync.WaitGroup
@@ -267,6 +292,43 @@ func Serve(ctx context.Context, name, sddl string, maxConns int, allow Allowed,
 		}
 		h = next
 	}
+}
+
+// nameHeld reports whether creating the first instance failed because the name already exists: Windows answers
+// ERROR_ACCESS_DENIED to FILE_FLAG_FIRST_PIPE_INSTANCE then, or ERROR_PIPE_BUSY when the other pipe allows no
+// further instance.
+func nameHeld(err error) bool {
+	return errors.Is(err, windows.ERROR_ACCESS_DENIED) || errors.Is(err, windows.ERROR_PIPE_BUSY)
+}
+
+// pipeHolder describes the process that serves the pipe name now ("pid 1234, C:\path\program.exe"), for the
+// log. It opens the pipe as a client that allows the server nothing (anonymous: the server cannot identify it,
+// let alone act as it), asks only for the right to read attributes, sends and reads nothing, and closes at
+// once. The program's path comes from OpenProcess with PROCESS_QUERY_LIMITED_INFORMATION (no access to the
+// process's memory).
+func pipeHolder(n16 *uint16) string {
+	h, err := windows.CreateFile(n16, windows.FILE_READ_ATTRIBUTES, 0, nil, windows.OPEN_EXISTING,
+		windows.SECURITY_SQOS_PRESENT|windows.SECURITY_ANONYMOUS, 0)
+	if err != nil {
+		return "unknown process (the pipe could not be asked: " + err.Error() + ")"
+	}
+	defer windows.CloseHandle(h)
+	var pid uint32
+	if err := windows.GetNamedPipeServerProcessId(h, &pid); err != nil || pid == 0 {
+		return "unknown process"
+	}
+	who := fmt.Sprintf("pid %d", pid)
+	p, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION, false, pid)
+	if err != nil {
+		return who
+	}
+	defer windows.CloseHandle(p)
+	buf := make([]uint16, windows.MAX_PATH*4)
+	n := uint32(len(buf))
+	if err := windows.QueryFullProcessImageName(p, 0, &buf[0], &n); err != nil || n == 0 {
+		return who
+	}
+	return who + ", " + windows.UTF16ToString(buf[:n])
 }
 
 // connect waits for a client (ConnectNamedPipe, overlapped) until ctx ends.
