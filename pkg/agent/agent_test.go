@@ -837,3 +837,48 @@ func TestProcessGPUMemoryMerge(t *testing.T) {
 		t.Fatalf("%v", top)
 	}
 }
+
+// Review N5 / L19: whenever command lines are sent (the key says true, or an existing config has no key), the
+// secrets the filter knows are hidden in them and the answer is cut to 300 characters; the panel is told that
+// they are on ("features"). With `cmdline: false` there are none.
+func TestCmdlineIsRedactedWheneverItIsOn(t *testing.T) {
+	for y, on := range map[string]bool{"": true, "processes: {enabled: true}\n": true, "processes: {cmdline: true}\n": true,
+		"processes: {cmdline: false}\n": false} {
+		r := newRig(t, y)
+		c := r.a.d.Collector.(*agenttest.Collector)
+		c.Procs = append(c.Procs,
+			collect.Process{PID: 9001, Name: collect.P("mysql"), CPUPercent: collect.P(50.0),
+				Cmdline: collect.P("mysql -uroot -pS3cretPw --password=hunter2 appdb")},
+			collect.Process{PID: 9002, Name: collect.P("curl"), CPUPercent: collect.P(49.0),
+				Cmdline: collect.P("curl -H 'Authorization: Bearer abcdefghijklmnopqrstuvwxyz012345' https://example.com/?token=tok_1234567890abcdef")},
+			collect.Process{PID: 9003, Name: collect.P("long"), CPUPercent: collect.P(48.0),
+				Cmdline: collect.P("long " + strings.Repeat("x", 5000))})
+		st, b := r.do(t, "GET", "/processes?limit=200", readTok, nil)
+		if st != 200 {
+			t.Fatal(y, st, b)
+		}
+		raw, _ := json.Marshal(b)
+		for _, secret := range []string{"S3cretPw", "hunter2", "abcdefghijklmnopqrstuvwxyz012345", "tok_1234567890abcdef"} {
+			if strings.Contains(string(raw), secret) {
+				t.Errorf("config %q: the answer shows %q", y, secret)
+			}
+		}
+		seen := 0
+		for _, p := range b["processes"].([]any) {
+			c, _ := p.(map[string]any)["cmdline"].(string)
+			if c != "" {
+				seen++
+			}
+			if len([]rune(c)) > 300 {
+				t.Errorf("config %q: a command line of %d characters", y, len([]rune(c)))
+			}
+		}
+		if (seen > 0) != on {
+			t.Errorf("config %q: %d command lines in the answer, want on=%v", y, seen, on)
+		}
+		_, m := r.do(t, "GET", "/metrics", readTok, nil)
+		if f := m["features"].(map[string]any); f["cmdline"] != on {
+			t.Errorf("config %q: features.cmdline is %v", y, f["cmdline"])
+		}
+	}
+}
