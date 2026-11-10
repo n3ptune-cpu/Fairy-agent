@@ -25,7 +25,7 @@
   as a file (powershell -ExecutionPolicy Bypass -File install.ps1 ..., lines of older panels).
 
 .DESCRIPTION
-  1. downloads the release into a new folder that only Administrators and SYSTEM can reach:
+  1. downloads the release into a new folder in C:\Windows\Temp that only Administrators and SYSTEM can reach:
      fairy-agent-windows-amd64.exe, SHA256SUMS (+ signature), VERSION and install-fairy-agent.ps1, and checks each file's SHA-256 against SHA256SUMS and SHA256SUMS' signature with
      the release key built into the downloaded fairy-agent. An already installed fairy-agent.exe is never run
      before it has been replaced by the checked one (fairy-agent 0.4.2 and older let the service's own account
@@ -93,15 +93,30 @@ function Invoke-Quiet([string]$cmd, [string[]]$cmdArgs) {
     return @{ Code = $LASTEXITCODE; Text = $out.Trim() }
 }
 
-# The work folder: new, with a random name, and reachable only by Administrators and SYSTEM before anything
-# is downloaded into it. What is downloaded is checked and then run from here as Administrator, so no other
-# account may be able to swap a file between the check and the run (a window that runs as SYSTEM, as some
-# remote-support tools give, has a temp folder that other users can write to).
-$dir = Join-Path $env:TEMP ('fairy-install-' + [guid]::NewGuid().ToString('N'))
-New-Item -ItemType Directory -Path $dir | Out-Null   # no -Force: a folder of that name must not exist yet
+# The work folder. What is downloaded is checked and then run from here as Administrator, so nobody else may
+# be able to swap a file, or the whole folder, between the check and the run:
+#   - It is in C:\Windows\Temp, not in $env:TEMP. For an elevated administrator $env:TEMP is the user's own temp
+#     folder, where every program of that user, also one that is not elevated, may rename or delete what is
+#     inside whatever permissions the work folder has, and so swap the whole folder. In C:\Windows\Temp other
+#     accounts may add files, but not rename or delete what they did not make.
+#   - It is new, with a random name, and created together with its permissions (Administrators and SYSTEM
+#     only, owner Administrators, nothing inherited): there is no moment in which it has the permissions it
+#     would inherit. What the create call made is then looked at, and nothing is downloaded unless it is right.
+$dir = Join-Path (Join-Path $env:SystemRoot 'Temp') ('fairy-install-' + [guid]::NewGuid().ToString('N'))
+if (Test-Path -LiteralPath $dir) { throw "the work folder $dir exists already; nothing was downloaded. Run the line again." }
+$admins = 'S-1-5-32-544', 'S-1-5-18'   # Administrators, SYSTEM
+$sec = New-Object System.Security.AccessControl.DirectorySecurity
+$sec.SetSecurityDescriptorSddlForm('O:BAD:PAI(A;OICI;FA;;;BA)(A;OICI;FA;;;SY)')
+if ($PSVersionTable.PSEdition -eq 'Core') { [System.IO.FileSystemAclExtensions]::Create((New-Object System.IO.DirectoryInfo($dir)), $sec) }
+else { [System.IO.Directory]::CreateDirectory($dir, $sec) | Out-Null }
 try {
-    & (Join-Path $env:SystemRoot 'System32\icacls.exe') $dir /inheritance:r /grant:r '*S-1-5-32-544:(OI)(CI)F' '*S-1-5-18:(OI)(CI)F' /Q | Out-Null
-    if ($LASTEXITCODE -ne 0) { throw "could not restrict the work folder $dir to administrators (icacls exit code $LASTEXITCODE); nothing was downloaded" }
+    $sid = [Security.Principal.SecurityIdentifier]
+    $acl = Get-Acl -LiteralPath $dir
+    $rules = @($acl.GetAccessRules($true, $true, $sid))
+    $bad = @($rules | Where-Object { $admins -notcontains $_.IdentityReference.Value })
+    if (($admins -notcontains $acl.GetOwner($sid).Value) -or (-not $acl.AreAccessRulesProtected) -or $rules.Count -eq 0 -or $bad.Count -ne 0) {
+        throw "the work folder $dir did not get the permissions it was created with (owner $($acl.GetOwner($sid).Value), $($acl.Sddl)); nothing was downloaded"
+    }
     if (@(Get-ChildItem -LiteralPath $dir -Force).Count -ne 0) { throw "the new work folder $dir is not empty: something else wrote to it; nothing was downloaded" }
     Write-Host "fairy: downloading the release from $ReleaseUrl"
     $files = 'fairy-agent-windows-amd64.exe', 'SHA256SUMS', 'SHA256SUMS.sig', 'VERSION', 'install-fairy-agent.ps1'
@@ -116,15 +131,21 @@ try {
 
     # 1. every file must be listed in SHA256SUMS with the same SHA-256
     $sums = @{}
-    foreach ($line in Get-Content (Join-Path $dir 'SHA256SUMS')) {
+    foreach ($line in Get-Content -LiteralPath (Join-Path $dir 'SHA256SUMS')) {
         $p = $line -split '\s+', 2
         if ($p.Count -eq 2) { $sums[$p[1].TrimStart('*')] = $p[0].ToLower() }
     }
     foreach ($f in $files) {
         if ($f -like 'SHA256SUMS*') { continue }
         if (-not $sums.ContainsKey($f)) { throw "$f is not listed in SHA256SUMS" }
-        $got = (Get-FileHash -Algorithm SHA256 (Join-Path $dir $f)).Hash.ToLower()
+        $got = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $dir $f)).Hash.ToLower()
         if ($got -ne $sums[$f]) { throw "$f does not match SHA256SUMS (corrupted or tampered download)" }
+    }
+    # A file from the work folder is hashed once more in the moment before it is run (the folder is one nobody
+    # else can write; this is the second lock on the same door).
+    function Assert-Checked([string]$f) {
+        $got = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $dir $f)).Hash.ToLower()
+        if ($got -ne $sums[$f]) { throw "$f changed after it was checked: not running it" }
     }
 
     # 2. the signature, with the release key built into the downloaded fairy-agent (its hash was checked above).
@@ -132,7 +153,8 @@ try {
     #    replaced it with the checked program, it may have been changed by the service's own account (0.4.2).
     $exe = Join-Path $env:ProgramFiles 'Fairy\fairy-agent.exe'
     $new = Join-Path $dir 'fairy-agent-windows-amd64.exe'
-    Unblock-File $new
+    Unblock-File -LiteralPath $new
+    Assert-Checked 'fairy-agent-windows-amd64.exe'
     $rc = (Invoke-Quiet $new @('verify-release', $dir)).Code
     $relName = "" + (Get-Content -LiteralPath (Join-Path $dir 'VERSION') -TotalCount 1)
     if ($rc -eq 0 -and $SumsSha256) { Write-Host "fairy: release $relName verified (the panel's fingerprint, signature and hashes)" }
@@ -163,6 +185,8 @@ try {
     $instArgs = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', (Join-Path $dir 'install-fairy-agent.ps1'),
                   '-PanelAddress', $PanelAddress, '-Quiet', '-KeptMarker', $kept)
     if ($CoreTemp -or $Ipmi -or $PowerControl) { $instArgs += '-Helper' }
+    Assert-Checked 'install-fairy-agent.ps1'
+    Assert-Checked 'fairy-agent-windows-amd64.exe'   # the script copies it to C:\Program Files\Fairy
     & $ps @instArgs
     if ($LASTEXITCODE -ne 0) { throw 'install-fairy-agent.ps1 failed (see above); nothing was paired' }
 
@@ -215,5 +239,5 @@ try {
     Write-Host ('fairy: not paired yet: ' + (Invoke-Quiet $exe @('pair-status')).Text)
     Write-Host 'fairy: the panel keeps trying while the code is valid; log: C:\ProgramData\fairy-agent\logs\agent.log'
 } finally {
-    Remove-Item -Recurse -Force $dir -ErrorAction SilentlyContinue
+    Remove-Item -Recurse -Force -LiteralPath $dir -ErrorAction SilentlyContinue
 }
