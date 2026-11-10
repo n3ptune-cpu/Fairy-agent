@@ -30,6 +30,11 @@
 
   Run it again with a newer fairy-agent-windows-amd64.exe to update by hand; config and tokens are kept.
 
+  Never older: when a VERSION file is next to this script (install.ps1 downloads it) and the installed
+  fairy-agent is a newer build than that release, the installed program is kept and only the services,
+  permissions and the firewall rule are checked. The installed program is asked for its version only when
+  nobody but administrators and SYSTEM can change it or its folder.
+
 .PARAMETER Helper
   Also install the elevated helper service (fairy-agent-helper), even if config.yaml does not switch on Core
   Temp, IPMI, fan or power control yet (install.ps1 passes it when you chose one of those in the panel).
@@ -43,6 +48,10 @@
 .PARAMETER Quiet
   Leave out the "next steps" at the end (install.ps1, the panel's Add host, pairs the tokens by itself).
 
+.PARAMETER KeptMarker
+  A file to write the installed version into when the installed program was kept because it is newer than
+  this release (install.ps1 passes a path in its own work folder and reads it afterwards).
+
 .EXAMPLE
   .\install-fairy-agent.ps1 -PanelAddress 100.64.0.2
 #>
@@ -51,7 +60,8 @@ param(
     [switch]$LocalSystem,
     [string]$PanelAddress = '100.64.0.0/10',
     [int]$Port = 9101,
-    [switch]$Quiet
+    [switch]$Quiet,
+    [string]$KeptMarker = ''
 )
 $ErrorActionPreference = 'Stop'
 if ($LocalSystem) {
@@ -86,6 +96,72 @@ $dir = Join-Path $env:ProgramFiles 'Fairy'
 $exe = Join-Path $dir 'fairy-agent.exe'
 New-Item -ItemType Directory -Force -Path $dir | Out-Null
 
+# Runs a native program without letting Windows PowerShell 5.1 turn its stderr into a terminating error.
+function Invoke-Quiet([string]$cmd, [string[]]$cmdArgs) {
+    $old = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+    try { $out = & $cmd @cmdArgs 2>&1 | Out-String } finally { $ErrorActionPreference = $old }
+    return @{ Code = $LASTEXITCODE; Text = $out.Trim() }
+}
+
+# The build number at the start of a version ("42-1a2b3c4" -> 42); -1 for any other format.
+function Get-BuildNumber([string]$v) {
+    if ($v -match '^([0-9]{1,9})(-|$)') { return [int]$Matches[1] }
+    return -1
+}
+
+# True when only Administrators, SYSTEM and TrustedInstaller own $path and may change it (write, delete, change
+# permissions, take ownership). Anything unexpected, also an error while looking, counts as "no".
+function Test-AdminOnly([string]$path) {
+    try {
+        $trusted = 'S-1-5-32-544', 'S-1-5-18', 'S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464'
+        $sid = [Security.Principal.SecurityIdentifier]
+        $acl = Get-Acl -LiteralPath $path
+        if ($trusted -notcontains $acl.GetOwner($sid).Value) { return $false }
+        $change = 0x000D0156 -bor 0x40000000 -bor 0x10000000
+        foreach ($ace in $acl.GetAccessRules($true, $true, $sid)) {
+            if ($ace.AccessControlType -ne [Security.AccessControl.AccessControlType]::Allow) { continue }
+            $who = $ace.IdentityReference.Value
+            if (($trusted -contains $who) -or ($who -eq 'S-1-3-0')) { continue }   # S-1-3-0: CREATOR OWNER
+            if (([int]$ace.FileSystemRights -band $change) -ne 0) { return $false }
+        }
+        return $true
+    } catch { return $false }
+}
+
+# Never older: the panel's command names one pinned release. When the installed fairy-agent is a newer build
+# (it was updated since), putting the pinned one over it would lose fixes without a word. The installed program
+# is run to ask its version only when nobody but administrators could have changed it (fairy-agent 0.4.2 and
+# older let the service's own account write to this folder); otherwise it is replaced, as before.
+$keep = $false
+$have = ''
+$newVersion = ''
+$versionFile = Join-Path $PSScriptRoot 'VERSION'
+if (Test-Path -LiteralPath $versionFile) {
+    $parts = @(("" + (Get-Content -LiteralPath $versionFile -TotalCount 1)) -split '\s+')
+    if ($parts.Count -ge 2) { $newVersion = $parts[1] }
+}
+if ($newVersion -and (Test-Path -LiteralPath $exe)) {
+    if ((Test-AdminOnly $dir) -and (Test-AdminOnly $exe)) {
+        $r = Invoke-Quiet $exe @('version')
+        if ($r.Code -eq 0 -and $r.Text -match '^fairy-agent (\S+) ') { $have = $Matches[1] }
+        $haveBuild = Get-BuildNumber $have
+        if ($haveBuild -ge 0) {
+            $newBuild = Get-BuildNumber $newVersion
+            if ($newBuild -lt 0) {
+                throw "this release's version ($newVersion) has no build number, so it cannot be told whether it is older than the installed fairy-agent $have. Not installed. (By hand, to force it: fairy-agent.exe update --force)"
+            }
+            if ($haveBuild -gt $newBuild) { $keep = $true }
+        }
+    } else {
+        Write-Host 'fairy: the installed program or its folder can be changed by another account (an install from 0.4.2 or older?): it is not asked for its version and is replaced'
+    }
+}
+if ($keep) {
+    Write-Host "fairy: the installed fairy-agent $have is NEWER than this installer's release ${newVersion}:"
+    Write-Host 'fairy:   the program is kept as it is; the services, permissions and the firewall rule are still checked.'
+    Write-Host 'fairy:   (The panel that made this command pins an older agent release: update the panel.)'
+}
+
 $svc = Get-Service -Name 'fairy-agent' -ErrorAction SilentlyContinue
 if ($svc -and $svc.Status -ne 'Stopped') { Stop-Service -Name 'fairy-agent' }
 # the helper runs the same program: stop it too (it hands the fans back to the BMC's automatic mode first)
@@ -97,12 +173,16 @@ if ($svc) {
     & (Join-Path $sys 'icacls.exe') $dir /remove:g 'NT SERVICE\fairy-agent' /T /C /Q | Out-Null
     if ($LASTEXITCODE -ne 0) { throw "could not remove the service's write access to $dir (icacls exit code $LASTEXITCODE)" }
 }
-# a new file, so it is owned by Administrators (0.4.2's in-service updater left one owned by the service account)
-if (Test-Path -LiteralPath $exe) { Remove-Item -LiteralPath $exe -Force }
-Copy-Item -LiteralPath $src -Destination $exe -Force
-Unblock-File -LiteralPath $exe
-# Run the installed program (as Administrator) only if it is exactly the checked one.
-if ((Get-Sha256 $exe) -ne $srcHash) { throw "$exe is not the program that was checked: not running it" }
+if (-not $keep) {
+    # a new file, so it is owned by Administrators (0.4.2's in-service updater left one owned by the service account)
+    if (Test-Path -LiteralPath $exe) { Remove-Item -LiteralPath $exe -Force }
+    Copy-Item -LiteralPath $src -Destination $exe -Force
+    Unblock-File -LiteralPath $exe
+    # Run the installed program (as Administrator) only if it is exactly the checked one.
+    if ((Get-Sha256 $exe) -ne $srcHash) { throw "$exe is not the program that was checked: not running it" }
+} elseif ($KeptMarker) {
+    Set-Content -LiteralPath $KeptMarker -Value $have -Encoding ASCII
+}
 & $exe version
 
 $helperArg = @()

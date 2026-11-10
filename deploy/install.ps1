@@ -104,13 +104,24 @@ try {
 
     # 3. program, services, permissions, firewall (the existing installer script). The agent runs as
     #    NT SERVICE\fairy-agent; Core Temp, IPMI (fans) and power control go through the elevated helper.
-    $inst = @{ PanelAddress = $PanelAddress; Quiet = $true }
-    if ($CoreTemp -or $Ipmi -or $PowerControl) { $inst.Helper = $true }
-    & (Join-Path $dir 'install-fairy-agent.ps1') @inst
+    #    It runs in a Windows PowerShell of its own: a script file needs an execution policy that allows it,
+    #    which the window this was started from may not have.
+    $kept = Join-Path $dir 'kept-newer.txt'
+    $ps = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+    $instArgs = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', (Join-Path $dir 'install-fairy-agent.ps1'),
+                  '-PanelAddress', $PanelAddress, '-Quiet', '-KeptMarker', $kept)
+    if ($CoreTemp -or $Ipmi -or $PowerControl) { $instArgs += '-Helper' }
+    & $ps @instArgs
+    if ($LASTEXITCODE -ne 0) { throw 'install-fairy-agent.ps1 failed (see above); nothing was paired' }
 
-    # the program now installed must be the checked one before it runs again as Administrator
-    $got = (Get-FileHash -Algorithm SHA256 -LiteralPath $exe).Hash.ToLower()
-    if ($got -ne $sums['fairy-agent-windows-amd64.exe']) { throw "$exe does not match the signed SHA256SUMS: not running it" }
+    if (Test-Path -LiteralPath $kept) {
+        # never older: a newer fairy-agent is installed and was kept, so it is not the downloaded program
+        Write-Host ('fairy: pairing with the installed fairy-agent ' + (Get-Content -LiteralPath $kept -TotalCount 1))
+    } else {
+        # the program now installed must be the checked one before it runs again as Administrator
+        $got = (Get-FileHash -Algorithm SHA256 -LiteralPath $exe).Hash.ToLower()
+        if ($got -ne $sums['fairy-agent-windows-amd64.exe']) { throw "$exe does not match the signed SHA256SUMS: not running it" }
+    }
 
     # 4. tokens, settings and the join code (prints no secret)
     $joinArgs = @('join', '--code', $Join, '--panel', $PanelAddress)
