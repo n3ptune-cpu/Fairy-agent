@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"regexp"
 	"sync"
 	"time"
@@ -29,6 +30,13 @@ type powerBy interface {
 	ScheduleBy(action string, delay time.Duration, who string) error
 }
 
+// pendingSource is a PowerExec that knows which action of Fairy's own is pending, also one scheduled before
+// this process started: RememberedPower (the operating system counts the shutdown down, a file remembers it)
+// and the Windows helper's client (the helper remembers it and says so in its status).
+type pendingSource interface {
+	PendingAction() (Pending, bool)
+}
+
 // Pending is the scheduled power action as /metrics and /power report it.
 type Pending struct {
 	Action      string  `json:"action"`
@@ -45,6 +53,10 @@ type Power struct {
 
 	mu      sync.Mutex
 	pending *Pending
+	// dropped is the time (Pending.At) of the action this process cancelled last: what the exec still reports
+	// for a moment afterwards (the helper's status is cached for a few seconds) is not shown again. Compared
+	// within two seconds.
+	dropped float64
 	sleep   struct {
 		ok    bool
 		why   string
@@ -84,12 +96,24 @@ func cleanWho(v any) string {
 	return s
 }
 
-// current returns the pending action, dropping it once its time has passed. Caller holds p.mu.
+// current returns the pending action, dropping it once its time has passed. When this process has none of
+// its own (it restarted since), it is the one the exec still remembers: a Windows shutdown goes on counting
+// down while the agent restarts, and must stay visible and cancellable. Caller holds p.mu.
 func (p *Power) current() *Pending {
-	if p.pending != nil && float64(p.now().Unix()) > p.pending.At+60 {
+	now := float64(p.now().Unix())
+	if p.pending != nil && now > p.pending.At+60 {
 		p.pending = nil
 	}
-	return p.pending
+	if p.pending != nil {
+		return p.pending
+	}
+	if src, ok := p.exec.(pendingSource); ok {
+		// the exec's clock reading for the same action differs from this process's by a few milliseconds
+		if c, ok := src.PendingAction(); ok && math.Abs(c.At-p.dropped) > 2 && now <= c.At+60 {
+			return &c
+		}
+	}
+	return nil
 }
 
 // Scheduled reports whether a shutdown, reboot or sleep is pending.
@@ -130,7 +154,15 @@ func (p *Power) Handle(req PowerRequest) (int, map[string]any) {
 	who := cleanWho(req.RequestedBy)
 	switch req.Action {
 	case "cancel":
-		if p.current() == nil {
+		// Only an action of Fairy's own is cancelled. With none pending the operating system is not asked to
+		// abort anything: a shutdown Fairy did not start is not the panel's to cancel.
+		c := p.current()
+		if c == nil {
+			// the helper is the one that remembers; while it is stopped nobody can tell (or cancel)
+			if k, ok := p.exec.(interface{ PendingKnown() bool }); ok && !k.PendingKnown() {
+				return 503, map[string]any{"error": "helper stopped: cannot tell whether a shutdown is pending, and cannot cancel one",
+					"code": api.ReasonHelperStopped}
+			}
 			return 200, map[string]any{"action": "cancel", "pending": nil}
 		}
 		if err := p.exec.Cancel(); errors.Is(err, api.ErrHelperStopped) {
@@ -139,8 +171,8 @@ func (p *Power) Handle(req PowerRequest) (int, map[string]any) {
 			slog.Error("power: cancel failed", "error", err.Error(), "requested_by", who)
 			return 500, map[string]any{"error": "could not cancel: " + safeErr(err)}
 		}
-		slog.Warn("power: cancelled", "action", p.pending.Action, "requested_by", who)
-		p.pending = nil
+		slog.Warn("power: cancelled", "action", c.Action, "requested_by", who)
+		p.pending, p.dropped = nil, c.At
 		return 200, map[string]any{"action": "cancel", "pending": nil}
 	case "shutdown", "reboot":
 	case "sleep":
@@ -175,10 +207,18 @@ func (p *Power) Handle(req PowerRequest) (int, map[string]any) {
 		return 500, map[string]any{"error": "could not schedule the " + req.Action + ": " + safeErr(err)}
 	}
 	at := collect.Round(float64(p.now().UnixMilli())/1000+float64(delay), 3)
-	p.pending = &Pending{Action: req.Action, At: at, DelayS: delay, RequestedBy: who}
+	p.pending, p.dropped = &Pending{Action: req.Action, At: at, DelayS: delay, RequestedBy: who}, 0
 	slog.Warn("power: scheduled", "action", req.Action, "delay_s", delay, "requested_by", who)
 	return 200, map[string]any{"action": req.Action, "pending": *p.pending}
 }
+
+// errNoShutdownInProgress is Windows' ERROR_NO_SHUTDOWN_IN_PROGRESS: AbortSystemShutdown found nothing to abort.
+const errNoShutdownInProgress = 1116
+
+// abortGone reports whether the error code of a failed AbortSystemShutdown means there was nothing to abort
+// (the shutdown was already aborted on the machine itself, e.g. with `shutdown /a`). Nothing is left to
+// cancel then, so Cancel succeeds and the remembered action is dropped.
+func abortGone(code uint32) bool { return code == errNoShutdownInProgress }
 
 // sleepFromCaps reads SYSTEM_POWER_CAPABILITIES (Windows): SystemS1-S3 at bytes 3-5, AoAc (Modern Standby) at
 // byte 20.

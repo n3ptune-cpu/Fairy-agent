@@ -4,11 +4,14 @@ package agent
 
 import (
 	"log/slog"
+	"path/filepath"
 	"sync"
 	"time"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
+
+	"github.com/n3ptune-cpu/Fairy-agent/pkg/agent/collect"
 )
 
 // systemPower uses InitiateSystemShutdownEx for shutdown and reboot: Windows itself counts down (and shows its
@@ -21,8 +24,31 @@ type systemPower struct {
 	sleep *time.Timer
 }
 
-// SystemPower returns the Windows implementation.
-func SystemPower() PowerExec { return &systemPower{} }
+// SystemPower returns the Windows implementation, remembering a pending shutdown in the helper's folder of
+// the default data folder (see SystemPowerAt).
+func SystemPower() PowerExec {
+	return systemPowerAt(filepath.Join(ProgramData(), "fairy-agent", "helper"))
+}
+
+// powerRecordFile is the record of Fairy's own pending shutdown or reboot, in the helper's folder (only
+// administrators and SYSTEM may change it; whoever runs this is LocalSystem).
+const powerRecordFile = "power-pending.json"
+
+// systemPowerAt remembers a scheduled shutdown or reboot in dir: Windows counts those down itself, so they go
+// on when this service restarts, and Cancel must still be able to abort them (and only them). Sleep is a
+// timer in this process and ends with it, so it is remembered in memory only. The folder is checked before
+// every read and write (collect.TrustedFolder); when it is not safe, nothing is stored and a restart forgets
+// the action, as before.
+func systemPowerAt(dir string) PowerExec {
+	store := PowerFile{Path: filepath.Join(dir, powerRecordFile), Check: collect.TrustedFolder}
+	return RememberPower(&systemPower{}, store, func(action string) bool { return action != "sleep" }, windowsBoot)
+}
+
+// windowsBoot is when Windows started: now minus the time since then (GetTickCount64, which goes on counting
+// while the PC sleeps).
+func windowsBoot() (time.Time, bool) {
+	return time.Now().Add(-windows.DurationSinceBoot()), true
+}
 
 var (
 	procAbortSystemShutdown = windows.NewLazySystemDLL("advapi32.dll").NewProc("AbortSystemShutdownW")
@@ -91,6 +117,10 @@ func (s *systemPower) Cancel() error {
 		return err
 	}
 	if r, _, err := procAbortSystemShutdown.Call(0); r == 0 {
+		// nothing in progress: it was aborted on the PC itself; there is nothing left to cancel
+		if errno, ok := err.(windows.Errno); ok && abortGone(uint32(errno)) {
+			return nil
+		}
 		return err
 	}
 	return nil

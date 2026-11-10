@@ -108,3 +108,7 @@ func sleepFromKernel(state string) (bool, string) {
 	}
 	return false, "the kernel offers no suspend to RAM (/sys/power/state has no \"mem\")"
 }
+
+// systemPowerAt: the agent itself waits for the time, so a pending action ends with the agent and there is
+// nothing to remember (see RememberedPower for Windows).
+func systemPowerAt(string) PowerExec { return SystemPower() }

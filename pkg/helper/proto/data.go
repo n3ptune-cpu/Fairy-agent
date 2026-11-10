@@ -10,6 +10,18 @@ type StatusData struct {
 	Watchdog  bool     `json:"watchdog"` // the fan watchdog runs
 	SleepOK   bool     `json:"sleep_ok"`
 	SleepNote string   `json:"sleep_note,omitempty"`
+	// Power is the shutdown, reboot or sleep the helper scheduled and that is still pending (also one from
+	// before the helper or the agent restarted: Windows goes on counting a shutdown down). Absent: none.
+	// Older agents ignore the field; older helpers never send it.
+	Power *PowerPending `json:"power_pending,omitempty"`
+}
+
+// PowerPending is a pending power action in StatusData.
+type PowerPending struct {
+	Action string  `json:"action"`  // shutdown | reboot | sleep
+	At     float64 `json:"at"`      // when it happens, unix seconds
+	DelayS int     `json:"delay_s"` // the delay it was asked with
+	By     string  `json:"by"`      // who asked
 }
 
 // CoreTempData is the answer to coretemp_read: an unparsed copy of Core Temp's shared memory (the agent parses

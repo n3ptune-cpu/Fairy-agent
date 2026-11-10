@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -92,7 +93,8 @@ func FromConfig(cfg *agent.Config, version string, audit *slog.Logger) (Parts, f
 		}
 	}
 	if cfg.PowerControl.Enabled {
-		p.Power = agent.SystemPower()
+		// a pending shutdown is remembered in the helper's own folder, so Cancel still works after a restart
+		p.Power = agent.SystemPowerAt(filepath.Join(cfg.Dir(), "helper"))
 		p.MinDelayS = cfg.PowerControl.MinDelayS
 	}
 	if cfg.SelfUpdate.Enabled {
@@ -218,7 +220,7 @@ func (s *Server) dispatch(ctx context.Context, r proto.Request) proto.Response {
 	case proto.VerbStatus:
 		ok, note := s.canSleep()
 		return proto.OK(proto.StatusData{Version: s.p.Version, Started: s.started.UTC().Format(time.RFC3339),
-			Features: s.Features(), Watchdog: s.p.Fan != nil, SleepOK: ok, SleepNote: note})
+			Features: s.Features(), Watchdog: s.p.Fan != nil, SleepOK: ok, SleepNote: note, Power: s.pendingPower()})
 	case proto.VerbCoreTempRead:
 		if s.p.CoreTemp == nil {
 			return disabled("Core Temp")
@@ -305,11 +307,34 @@ func (s *Server) power(r proto.Request) proto.Response {
 			return proto.WithStatus(409, map[string]any{"error": "this machine cannot sleep: " + why, "code": "sleep_unavailable"})
 		}
 	}
-	msg := fmt.Sprintf("Fairy: %s requested by %s in %d seconds.", action, deref(r.By), *r.DelayS)
-	if err := s.p.Power.Schedule(action, time.Duration(*r.DelayS)*time.Second, msg); err != nil {
+	delay := time.Duration(*r.DelayS) * time.Second
+	var err error
+	if by, ok := s.p.Power.(interface {
+		ScheduleBy(action string, delay time.Duration, who string) error
+	}); ok && r.By != nil { // remembers who asked with the action (agent.RememberedPower); the same message
+		err = by.ScheduleBy(action, delay, *r.By)
+	} else {
+		msg := fmt.Sprintf("Fairy: %s requested by %s in %d seconds.", action, deref(r.By), *r.DelayS)
+		err = s.p.Power.Schedule(action, delay, msg)
+	}
+	if err != nil {
 		return proto.Fail(proto.CodeFailed, action+": "+short(err))
 	}
 	return proto.OK(proto.PowerData{Action: action})
+}
+
+// pendingPower is the action the helper scheduled that is still pending (nil: none, or the power part does
+// not remember).
+func (s *Server) pendingPower() *proto.PowerPending {
+	src, ok := s.p.Power.(interface{ PendingAction() (agent.Pending, bool) })
+	if !ok {
+		return nil
+	}
+	c, ok := src.PendingAction()
+	if !ok {
+		return nil
+	}
+	return &proto.PowerPending{Action: c.Action, At: c.At, DelayS: c.DelayS, By: c.RequestedBy}
 }
 
 // minDelay is the shortest delay the helper accepts: config.yaml's, never below the protocol's.
