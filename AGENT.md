@@ -121,8 +121,9 @@ running program. So:
 
 **Lines from an older panel** look different: they carry the code as `--join CODE` (Linux) or `-Join CODE`
 (Windows), have no `--pair-v2` / `-PairV2`, and on Windows save the script to a file first. The scripts still
-accept them. On Linux the script then prints a note that the code was readable on the command line while it
-ran. Update the panel to get the new line.
+accept them. This old form is deprecated: `install.sh --join CODE`, `install.ps1 -Join CODE` and
+`fairy-agent join --code CODE` each print one warning that says so (the warning never contains the code), and
+the form will be removed in a later release. Update the panel to get the new line.
 
 **Without the panel's fingerprint the scripts stop.** `install.sh` without `--sums-sha256` and `install.ps1`
 without `-SumsSha256` end with `no release fingerprint` before they download anything. The options
@@ -257,7 +258,10 @@ on your home network or the internet unless you set `listen:` yourself. Until Ta
    that is what those three folders are for.)
 
 **A healthy PC passes, and nothing is written.** `config.yaml`, the tokens and the pairing stay exactly as
-they are. Running `install-fairy-agent.ps1` again by hand does not unpair the PC. The output has no line that
+they are. One of Fairy's own folders that SYSTEM owns instead of Administrators is healthy too (`update\stage`
+is, on a PC whose agent once ran as LocalSystem). If the agent's own account owns one of its three folders,
+Administrators are made the owner of that folder, nothing inside it is touched, and one `repaired:` line says
+so. Running `install-fairy-agent.ps1` again by hand does not unpair the PC. The output has no line that
 starts with `repaired:` or `IMPORTANT:`.
 
 (The panel's **Re-pair** always makes new tokens and hands them to the panel. That is what Re-pair is for, and
@@ -373,7 +377,9 @@ identify it, not act as it.
 
 **The fan watchdog lives in the helper**: while a fixed fan speed is set it checks the CPU temperature every
 10 seconds (the BMC's sensors, and Core Temp's when that is on) and puts both zones to 100 % at 80 °C or after
-30 seconds without any temperature. It keeps working if the agent stops or crashes. When the helper itself
+30 seconds without any temperature (see [Fan control](#fan-control-supermicro) for what counts as a
+temperature and what happens when the BMC does not say its fan mode). It keeps working if the agent stops or
+crashes. When the helper itself
 stops (Stop-Service, the panel's Stop, an update, Windows shutting down) it first hands the fans back to the
 BMC's automatic mode (`auto_mode`, or "standard" when the board refuses that), so fans never keep a fixed speed
 without a watchdog. A mode you chose yourself (standard, optimal, heavy IO) is left as it is.
@@ -738,6 +744,19 @@ Safety: the agent refuses any speed below 30 % (the panel does too). While you h
 the CPU temperature every 10 seconds; at 80 °C, or if it cannot read any temperature for 30 seconds, it sets
 both zones back to 100 % and writes that in the fan log the panel shows.
 
+Two details of that watchdog (0.6.0):
+
+* **An old BMC temperature is no temperature.** A BMC temperature older than 60 seconds counts as no reading
+  (with the default `ipmi.sensor_interval_s: 10` already after 30 seconds). Where a fixed fan speed is used on
+  a machine without an OS temperature, keep `ipmi.sensor_interval_s` at 25 or less; with a longer interval
+  the watchdog may find no fresh reading and set 100 %.
+* **When the BMC does not say what fan mode it is in.** One failed answer changes nothing: the next check
+  that gets an answer acts as always. After three checks in a row without an answer (20 seconds) the watchdog
+  assumes a fixed speed may be set: at the temperature limit or without a reading it sets 100 %, and hands
+  the fans back to the BMC's automatic mode only if the BMC refuses that. It never sets a lower speed. While
+  the BMC stays silent it tries again every 30 seconds and writes what happened once, not with every try. As
+  soon as the BMC says its mode again, the watchdog is back to its ordinary rule.
+
 **When a lower speed is refused (0.6.0).** A fixed speed of 100 % is always accepted. A speed below 100 % is
 refused with HTTP 409 in three cases. The answer carries a `code` and a sentence that the panel shows:
 
@@ -745,7 +764,7 @@ refused with HTTP 409 in three cases. The answer carries a `code` and a sentence
 | --- | --- | --- |
 | `fan_too_hot` | the hottest CPU reading is at or above `max_temp_c`, or a temperature sensor reports something that is not a number | wait until it is cooler; only 100 % is accepted until then |
 | `fan_watchdog_hold` | the watchdog set the fans to 100 % less than 5 minutes ago | wait; the answer says how many seconds are left |
-| `fan_no_temperature` | no temperature is known at all, neither from the BMC nor from the operating system | wait a moment and try again. This is normal right after the agent or the helper has started, until the BMC's first sensor reading is in. If it stays, look at the BMC sensors in the panel |
+| `fan_no_temperature` | no temperature is known at all, neither from the BMC (a reading older than 60 seconds does not count) nor from the operating system | wait a moment and try again. This is normal right after the agent or the helper has started, until the BMC's first sensor reading is in. If it stays, look at the BMC sensors in the panel |
 
 A 409 without a `code` means the BMC is not in mode "full" (a speed is ignored in the other modes): choose
 "full" first.
@@ -901,7 +920,10 @@ BMC, through AGENT-2)" while `agent-1` is offline and `agent-2` is online.
 When the panel cannot reach a smart plug or UPS itself (for example at a friend's place), the agent there can
 read it and pass the readings on. The entries are the same as in the panel's `power_sources:` and `ups:`
 (Shelly, Tasmota, Tuya, Redfish, NUT); passwords go into a separate file named by `env_file:` as
-`NAME=value` lines and stay on that machine. `system_hint: self` links a plug to the agent's own machine, but
+`NAME=value` lines and stay on that machine. A Tasmota plug with a web password gets it the one way Tasmota
+documents, in the address of the request (`/cm?user=...&password=...`), exactly as in earlier releases. That
+address is never logged and never part of an error message. It crosses the local network unencrypted:
+Tasmota speaks plain HTTP. `system_hint: self` links a plug to the agent's own machine, but
 only for an agent that is a host of its own: for an agent merged into a Proxmox node (`node:` in the panel) it
 does not work, because the panel shows that machine under the node's id. There, and whenever the panel should
 decide, use `power_links:` in the panel's agent entry (`power_links: {<device id>: <system id>}`, e.g.
@@ -944,18 +966,22 @@ the host's page. Programs you build yourself (without the release key) never upd
   `C:\ProgramData\fairy-agent\update\last-apply` (Windows). `fairy-agent update` typed at the machine is not
   held back. The pause starts with the first update that 0.6.0's own installer runs: the update *to* 0.6.0 is
   still run by the old installer.
-* **The check after the swap sends no token.** The installer asks the agent's new `GET /health?c=<random
-  value>`. The answer proves that the agent on that port holds this machine's read token and runs the new
-  version, without the token or the version going over the wire. A program that only sits on the agent's
-  port cannot pass. (The update *to* 0.6.0 is checked the old way, by the old installer.)
+* **The check after the swap sends no token.** The installer asks the agent's new `GET /health` with a random
+  value and its own proof. The answer proves that the agent on that port holds this machine's read token and
+  runs the new version, without the token or the version going over the wire. A program that only sits on the
+  agent's port cannot pass. `/health` answers only the update's own check on the machine itself, which first
+  proves that it holds the read token. Every other request gets `404 {"error":"not found"}`, like any unknown
+  path. (The update *to* 0.6.0 is checked the old way, by the old installer.)
 * **A port held by another program.** If another program is listening on the agent's port, the agent no
   longer waits silently: after five tries it ends with `another program is listening on the agent's port`,
   and the service manager shows the failure and starts it again later.
 * **What a failed update reports.** When the new version does not come up, the installer puts the old
   program back, starts it and checks that it answers. The report then ends with `rolled back to the previous
   version`: the machine runs the old version and is fine. Only when the old version does not come up either
-  does it say `rolling back FAILED too`: then look at the machine. (Up to 0.5.3 a clean rollback was reported
-  as a failed one.)
+  does it say `rolling back FAILED too`: then look at the machine. There is a third ending, `the previous
+  version was put back and started again, but ...`: the old program was restored and started, but its check
+  could not be completed. Look at the machine; it is very likely running the old version. (Up to 0.5.3 a
+  clean rollback was reported as a failed one.)
 
 **On the machine itself** (like `tailscale update`), as root on Linux or in an Administrator PowerShell on
 Windows; this works even without `self_update` switched on:
@@ -1181,11 +1207,14 @@ are lists of devices: edit those in the file.
     minute each, 20 a minute together) and cannot use up the panel's budget or the 10 tries. With pairing v2
     the panel must prove it has the code, and the answer is encrypted
     (see [Add a host](#add-a-host-from-the-panel-one-command)).
-  * `GET /health?c=<random value>` is what the update installer asks after a swap. The answer is a proof that
-    only someone who already has this machine's read token can check. It contains neither the token nor the
-    version.
+  * `GET /health` is what the update installer asks after a swap. It answers only the update's own check on
+    the machine itself, which first proves that it holds the read token. Every other request gets
+    `404 {"error":"not found"}`, like any unknown path. The answer contains neither the token nor the version,
+    and gives nobody a value to test a guessed token against.
 * The join code is never an argument of a program: the install scripts and `fairy-agent join` take it from
-  standard input or from the environment, and never print it.
+  standard input or from the environment, and never print it. The old form with the code as an argument
+  (`--join CODE`, `-Join CODE`, `fairy-agent join --code CODE`) is still accepted, prints a deprecation line
+  without the code, and will be removed in a later release.
 * Tokens are compared in a way that does not leak their length or content through
   timing. Reading uses one token, changing anything needs the second, separate one. Repeated wrong tokens
   block that address for a minute.
@@ -1196,12 +1225,19 @@ are lists of devices: edit those in the file.
 * Command lines (Linux) are sent only with `processes.cmdline: true`, which new installs switch off. When
   they are sent, a filter blanks the passwords and tokens it recognises before they leave the machine (and
   again in the panel). The filter is best effort: it cannot know every way a program takes a secret.
+  Command lines are off only for installs made with this release or later; an existing agent keeps sending
+  them, filtered, until `fairy-agent config set processes.cmdline false` and a restart.
 * The BMC relay reaches private addresses only, passes the BMC password to ipmitool only through its
   environment, pins the Redfish certificate and never logs passwords.
-* At most 64 connections are open at a time, at most 8 from one address, and 16 of the 64 are kept for the
-  panel's address and for this machine itself, so a flood from another device cannot lock the panel out or
-  exhaust the agent's memory. A request's header must arrive within 2 seconds and fit in 4096 bytes. With
+* At most 64 connections are open at a time. A stranger's address gets 8. The panel's address gets 32, and
+  when those are busy up to 128 more of its connections wait up to 3 seconds for a free one instead of being
+  reset. 16 of the 64 are kept for the panel and this machine, 4 of those for this machine alone. So a flood
+  from another device cannot lock the panel out or exhaust the agent's memory. On an agent set up by hand, an
+  address that has shown a valid token counts as the panel for an hour. The process list is read at most once
+  a second however many ask. When more than 16 requests are waiting for it the agent answers `503` with code
+  `busy` and `Retry-After: 1`. A request's header must arrive within 2 seconds and fit in 4096 bytes. With
   `only_from_panel: true` nobody but the panel and this machine gets a connection at all.
+* A response header from a device, a BMC, an agent or the release server may be at most 64 KiB.
 * Time limits on every connection; requests are small and bounded. What a UPS server (NUT) sends is bounded too
   (4 KiB per line, 1 MiB per poll, 64 UPSes), so a broken or hostile upsd cannot exhaust memory.
 * The log cannot fill the disk: the log file is rotated at 5 MB (one old file kept), and the same message is

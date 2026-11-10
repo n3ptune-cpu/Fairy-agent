@@ -259,7 +259,9 @@ How to read it:
    differs (AGENT.md, "The agent's three folders"), so it is good to know beforehand.
    `'logs','state','update\stage' | ForEach-Object { (Get-Acl "C:\ProgramData\fairy-agent\$_").Sddl }`
    -> three times `O:BA...D:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1301bf;;;S-1-5-80-...)`. A line
-   that starts `O:SY` or `O:S-1-5-80-` with the same `D:` part is fine too (only the owner is corrected).
+   that starts `O:SY` with the same `D:` part is fine too and is left as it is (`update\stage` usually does:
+   the agent made it while it ran as LocalSystem). A line that starts `O:S-1-5-80-` with the same `D:` part
+   is fine as well: only the owner is corrected, with one `repaired:` line.
 5. Who becomes the owner of what this window creates.
    `[Security.Principal.WindowsIdentity]::GetCurrent().Owner.Value`
    -> `S-1-5-32-544` (Administrators). Another value: send it; step 2 then decides.
@@ -323,9 +325,11 @@ How to read it:
     with `belongs to S-1-5-21-...` means the guess "what Core Temp creates belongs to Administrators" is wrong
     on this PC: send it.** (With `It is used all the same` the readings still work; with `not used` they do
     not: switch on Core Temp's "Enable global shared memory (SNMP)", AGENT.md, "Core Temp".)
-21. The health answer.
-    `(Invoke-WebRequest -UseBasicParsing "http://$((Get-NetIPAddress -InterfaceAlias Tailscale -AddressFamily IPv4).IPAddress):9101/health?c=0123456789abcdef").Content`
-    -> `{"proof":"` followed by 64 hex digits; no version, no token.
+21. The health answer. `/health` answers only the update's own check on the PC itself, which first proves that
+    it holds the read token; everybody else gets the answer of a path that does not exist.
+    `try { (Invoke-WebRequest -UseBasicParsing "http://$((Get-NetIPAddress -InterfaceAlias Tailscale -AddressFamily IPv4).IPAddress):9101/health?c=0123456789abcdef").StatusCode } catch { [int]$_.Exception.Response.StatusCode }`
+    -> `404` (the body is `{"error":"not found"}`). **Not** `200`, and nothing with `proof`, a version or a
+    token in it.
 
 ### C. These change a throwaway folder or something harmless
 
