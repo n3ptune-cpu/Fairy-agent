@@ -4,17 +4,67 @@ package collect
 
 import (
 	"context"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
+	"unicode/utf8"
+
+	"github.com/n3ptune-cpu/Fairy-agent/pkg/redact"
 )
 
 // clockTicks is USER_HZ, the unit of /proc/<pid>/stat times: 100 on every Linux architecture Fairy builds for.
 const clockTicks = 100
+
+// Limits on what one process's command line may cost the agent. A command line can be megabytes long (any
+// local user can start such processes), and the agent runs inside a memory limit: only the first
+// maxCmdlineRead bytes of /proc/<pid>/cmdline are read, and what is kept per process is the redacted text cut
+// to maxCmdlineLen characters.
+const (
+	maxCmdlineRead = 4096
+	maxCmdlineLen  = 300
+)
+
+// readCmdline reads at most len(buf) bytes of a /proc/<pid>/cmdline file into buf. cut reports that the
+// command line is longer than that (the last, incomplete character is then left off).
+func readCmdline(path string, buf []byte) (data []byte, cut bool) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, false
+	}
+	defer f.Close()
+	n, err := io.ReadFull(f, buf)
+	if err != nil { // io.EOF (empty: a kernel thread) or io.ErrUnexpectedEOF (shorter than buf): all of it
+		return buf[:n], false
+	}
+	var more [1]byte
+	if m, _ := f.Read(more[:]); m == 0 { // exactly len(buf) bytes long
+		return buf[:n], false
+	}
+	for i := n - 1; i >= 0 && i >= n-utf8.UTFMax; i-- {
+		if utf8.RuneStart(buf[i]) {
+			if !utf8.FullRune(buf[i:n]) {
+				n = i
+			}
+			break
+		}
+	}
+	return buf[:n], true
+}
+
+// cmdlineArgs splits /proc/<pid>/cmdline (arguments separated by NUL) into the arguments.
+func cmdlineArgs(data []byte) []string {
+	s := strings.TrimRight(string(data), "\x00")
+	if s == "" {
+		return nil
+	}
+	return strings.Split(s, "\x00")
+}
 
 type procSample struct {
 	ticks uint64
@@ -256,6 +306,7 @@ func (l *Linux) scanProcs(now time.Time, o ProcOptions) ([]procRow, int) {
 	page := int64(os.Getpagesize())
 	var rows []procRow
 	total := 0
+	cmdBuf := make([]byte, maxCmdlineRead) // one buffer for every process of this scan
 	for _, e := range ents {
 		pid, err := strconv.Atoi(e.Name())
 		if err != nil {
@@ -271,7 +322,7 @@ func (l *Linux) scanProcs(now time.Time, o ProcOptions) ([]procRow, int) {
 		if err != nil {
 			continue
 		}
-		cmd, _ := os.ReadFile(filepath.Join(dir, "cmdline"))
+		cmd, cut := readCmdline(filepath.Join(dir, "cmdline"), cmdBuf)
 		name := ProcName(st.Comm, cmd)
 		p := Process{PID: pid, Name: &name, RSS: P(st.RSSPages * page),
 			CreateTime: P(Round(float64(btime)+float64(st.StartTime)/clockTicks, 2))}
@@ -288,8 +339,15 @@ func (l *Linux) scanProcs(now time.Time, o ProcOptions) ([]procRow, int) {
 			}
 		}
 		if o.Cmdline {
-			if c := CmdlineString(cmd); c != "" {
-				p.Cmdline = &c
+			// Secrets are hidden here, argument by argument, and the text is cut to its final length here:
+			// a full command line is never kept, however many processes there are.
+			if args := cmdlineArgs(cmd); len(args) > 0 {
+				if cut {
+					args = append(args, "…")
+				}
+				if c := strings.TrimSpace(redact.Args(args, maxCmdlineLen)); c != "" {
+					p.Cmdline = &c
+				}
 			}
 		}
 		if o.MemTotal > 0 {
