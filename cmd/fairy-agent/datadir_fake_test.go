@@ -517,12 +517,14 @@ func (p *pc) read(t testing.TB, rel string) string {
 	return string(b)
 }
 
-// memFS is a read-only dataFS of nothing but a table (path -> object), for the checks that only look. Paths
-// are written the Unix way; "/" stands for the drive (C:\).
+// memFS is a read-only dataFS of nothing but a table (path -> object), for the checks that only look. The
+// table's paths are written the Unix way; "/" stands for the drive (C:\). The checks build their paths with
+// path/filepath, so on Windows they ask for "\ProgramData": the question is turned back into the table's
+// spelling.
 type memFS map[string]secObj
 
 func (m memFS) Stat(path string) (secObj, error) {
-	o, ok := m[path]
+	o, ok := m[filepath.ToSlash(path)]
 	if !ok {
 		return secObj{}, &os.PathError{Op: "open", Path: path, Err: os.ErrNotExist}
 	}
