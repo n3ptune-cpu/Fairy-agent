@@ -182,7 +182,7 @@ func (f *Fan) dutyRefusal() (code, msg string) {
 	if f.localTemps != nil {
 		local = f.localTemps()
 	}
-	readings := f.bmc.Readings()
+	readings := f.bmc.WatchdogReadings() // as for the watchdog: an old reading is no reading
 	temp, name, ok := MaxCPUTemp(readings, local)
 	if ok && !(temp < f.cfg.MaxTempC) {
 		return "fan_too_hot", tooHot(name, temp, f.cfg.MaxTempC) + ": only 100 % is accepted until it is cooler"
@@ -401,7 +401,7 @@ func (f *Fan) WatchdogOnce(ctx context.Context) {
 	if f.localTemps != nil {
 		local = f.localTemps()
 	}
-	temp, name, ok := MaxCPUTemp(f.bmc.Readings(), local)
+	temp, name, ok := MaxCPUTemp(f.bmc.WatchdogReadings(), local)
 	switch {
 	case !ok:
 		f.noTemp++

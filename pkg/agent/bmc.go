@@ -85,7 +85,8 @@ func (b *BMC) refresh(ctx context.Context) error {
 	return nil
 }
 
-// Readings returns the latest readings if they are fresh (three intervals).
+// Readings returns the latest readings if they are fresh enough to show (three intervals and 30 s: up to
+// 930 s with the longest interval the config accepts). The fan watchdog does not use these: see WatchdogReadings.
 func (b *BMC) Readings() []ipmi.Reading {
 	if b == nil {
 		return nil
@@ -93,6 +94,41 @@ func (b *BMC) Readings() []ipmi.Reading {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if time.Since(b.readAt) > 3*b.interval+30*time.Second {
+		return nil
+	}
+	return b.readings
+}
+
+// BMCTempMaxAge is the oldest BMC reading the fan watchdog ever acts on, whatever the interval.
+const BMCTempMaxAge = 60 * time.Second
+
+// watchdogMaxAge is how old the BMC's readings may be for the fan watchdog and for accepting a fan duty.
+//
+// Run reads, waits one interval and reads again, and a reading is stamped when its read ends: while the BMC
+// answers, the latest reading is at most one interval plus the time of one read old. Two intervals and 10 s
+// leave room for a read that takes as long as an interval and 10 s more (a BMC reached through PowerShell is
+// slow). It is never less than the OS's own temperatures get (LocalTempMaxAge, 30 s: the default interval of
+// 10 s gives exactly that) and never more than BMCTempMaxAge. Once the BMC stops answering, Run tries again
+// after a minute at the earliest, so the reading runs out before the next try and the watchdog sees "no
+// temperature" (review N4: it used Readings' bound and kept a manual fan speed on a temperature up to
+// 15.5 minutes old).
+//
+// With an interval above 25 s the bound is BMCTempMaxAge, and above some 50 s a reading is older than that
+// for a part of every interval. A machine with no temperature from the operating system then cannot hold a
+// manual fan speed (the watchdog goes to 100 %); that is the safe side, and the cure is a shorter interval.
+func watchdogMaxAge(interval time.Duration) time.Duration {
+	return min(max(2*interval+10*time.Second, LocalTempMaxAge), BMCTempMaxAge)
+}
+
+// WatchdogReadings returns the latest readings if they are fresh enough to keep a manual fan speed on
+// (watchdogMaxAge); nil otherwise, which the watchdog treats as "no temperature".
+func (b *BMC) WatchdogReadings() []ipmi.Reading {
+	if b == nil {
+		return nil
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if age := time.Since(b.readAt); age < 0 || age > watchdogMaxAge(b.interval) {
 		return nil
 	}
 	return b.readings

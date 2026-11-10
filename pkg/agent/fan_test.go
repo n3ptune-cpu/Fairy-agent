@@ -11,6 +11,7 @@ import (
 
 	"github.com/n3ptune-cpu/Fairy-agent/pkg/agent/agenttest"
 	"github.com/n3ptune-cpu/Fairy-agent/pkg/agent/collect"
+	"github.com/n3ptune-cpu/Fairy-agent/pkg/agent/ipmi"
 )
 
 const fanYAML = "ipmi: {enabled: true}\nfan_control: {enabled: true}\ncontrol_rate_per_min: 60\n"
@@ -359,5 +360,101 @@ func TestDutyRefusedWhenTheCPUReadingIsUnusable(t *testing.T) {
 		if _, d := r.bmc.State(); st == 409 && d[0] != 40 {
 			t.Errorf("%s: a refused request changed the fans: %v", name, d)
 		}
+	}
+}
+
+// Review N4 (the rest of L16). The OS's temperature counts for 30 s. The BMC's own reading counted for three
+// intervals and 30 s: 60 s with the default, 930 s with the longest interval the config accepts. With a BMC
+// that stopped answering and no OS temperature (a VM or container that reaches the BMC over the LAN) the
+// watchdog kept a manual fan speed on that old, cool value for a quarter of an hour. (The reviewer's proof.)
+func TestWatchdogDoesNotRunOnAnOldBMCTemperature(t *testing.T) {
+	ctx := context.Background()
+	r := newRig(t, "ipmi: {enabled: true, sensor_interval_s: 300}\nfan_control: {enabled: true}\ncontrol_rate_per_min: 60\n")
+	r.fan.localTemps = func() []collect.Temp { return nil } // no OS temperature on this machine
+	if st, b := r.fan.SetMode(ctx, "full", "test"); st != 200 {
+		t.Fatal(st, b)
+	}
+	if st, b := r.fan.SetDuty(ctx, 0, 30, "test"); st != 200 {
+		t.Fatal(st, b)
+	}
+	b := r.a.d.BMC.(*BMC)
+	age := func(d time.Duration) {
+		b.mu.Lock()
+		b.interval = 300 * time.Second // what Run builds from sensor_interval_s: 300
+		b.readAt = time.Now().Add(-d)
+		b.mu.Unlock()
+	}
+	// 50 s old: still good (within one interval a reading cannot be newer than that for long), fans stay
+	age(50 * time.Second)
+	for i := 0; i < 4; i++ {
+		r.fan.WatchdogOnce(ctx)
+	}
+	if _, d := r.bmc.State(); d[0] != 30 {
+		t.Fatal("a 50 s old reading was not used:", d)
+	}
+	// the BMC stopped answering a quarter of an hour ago: no temperature, 100 % after three checks
+	age(15 * time.Minute)
+	r.fan.WatchdogOnce(ctx)
+	r.fan.WatchdogOnce(ctx)
+	if _, d := r.bmc.State(); d[0] != 30 {
+		t.Fatal("acted before the third check:", d)
+	}
+	r.fan.WatchdogOnce(ctx)
+	if _, d := r.bmc.State(); d != [2]byte{100, 100} {
+		temp, name, ok := MaxCPUTemp(b.Readings(), nil)
+		t.Fatalf("fans left at %v: the watchdog still trusts a BMC reading that is 15 minutes old (%s %.0f °C, shown=%v)", d, name, temp, ok)
+	}
+	// and a lower speed is not accepted on it either: "no temperature", as with none at all
+	r.fan.actedAt = time.Time{} // not the hold-off: the reading's age alone
+	if st, body := r.fan.SetDuty(ctx, 0, 30, "test"); st != 409 || body["code"] != "fan_no_temperature" {
+		t.Fatal(st, body)
+	}
+	// /metrics and /fan/status still show that reading for their own, longer time (it is 15 minutes old, and
+	// shown up to 15.5): only the watchdog's bound changed
+	if len(b.Readings()) == 0 || len(b.FanList()) == 0 {
+		t.Fatal("the reading is not shown any more")
+	}
+	if b.WatchdogReadings() != nil {
+		t.Fatal("the watchdog still gets the old reading")
+	}
+	// a fresh reading: a lower speed is accepted again
+	age(0)
+	if st, body := r.fan.SetDuty(ctx, 0, 30, "test"); st != 200 {
+		t.Fatal(st, body)
+	}
+}
+
+// The bound follows the polling interval (two intervals and 10 s), is never below the OS's own 30 s and never
+// above 60 s.
+func TestWatchdogMaxAge(t *testing.T) {
+	for interval, want := range map[time.Duration]time.Duration{
+		2 * time.Second: 30 * time.Second, 10 * time.Second: 30 * time.Second, 15 * time.Second: 40 * time.Second,
+		20 * time.Second: 50 * time.Second, 25 * time.Second: 60 * time.Second, 60 * time.Second: 60 * time.Second,
+		300 * time.Second: 60 * time.Second,
+	} {
+		if got := watchdogMaxAge(interval); got != want {
+			t.Errorf("interval %s: %s, want %s", interval, got, want)
+		}
+		b := NewBMC(nil, interval)
+		b.readings = []ipmi.Reading{{Sensor: ipmi.Sensor{Name: "CPU Temp", Type: ipmi.TypeTemperature}, Value: 45}}
+		b.readAt = time.Now().Add(-want + 2*time.Second)
+		if b.WatchdogReadings() == nil {
+			t.Errorf("interval %s: a reading %s old is not used", interval, want-2*time.Second)
+		}
+		b.readAt = time.Now().Add(-want - time.Second)
+		if b.WatchdogReadings() != nil {
+			t.Errorf("interval %s: a reading older than %s is used", interval, want)
+		}
+		b.readAt = time.Now().Add(time.Hour) // a clock that was set back: not "fresh for an hour"
+		if b.WatchdogReadings() != nil {
+			t.Errorf("interval %s: a reading from the future is used", interval)
+		}
+	}
+	if BMCTempMaxAge != 60*time.Second || LocalTempMaxAge != 30*time.Second {
+		t.Fatal(BMCTempMaxAge, LocalTempMaxAge)
+	}
+	var none *BMC
+	if none.WatchdogReadings() != nil {
+		t.Fatal("no BMC")
 	}
 }
