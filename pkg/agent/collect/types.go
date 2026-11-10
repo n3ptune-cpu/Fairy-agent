@@ -168,11 +168,12 @@ type ProcOptions struct {
 	MemTotal  int64                  // for mem_percent
 	Interval  time.Duration          // CPU sampling interval when there is no recent previous sample
 	GPUMem    func() map[int][]int64 // pid -> VRAM bytes per GPU index (nil = unknown)
-	// Top > 0 tells the collector that the caller will sort the rows (by CPU, by memory, or by something it
-	// adds itself to the rows Keep names) and use at most Top of them. The collector may then leave out every
-	// row that cannot be among the Top highest by CPU, the Top highest by memory or the Top lowest by pid, and
-	// that Keep does not name. A collector may also ignore this and return every process (Windows does). The
-	// total it returns is always the number of all processes.
+	// Top tells the collector that the caller will sort the rows (by CPU, by memory, or by something it adds
+	// itself to the rows Keep names) and use at most Top of them (0: 200, the most a request can ask for). The
+	// collector may then leave out every row that cannot be among the Top highest by CPU, the Top highest by
+	// memory or the Top lowest by pid, and that Keep does not name; Linux does, so that a listing's memory
+	// does not grow with the number of processes. A collector may also return every process (Windows does).
+	// The total it returns is always the number of all processes.
 	Top  int
 	Keep func(pid int) bool
 }
@@ -181,8 +182,8 @@ type ProcOptions struct {
 type Collector interface {
 	Static() Static
 	Sample(ctx context.Context) Sample
-	// Processes returns every process the agent may look at (details of those it may not are skipped) and
-	// the total number of processes on the machine.
+	// Processes returns the processes the agent may look at (details of those it may not are skipped): all of
+	// them, or the rows ProcOptions.Top and Keep ask for, and the total number of processes on the machine.
 	Processes(ctx context.Context, o ProcOptions) ([]Process, int, error)
 }
 

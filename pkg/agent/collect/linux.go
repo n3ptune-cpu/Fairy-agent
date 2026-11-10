@@ -355,6 +355,8 @@ const (
 	maxTrackedProcs = 32768
 	// maxKeptProcs is how many rows are kept for ProcOptions.Keep.
 	maxKeptProcs = 200
+	// defaultProcTop is ProcOptions.Top for a caller that does not say: a listing is never unbounded.
+	defaultProcTop = 200
 )
 
 // procRow is what one scan keeps of a process before it is known whether the process will be listed: a few
@@ -484,13 +486,14 @@ func (l *Linux) describe(r procRow, o ProcOptions, users map[int]string, btime, 
 }
 
 // Processes lists the processes with CPU use since the previous listing (or over o.Interval when there is no
-// recent one): all of them, or with o.Top the rows a caller that sorts and cuts can need (see ProcOptions).
+// recent one): the rows a caller that sorts and cuts to o.Top can need (see ProcOptions; defaultProcTop when
+// the caller does not say). With no more than Top processes that is all of them.
 //
 // It works in two steps so that its memory does not grow with the number of processes (review N8: 20000
 // processes with long command lines held 43 MiB after one listing). The scan reads one small file per process
 // and keeps a few numbers of the rows that may be listed; only for those are the command line and the user
-// read afterwards. With o.Top that is at most 3 x Top + maxKeptProcs rows, each with at most maxCmdlineLen
-// characters of command line.
+// read afterwards. That is at most 3 x Top + maxKeptProcs rows, each with at most maxCmdlineLen characters of
+// command line.
 func (l *Linux) Processes(ctx context.Context, o ProcOptions) ([]Process, int, error) {
 	l.mu.Lock()
 	prev, prevAt := l.procPrev, l.procPrevAt
@@ -512,11 +515,15 @@ func (l *Linux) Processes(ctx context.Context, o ProcOptions) ([]Process, int, e
 		case <-time.After(o.Interval):
 		}
 	}
+	top := o.Top
+	if top <= 0 {
+		top = defaultProcTop
+	}
 	now := time.Now()
 	dt := now.Sub(prevAt).Seconds()
 	cur := make(map[int]procSample, min(len(prev)+64, track))
 	// the orders a caller sorts by (server.go SortProcesses): highest first, unknown last, then by pid
-	byCPU := &procTop{n: o.Top, less: func(a, b *procRow) bool {
+	byCPU := &procTop{n: top, less: func(a, b *procRow) bool {
 		if a.hasCPU != b.hasCPU {
 			return a.hasCPU
 		}
@@ -525,14 +532,14 @@ func (l *Linux) Processes(ctx context.Context, o ProcOptions) ([]Process, int, e
 		}
 		return a.pid < b.pid
 	}}
-	byMem := &procTop{n: o.Top, less: func(a, b *procRow) bool {
+	byMem := &procTop{n: top, less: func(a, b *procRow) bool {
 		if a.rss != b.rss {
 			return a.rss > b.rss
 		}
 		return a.pid < b.pid
 	}}
-	byPID := &procTop{n: o.Top, less: func(a, b *procRow) bool { return a.pid < b.pid }}
-	var all, kept []procRow
+	byPID := &procTop{n: top, less: func(a, b *procRow) bool { return a.pid < b.pid }}
+	var kept []procRow
 	total := l.scanProcs(func(r procRow) {
 		if len(cur) < track {
 			cur[r.pid] = procSample{r.ticks, r.start}
@@ -542,10 +549,6 @@ func (l *Linux) Processes(ctx context.Context, o ProcOptions) ([]Process, int, e
 			if pr, ok := prev[r.pid]; ok && pr.start == r.start && r.ticks >= pr.ticks {
 				r.cpu = Round(float64(r.ticks-pr.ticks)/clockTicks/dt*100, 1)
 			}
-		}
-		if o.Top <= 0 {
-			all = append(all, r)
-			return
 		}
 		byCPU.add(r)
 		byMem.add(r)
@@ -560,23 +563,21 @@ func (l *Linux) Processes(ctx context.Context, o ProcOptions) ([]Process, int, e
 	btime := l.btime
 	l.mu.Unlock()
 
-	rows := all
-	if o.Top > 0 {
-		seen := make(map[int]bool, 3*o.Top+len(kept))
-		for _, t := range []*procTop{byCPU, byMem, byPID} {
-			t.cut()
-			for _, r := range t.rows {
-				if !seen[r.pid] {
-					seen[r.pid] = true
-					rows = append(rows, r)
-				}
-			}
-		}
-		for _, r := range kept {
+	var rows []procRow
+	seen := make(map[int]bool, 3*top+len(kept))
+	for _, t := range []*procTop{byCPU, byMem, byPID} {
+		t.cut()
+		for _, r := range t.rows {
 			if !seen[r.pid] {
 				seen[r.pid] = true
 				rows = append(rows, r)
 			}
+		}
+	}
+	for _, r := range kept {
+		if !seen[r.pid] {
+			seen[r.pid] = true
+			rows = append(rows, r)
 		}
 	}
 	sort.Slice(rows, func(i, j int) bool { return rows[i].pid < rows[j].pid })

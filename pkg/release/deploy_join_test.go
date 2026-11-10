@@ -19,10 +19,7 @@ import (
 // without a release fingerprint (and without --unverified) it stops before it looks at the machine, downloads
 // or changes anything.
 func TestInstallScriptWarnsAboutTheCodeOnTheCommandLine(t *testing.T) {
-	script, err := filepath.Abs(filepath.Join("..", "..", "deploy", "install.sh"))
-	if err != nil {
-		t.Fatal(err)
-	}
+	script := filepath.Join("..", "..", "deploy", "install.sh")
 	const code = "ABCD-EFGH-IJKL-MNOP-QRST-UVWX-YZ23-4567"
 	bare := strings.ReplaceAll(code, "-", "")
 	shows := func(text string) bool {

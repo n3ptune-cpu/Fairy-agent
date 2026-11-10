@@ -70,6 +70,14 @@ func TestProcessListMemoryDoesNotGrowWithTheNumberOfProcesses(t *testing.T) {
 	if allocated > 64<<20 {
 		t.Errorf("a listing of %d processes allocated %d MiB on the way", procs, allocated>>20)
 	}
+	// a caller that does not say how many rows it uses gets the same bound (the reviewer's proof asks this way)
+	runtime.GC()
+	runtime.ReadMemStats(&before)
+	list, total, err = l.Processes(context.Background(), ProcOptions{Cmdline: true, MemTotal: 16 << 30, Interval: time.Millisecond})
+	runtime.ReadMemStats(&after)
+	if live := int64(after.HeapAlloc) - int64(before.HeapAlloc); err != nil || total != procs || len(list) > 3*defaultProcTop || live > 6<<20 {
+		t.Errorf("without Top: %d rows, %d KiB live, %v", len(list), live>>10, err)
+	}
 	// the second listing (the usual case: there is a previous one to compare with) is no different
 	runtime.GC()
 	runtime.ReadMemStats(&before)
@@ -106,7 +114,7 @@ func TestProcessListTopHasTheRowsACallerShows(t *testing.T) {
 		setStat(t, l, pid, 1000+d, int64(rng.Intn(400)))
 	}
 	prev, prevAt := l.procPrev, l.procPrevAt
-	all, total, err := l.Processes(ctx, ProcOptions{Cmdline: true, MemTotal: 16 << 30})
+	all, total, err := l.Processes(ctx, ProcOptions{Cmdline: true, MemTotal: 16 << 30, Top: procs}) // every row
 	if err != nil || total != procs || len(all) != procs {
 		t.Fatal(len(all), total, err)
 	}
