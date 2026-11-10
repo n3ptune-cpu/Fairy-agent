@@ -817,9 +817,11 @@ func (a *Agent) update(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, st, body)
 }
 
-// Server wraps the handler with the timeouts every connection gets.
+// Server wraps the handler with the timeouts every connection gets. A request's header must arrive within two
+// seconds and fit in 4 KiB (the panel's is a few hundred bytes): an unfinished request holds little memory and
+// not for long. How many connections may be open at all is LimitConns' part.
 func (a *Agent) Server() *http.Server {
-	return &http.Server{Handler: a.Handler(), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second,
-		WriteTimeout: 45 * time.Second, IdleTimeout: 90 * time.Second, MaxHeaderBytes: 16 << 10,
+	return &http.Server{Handler: a.Handler(), ReadHeaderTimeout: 2 * time.Second, ReadTimeout: 10 * time.Second,
+		WriteTimeout: 45 * time.Second, IdleTimeout: 90 * time.Second, MaxHeaderBytes: 4096,
 		ErrorLog: slog.NewLogLogger(slog.Default().Handler(), slog.LevelDebug)}
 }

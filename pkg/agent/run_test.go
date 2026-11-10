@@ -305,3 +305,26 @@ func TestFanShutdownRefusesChanges(t *testing.T) {
 		t.Fatal(m)
 	}
 }
+
+// M4: the real Run serves behind the connection caps (here: this machine's own eight).
+func TestRunLimitsConnections(t *testing.T) {
+	addr, _ := runAgent(t, fakebmc.X11SCAF())
+	var kept []net.Conn
+	defer func() {
+		for _, c := range kept {
+			c.Close()
+		}
+	}()
+	for i := 0; i < 20; i++ {
+		c, held, err := halfOpen("127.0.0.1", addr, 100)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if held {
+			kept = append(kept, c)
+		}
+	}
+	if len(kept) != MaxConnsPerSender {
+		t.Fatalf("%d of 20 connections from one address were kept, want %d", len(kept), MaxConnsPerSender)
+	}
+}

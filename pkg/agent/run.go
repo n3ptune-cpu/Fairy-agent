@@ -278,10 +278,12 @@ func Run(ctx context.Context, cfg *Config, b Build) error {
 	if err != nil {
 		return err
 	}
-	ln, err := Listen(ctx, addr, StartupWait)
+	tcp, err := Listen(ctx, addr, StartupWait)
 	if err != nil {
 		return err
 	}
+	// at most MaxConns open connections, MaxConnsPerSender per sender, some kept for the panel and this machine
+	ln := LimitConns(tcp, ConnLimits{Panel: PairedPanel(pairPath)})
 	var on []string
 	for name, ok := range map[string]bool{"processes": cfg.ProcessesEnabled(), "fan_control": d.Fan != nil,
 		"power_control": d.Power != nil, "wol_relay": d.WOL != nil, "ipmi": d.BMC != nil, "gpu": d.GPU != nil,
