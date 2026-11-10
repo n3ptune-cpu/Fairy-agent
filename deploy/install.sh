@@ -21,6 +21,9 @@
 # The panel checks the release's signature with its own built-in key and puts the hash into the Add host
 # command, so even a first install does not have to trust the downloaded binary's own key.
 #
+# Never older: when the installed fairy-agent is a newer build than this installer's release (a panel that
+# pins an older release), the program and its unit files are kept and only settings and pairing are done.
+#
 # Safe to run again (with a new code from the panel's "Re-pair"): settings are kept, the tokens are replaced
 # by new ones (the panel gets them by pairing), the binary and units are brought up to date. Nothing secret is
 # printed.
@@ -52,7 +55,7 @@ while [ $# -gt 0 ]; do
     --ipmi) IPMI=1 ;;
     --proxmox) PVE=1 ;;
     --sums-sha256) [ $# -ge 2 ] || die "--sums-sha256 needs the SHA-256 of SHA256SUMS"; SUMS_PIN="$2"; shift ;;
-    -h|--help) sed -n '2,26p' "$0" 2>/dev/null || true; exit 0 ;;
+    -h|--help) sed -n '2,29p' "$0" 2>/dev/null || true; exit 0 ;;
     *) die "unknown option (copy the whole command from the panel's Add host dialog)" ;;
   esac
   shift
@@ -127,21 +130,50 @@ case "$rc" in
   *) die "the release signature check failed" ;;
 esac
 
-# 3. user, program, folders (AGENT.md, "Install on Linux")
+# 3. never older: an installed fairy-agent that is a newer build than this release stays
+build_of() { # the build number at the start of a version ("42-1a2b3c4" -> 42); nothing for other formats
+  b="${1%%-*}"
+  case "$b" in ''|*[!0-9]*) return 0 ;; esac
+  [ "${#b}" -le 9 ] || return 0
+  b="$(printf '%s' "$b" | sed 's/^0*//')"
+  printf '%s' "${b:-0}"
+}
+KEEP=0
+HAVE=""
+if [ -x "$BIN" ]; then
+  HAVE="$("$BIN" version 2>/dev/null | awk 'NR == 1 && $1 == "fairy-agent" { print $2 }')" || HAVE=""
+fi
+have_n="$(build_of "$HAVE")"
+new_n="$(build_of "$NEWVER")"
+if [ -n "$have_n" ]; then
+  [ -n "$new_n" ] ||
+    die "this release's version ($NEWVER) has no build number, so it cannot be told whether it is older than the installed fairy-agent $HAVE: not installed (by hand, to force it: fairy-agent update --force)"
+  if [ "$have_n" -gt "$new_n" ]; then KEEP=1; fi
+fi
+if [ "$KEEP" -eq 1 ]; then
+  say "the installed fairy-agent $HAVE is NEWER than this installer's release $NEWVER:"
+  say "  the program and its unit files are kept as they are; only the settings and the pairing are done."
+  say "  (The panel that made this command pins an older agent release: update the panel.)"
+fi
+
+# 4. user, program, folders (AGENT.md, "Install on Linux")
 if ! id fairy-agent >/dev/null 2>&1; then
   nologin="$(command -v nologin 2>/dev/null || echo /usr/sbin/nologin)"
   useradd --system --no-create-home --shell "$nologin" fairy-agent
   say "created the system user fairy-agent"
 fi
-install -m 0755 "$TMP/$ASSET" "$BIN.new"
-mv -f "$BIN.new" "$BIN"
-command -v restorecon >/dev/null 2>&1 && restorecon "$BIN" || true
+if [ "$KEEP" -eq 0 ]; then
+  install -m 0755 "$TMP/$ASSET" "$BIN.new"
+  mv -f "$BIN.new" "$BIN"
+  command -v restorecon >/dev/null 2>&1 && restorecon "$BIN" || true
+fi
 install -d -m 0750 -o root -g fairy-agent "$ETC"
 install -d -m 0700 -o fairy-agent -g fairy-agent /var/lib/fairy-agent
 
-# 4. units (an existing unit that differs is kept as .bak)
+# 5. units (an existing unit that differs is kept as .bak; with a newer agent installed, existing units stay)
 put() { # put SRC DEST MODE
   if [ -f "$2" ] && ! cmp -s "$1" "$2"; then
+    if [ "$KEEP" -eq 1 ]; then return 0; fi
     cp -p "$2" "$2.bak"
     say "kept your previous $2 as $2.bak"
   fi
@@ -156,7 +188,7 @@ if ls /sys/class/powercap/intel-rapl:*/energy_uj >/dev/null 2>&1; then
   systemd-tmpfiles --create /etc/tmpfiles.d/fairy-agent.conf || true
 fi
 
-# 5. firewall: only the panel, only on the Tailscale interface
+# 6. firewall: only the panel, only on the Tailscale interface
 if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q "^Status: active"; then
   ufw allow in on tailscale0 from "$PANEL" to any port 9101 proto tcp >/dev/null && say "ufw: allowed $PANEL to port 9101 on tailscale0"
 elif command -v firewall-cmd >/dev/null 2>&1 && firewall-cmd --state >/dev/null 2>&1; then
@@ -164,7 +196,7 @@ elif command -v firewall-cmd >/dev/null 2>&1 && firewall-cmd --state >/dev/null 
   firewall-cmd -q --permanent --add-rich-rule="$rule" && firewall-cmd -q --reload && say "firewalld: allowed $PANEL to port 9101"
 fi
 
-# 6. tokens, settings and the join code (fairy-agent join prints no secret)
+# 7. tokens, settings and the join code (fairy-agent join prints no secret)
 set -- --code "$CODE" --panel "$PANEL"
 [ "$POWER" -eq 1 ] && set -- "$@" --power-control
 [ "$UPDATE" -eq 1 ] && set -- "$@" --self-update
@@ -176,7 +208,7 @@ if [ "$UPS" -eq 1 ]; then
 fi
 "$BIN" join "$@"
 
-# 7. polkit: one rule file per feature, only for a feature that is on in config.yaml now (join only ever
+# 8. polkit: one rule file per feature, only for a feature that is on in config.yaml now (join only ever
 #    switches features on, so this is asked of the config, not of this run's options). A rule whose feature is
 #    off is removed, and so is the combined file of older installers, which granted both rights for either.
 feature_on() { # feature_on KEY FALLBACK: is KEY true in config.yaml (FALLBACK when the config cannot be asked)
@@ -225,9 +257,10 @@ fi
 systemctl daemon-reload
 systemctl enable -q fairy-agent
 systemctl restart fairy-agent
-say "fairy-agent $NEWVER started; waiting for the panel to pair (keep the Add host dialog open) ..."
+if [ "$KEEP" -eq 1 ]; then RUNNING="$HAVE"; else RUNNING="$NEWVER"; fi
+say "fairy-agent $RUNNING started; waiting for the panel to pair (keep the Add host dialog open) ..."
 
-# 8. wait (up to 2 minutes) until the panel has picked up the tokens
+# 9. wait (up to 2 minutes) until the panel has picked up the tokens
 i=0
 while [ $i -lt 60 ]; do
   if "$BIN" pair-status >/dev/null 2>&1; then
