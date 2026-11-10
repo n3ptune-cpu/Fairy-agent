@@ -58,24 +58,38 @@ func checkACL(p string, kind int) error {
 	if err != nil {
 		return fmt.Errorf("%s: cannot read its permissions: %w", p, err)
 	}
-	owner, _, err := sd.Owner()
-	if err != nil || owner == nil {
-		return fmt.Errorf("%s: cannot read its owner", p)
+	owner, null, aces, err := ownerAndACL(p, sd)
+	if err != nil {
+		return err
+	}
+	if kind == objOwnFolder {
+		return CheckOwnFolderACL(p, owner, null, aces)
+	}
+	return CheckWindowsACL(p, kind, owner, null, aces)
+}
+
+// objOwnFolder: a folder of Fairy's own that LocalSystem writes files in (CheckOwnFolderACL).
+const objOwnFolder = -1
+
+// ownerAndACL reads the owner and the entries out of a security descriptor (null: it has no DACL at all).
+func ownerAndACL(p string, sd *windows.SECURITY_DESCRIPTOR) (owner string, null bool, aces []ACE, err error) {
+	o, _, err := sd.Owner()
+	if err != nil || o == nil {
+		return "", false, nil, fmt.Errorf("%s: cannot read its owner", p)
 	}
 	dacl, _, err := sd.DACL()
-	null := errors.Is(err, windows.ERROR_OBJECT_NOT_FOUND) || (err == nil && dacl == nil)
+	null = errors.Is(err, windows.ERROR_OBJECT_NOT_FOUND) || (err == nil && dacl == nil)
 	if err != nil && !null {
-		return fmt.Errorf("%s: cannot read its permissions: %w", p, err)
+		return "", false, nil, fmt.Errorf("%s: cannot read its permissions: %w", p, err)
 	}
-	var aces []ACE
 	if !null {
 		// the DACL as stored (ACL header, then the entries), read by the pure ParseDACL
 		size := *(*uint16)(unsafe.Add(unsafe.Pointer(dacl), 2))
 		if aces, err = ParseDACL(unsafe.Slice((*byte)(unsafe.Pointer(dacl)), size)); err != nil {
-			return fmt.Errorf("%s: cannot read its permissions: %w", p, err)
+			return "", false, nil, fmt.Errorf("%s: cannot read its permissions: %w", p, err)
 		}
 	}
-	return CheckWindowsACL(p, kind, owner.String(), null, aces)
+	return o.String(), null, aces, nil
 }
 
 // FindIpmitool returns ipmitool from C:\Program Files\ipmitool\ (ipmitool.exe or bin\ipmitool.exe) if it is
@@ -100,7 +114,9 @@ func FindIpmitool() (string, error) {
 
 // TrustedFolder checks that dir is a plain local folder (no junction) that only Administrators, SYSTEM or
 // TrustedInstaller can change, with every folder above it: a folder a LocalSystem process may write files in
-// (the helper's log) without another account planting a link there first.
+// (the helper's log) without another account planting a link there first. For dir itself an entry that only
+// passes rights on to what is created inside counts too (CheckOwnFolderACL): the files written there must not
+// become another account's.
 func TrustedFolder(dir string) error {
 	if p := ExecPathProblem(dir, true); p != "" {
 		return fmt.Errorf("%s %s", dir, p)
@@ -113,7 +129,7 @@ func TrustedFolder(dir string) error {
 	if !st.IsDir() || isReparse(st) {
 		return fmt.Errorf("%s is not a plain folder", dir)
 	}
-	kind := ObjParent
+	kind := objOwnFolder
 	for p := dir; ; {
 		parent := filepath.Dir(p)
 		if parent == p && kind == ObjAncestor {

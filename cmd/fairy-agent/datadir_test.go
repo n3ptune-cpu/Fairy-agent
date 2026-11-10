@@ -79,6 +79,18 @@ func TestJudge(t *testing.T) {
 		{"no owner", "D:(A;;FA;;;SY)", false, false, admin, lvForeign, "owned by"},
 		{"the agent's entry of another PC's service", "O:BAD:(A;;FA;;;SY)(A;;0x1301bf;;;S-1-5-80-1-2-3-4-5)", false, false, inAgent, lvForeign, "S-1-5-80-1-2-3-4-5"},
 
+		// N8: an entry that only passes on to what is created in the folder (inherit-only) counts for Fairy's
+		// own folders: the files written there from now on would be that account's
+		{"full control passed on to Users", sddlDataDir + "(A;OICIIO;FA;;;BU)", true, true, admin, lvForeign, "change everything that is created in it"},
+		{"GENERIC_ALL passed on to Authenticated Users", "O:BAD:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICIIO;GA;;;AU)", true, true, admin, lvForeign, "S-1-5-11"},
+		{"read passed on to Users", sddlDataDir + "(A;OICIIO;GXGR;;;BU)", true, true, admin, lvLeak, "read everything that is created in it"},
+		{"write passed on to the agent's account, outside its folders", sddlDataDir + "(A;OICIIO;GW;;;" + tSvc + ")", true, true, admin, lvAgent, "agent's own account"},
+		{"the same in one of its folders", sddlAgentDir + "(A;OICIIO;GA;;;" + tSvc + ")", true, true, agentRoot, lvOK, ""},
+		{"passed on to Users in one of the agent's folders", sddlAgentDir + "(A;OICIIO;FA;;;BU)", true, true, agentRoot, lvForeign, "S-1-5-32-545"},
+		{"CREATOR OWNER passed on: the creator's own", sddlDataDir + "(A;OICIIO;GA;;;CO)", true, true, admin, lvOK, ""},
+		{"passed on to SYSTEM", sddlDataDir + "(A;OICIIO;GA;;;SY)", true, true, admin, lvOK, ""},
+		{"a deny entry that passes on", sddlDataDir + "(D;OICIIO;GA;;;BU)", true, true, admin, lvOK, ""},
+
 		// the wrong kind of thing
 		{"a folder named config.yaml", sddlDataDir, true, false, admin, lvForeign, "folder where a file belongs"},
 		{"a file named logs", sddlDataFile, false, true, agentRoot, lvForeign, "file where a folder belongs"},
@@ -1072,4 +1084,43 @@ func TestRepairLimits(t *testing.T) {
 	if collect.TrustedOwner(tUser) { // the fixtures' user is an ordinary one
 		t.Fatal("fixture")
 	}
+}
+
+// N8, the review's proof as it was written (it failed before the fix): a data folder that Administrators own,
+// whose only foreign entry is inherit-only (it gives ordinary users full control of everything created inside
+// from now on), passed the read-only check. join then wrote config.yaml and the new tokens into it, and those
+// files inherit the entry: the user reads the tokens.
+func TestInheritOnlyEntryIsNotTrusted(t *testing.T) {
+	p := newPC(t)
+	p.put(t, "", "O:BAD:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;"+tSvc+")(A;OICIIO;FA;;;BU)", "")
+	if err := checkDataDir(p.fs, p.cfgPath, tSvc); err == nil {
+		t.Errorf("checkDataDir accepted %s although every file created in it will be changeable by BUILTIN\\Users (inherit-only entry)", p.dir)
+	}
+	// the same one level down: helper\ (TrustedFolder on Windows skips inherit-only entries the same way)
+	o := dirObj(t, "O:BAD:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICIIO;GA;;;AU)")
+	if lv, _ := judge(o, true, false, false, tSvc); lv == lvOK {
+		t.Errorf("judge: a folder whose new files Authenticated Users will fully control is lvOK")
+	}
+	// what the installer does with such a folder: it is not adopted (someone else decides what its new files
+	// are), so it is moved aside as a whole and the tokens are new
+	t.Setenv("FAIRY_AGENT_TOKEN", "")
+	t.Setenv("FAIRY_AGENT_CONTROL_TOKEN", "")
+	p.put(t, "token", sddlDataFile+"(A;ID;FA;;;BU)", "a-token-users-could-read-and-change-01\r\n")
+	rep, out, err := p.run(t)
+	if err != nil || rep.Replaced == "" || !strings.Contains(out, "IMPORTANT") || strings.Contains(p.read(t, "token"), "users-could-read") {
+		t.Fatalf("%v %+v\n%s", err, rep, out)
+	}
+	p.usable(t)
+	// one that only lets others read what is created: kept, permissions reset, tokens new
+	p = newPC(t)
+	p.installed(t)
+	p.fs.sddl[p.dir] = sddlDataDir + "(A;OICIIO;GXGR;;;BU)"
+	if err := checkDataDir(p.fs, p.cfgPath, tSvc); err != nil {
+		t.Fatalf("reading does not steer anything, the check must pass: %v", err)
+	}
+	rep, out, err = p.run(t)
+	if err != nil || !rep.RootLeak || rep.Replaced != "" || strings.Count(out, "new token in") != 2 {
+		t.Fatalf("%v %+v\n%s", err, rep, out)
+	}
+	p.usable(t)
 }

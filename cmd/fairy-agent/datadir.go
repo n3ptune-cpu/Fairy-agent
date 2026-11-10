@@ -135,6 +135,13 @@ const (
 
 const aceInheritOnly = 0x8
 
+// CREATOR OWNER and CREATOR GROUP: placeholders in an entry that passes on, replaced by the creator of each
+// new object.
+const (
+	sidCreatorOwner = "S-1-3-0"
+	sidCreatorGroup = "S-1-3-1"
+)
+
 func sidName(sid string) string {
 	if sid == "" {
 		return "an entry that cannot be read"
@@ -148,10 +155,17 @@ func sidName(sid string) string {
 //
 // Owner: Administrators, SYSTEM or TrustedInstaller. Inside the agent's folders also the agent's account (and
 // LocalService, which the agent ran as before 0.5); the agent's folders themselves belong to Administrators.
-// Entries: deny entries and entries that only pass on to new objects are skipped (as in
-// collect.CheckWindowsACL); for anyone but administrators, SYSTEM and (in its folders) the agent, a right that
-// changes the object is lvForeign and read access is lvLeak. An entry kind the check does not know counts as
-// an unknown account's.
+// Entries: deny entries are skipped (they only take rights away); for anyone but administrators, SYSTEM and
+// (in its folders) the agent, a right that changes the object is lvForeign and read access is lvLeak. An entry
+// kind the check does not know counts as an unknown account's.
+//
+// An entry that only passes on to what is created in a folder (inherit-only) counts like one that applies to
+// the folder: it does not let its account change the folder today, but every file written there from now on
+// (the tokens join writes, the helper's record of a pending shutdown) would be that account's to read or
+// change. That differs from the folders above the data folder (collect.CheckWindowsACL skips such entries:
+// C:\ and C:\ProgramData have them by design, for what users create there themselves). The one exception is
+// CREATOR OWNER / CREATOR GROUP: such an entry gives whoever creates something rights on what they created,
+// and who may create here is decided by the other entries.
 func judge(o secObj, wantDir, agentZone, zoneRoot bool, agentSID string) (level, string) {
 	switch {
 	case o.Reparse:
@@ -181,18 +195,28 @@ func judge(o secObj, wantDir, agentZone, zoneRoot bool, agentSID string) (level,
 		worse(lvForeign, "is owned by %s, not by Administrators or SYSTEM (an owner can always give themselves access)", sidName(o.Owner))
 	}
 	for _, a := range o.ACEs {
-		if a.Kind == collect.ACEDeny || a.Flags&aceInheritOnly != 0 {
+		if a.Kind == collect.ACEDeny {
+			continue
+		}
+		passesOn := a.Flags&aceInheritOnly != 0
+		if passesOn && (a.SID == sidCreatorOwner || a.SID == sidCreatorGroup) {
 			continue
 		}
 		m := plainRights(a.Mask)
 		switch {
 		case a.Kind == collect.ACEAllow && collect.TrustedOwner(a.SID):
 		case a.Kind == collect.ACEAllow && a.SID != "" && a.SID == agentSID:
-			if !agentZone && m&rtChange != 0 {
+			if !agentZone && m&rtChange != 0 && passesOn {
+				worse(lvAgent, "lets the agent's own account, which should only read here, change everything that is created in it (an entry that only passes on, access 0x%x)", a.Mask)
+			} else if !agentZone && m&rtChange != 0 {
 				worse(lvAgent, "can be changed by the agent's own account (access 0x%x), which should only read it", a.Mask)
 			}
+		case m&rtChange != 0 && passesOn:
+			worse(lvForeign, "lets %s change everything that is created in it (an entry that only passes on, access 0x%x)", sidName(a.SID), a.Mask)
 		case m&rtChange != 0:
 			worse(lvForeign, "can be changed by %s (access 0x%x)", sidName(a.SID), a.Mask)
+		case m&rtReadData != 0 && passesOn:
+			worse(lvLeak, "lets %s read everything that is created in it (an entry that only passes on, access 0x%x)", sidName(a.SID), a.Mask)
 		case m&rtReadData != 0:
 			worse(lvLeak, "can be read by %s (access 0x%x)", sidName(a.SID), a.Mask)
 		}
