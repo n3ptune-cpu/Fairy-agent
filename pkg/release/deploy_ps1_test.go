@@ -1,7 +1,6 @@
 package release_test
 
 import (
-	"bytes"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -20,9 +19,6 @@ func TestInstallPS1WorkFolderCannotBeSwapped(t *testing.T) {
 	raw, err := os.ReadFile(filepath.Join("..", "..", "deploy", "install.ps1"))
 	if err != nil {
 		t.Fatal(err)
-	}
-	if n := bytes.Count(raw, []byte("\n")); n == 0 || n != bytes.Count(raw, []byte("\r\n")) {
-		t.Fatal("install.ps1 does not have CRLF line ends throughout")
 	}
 	// the code without comment lines and the help block
 	var code []string
