@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"math"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -205,5 +206,138 @@ func TestWatchdogStaleLocalTemperature(t *testing.T) {
 	}
 	if temps, at := r.a.LastLocalTemps(); len(temps) != 1 || !at.Equal(*clock) {
 		t.Fatal(temps, at, *clock)
+	}
+}
+
+// L17: after the watchdog's 100 % a request for the minimum was accepted at once, also with the CPU still over
+// the limit.
+func TestDutyRefusedWhileHot(t *testing.T) {
+	r := newRig(t, fanYAML)
+	ctx := context.Background()
+	start := time.Date(2026, 11, 10, 12, 0, 0, 0, time.UTC)
+	clock := start
+	r.fan.now = func() time.Time { return clock }
+	bmc := r.a.d.BMC.(*BMC)
+	setCPU := func(c byte) {
+		t.Helper()
+		r.bmc.SetRaw(0x01, c)
+		if err := bmc.refresh(ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
+	duty := func(pct int) (int, map[string]any) {
+		t.Helper()
+		return r.do(t, "POST", "/fan/duty", ctlTok, map[string]any{"zone": 0, "percent": pct})
+	}
+	r.do(t, "POST", "/fan/mode", ctlTok, map[string]any{"mode": "full"})
+	if st, b := duty(40); st != 200 {
+		t.Fatal("cool: accepted", st, b)
+	}
+
+	// the CPU is at 91 °C and the watchdog has not looked yet: nothing below 100 % is accepted
+	setCPU(91)
+	for i := 0; i < 8; i++ {
+		st, b := duty(30)
+		if st != 409 || b["code"] != "fan_too_hot" || !strings.Contains(b["error"].(string), "CPU Temp 91.0") {
+			t.Fatal("hot: refused", st, b)
+		}
+	}
+	if _, d := r.bmc.State(); d[0] != 40 {
+		t.Fatal("a refused request changed the fans:", d)
+	}
+	if st, b := duty(100); st != 200 {
+		t.Fatal("100 % is always accepted", st, b)
+	}
+	if st, b := duty(40); st != 409 {
+		t.Fatal(st, b)
+	}
+	// exactly at the limit counts as too hot, one degree below does not
+	setCPU(80)
+	if st, b := duty(40); st != 409 || b["code"] != "fan_too_hot" {
+		t.Fatal("80 °C: refused", st, b)
+	}
+	setCPU(79)
+	if st, b := duty(40); st != 200 {
+		t.Fatal("79 °C: accepted", st, b)
+	}
+
+	// the watchdog acts at 91 °C; then the CPU cools down at once: still refused for five minutes
+	setCPU(91)
+	r.fan.WatchdogOnce(ctx)
+	if _, d := r.bmc.State(); d != [2]byte{100, 100} {
+		t.Fatal(d)
+	}
+	setCPU(45)
+	for _, after := range []time.Duration{0, time.Minute, FanHoldOff - time.Second} {
+		clock = start.Add(after)
+		st, b := duty(30)
+		if st != 409 || b["code"] != "fan_watchdog_hold" {
+			t.Fatal("hold-off: refused", after, st, b)
+		}
+	}
+	if _, d := r.bmc.State(); d != [2]byte{100, 100} {
+		t.Fatal("a refused request changed the fans:", d)
+	}
+	if st, b := r.do(t, "POST", "/fan/duty", ctlTok, map[string]any{"zone": 1, "percent": 100}); st != 200 {
+		t.Fatal("100 % during the hold-off", st, b)
+	}
+	clock = start.Add(FanHoldOff) // five minutes after the watchdog acted
+	if st, b := duty(30); st != 200 {
+		t.Fatal("after the hold-off, cool: accepted", st, b)
+	}
+
+	// a reading that is not a number is not "below the limit"
+	bmc.mu.Lock()
+	bmc.readings = nil
+	bmc.mu.Unlock()
+	r.fan.localTemps = func() []collect.Temp { return cores(math.NaN()) }
+	if st, body := duty(35); st != 409 || body["code"] != "fan_too_hot" {
+		t.Fatal("NaN: refused", st, body)
+	}
+	// the OS's reading counts too (no BMC reading)
+	r.fan.localTemps = func() []collect.Temp { return cores(60, 93) }
+	if st, body := duty(35); st != 409 || !strings.Contains(body["error"].(string), "93.0") {
+		t.Fatal("OS reading 93 °C: refused", st, body)
+	}
+	r.fan.localTemps = func() []collect.Temp { return cores(60, 61) }
+	if st, body := duty(35); st != 200 {
+		t.Fatal(st, body)
+	}
+	// the watchdog's "no temperature" 100 % starts the hold-off as well
+	r.fan.localTemps = func() []collect.Temp { return nil }
+	for i := 0; i < 3; i++ {
+		r.fan.WatchdogOnce(ctx)
+	}
+	r.fan.localTemps = func() []collect.Temp { return cores(40) }
+	if st, body := duty(35); st != 409 || body["code"] != "fan_watchdog_hold" {
+		t.Fatal(st, body)
+	}
+}
+
+// L17 with L35's MaxCPUTemp (which leaves out a reading that is not a number): a CPU sensor that reports NaN or
+// -Inf is still not "below the limit", also next to a cool sensor that is not the CPU's. With no sensor at all
+// the request is accepted as before (the watchdog's 30 s rule covers that case).
+func TestDutyRefusedWhenTheCPUReadingIsUnusable(t *testing.T) {
+	board := collect.Temp{Sensor: "acpitz", Current: 35}
+	for name, tc := range map[string]struct {
+		temps []collect.Temp
+		want  int
+	}{
+		"NaN only":             {cores(math.NaN()), 409},
+		"-Inf only":            {cores(math.Inf(-1)), 409},
+		"NaN CPU, cool board":  {append(cores(math.NaN()), board), 409},
+		"NaN and a cool core":  {cores(math.NaN(), 40), 200},
+		"cool board only":      {[]collect.Temp{board}, 200},
+		"no temperature known": {nil, 200},
+	} {
+		r := manualRig(t, 40)
+		r.fan.localTemps = func() []collect.Temp { return tc.temps }
+		st, body := r.fan.SetDuty(context.Background(), 0, 35, "test")
+		if st != tc.want || (st == 409 && body["code"] != "fan_too_hot") {
+			t.Errorf("%s: %d %v, want %d", name, st, body, tc.want)
+		}
+		if _, d := r.bmc.State(); st == 409 && d[0] != 40 {
+			t.Errorf("%s: a refused request changed the fans: %v", name, d)
+		}
 	}
 }

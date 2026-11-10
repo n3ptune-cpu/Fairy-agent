@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"math"
 	"slices"
 	"strconv"
 	"sync"
@@ -48,6 +49,7 @@ type Fan struct {
 	evMu        sync.Mutex
 	events      []FanEvent
 	noTemp      int
+	actedAt     time.Time // when the watchdog last sent the fans to 100 % (zero: not since the start)
 }
 
 // NewFan returns the fan controller.
@@ -156,7 +158,61 @@ func (f *Fan) SetMode(ctx context.Context, mode, who string) (int, map[string]an
 	return 200, map[string]any{"mode": mode}
 }
 
-// SetDuty is POST /fan/duty: only in "full" mode (the BMC ignores duties otherwise), never below MinDuty.
+// FanHoldOff is how long after the watchdog sent the fans to 100 % a duty below 100 % is refused.
+const FanHoldOff = 5 * time.Minute
+
+// dutyRefusal says why a duty below 100 % cannot be set now ("" when it can): the hottest CPU reading is at or
+// above MaxTempC (or is not a number), or the watchdog acted less than FanHoldOff ago. Without this a request
+// for the minimum right after the watchdog's 100 % was accepted, and repeating it kept the fans low while the
+// CPU stayed over the limit. Caller holds f.mu.
+func (f *Fan) dutyRefusal() (code, msg string) {
+	if !f.actedAt.IsZero() {
+		if left := FanHoldOff - f.now().Sub(f.actedAt); left > 0 {
+			return "fan_watchdog_hold", fmt.Sprintf("the temperature watchdog set the fans to 100 %% a moment ago; "+
+				"a lower speed is accepted again in %d s", int(left.Seconds())+1)
+		}
+	}
+	var local []collect.Temp
+	if f.localTemps != nil {
+		local = f.localTemps()
+	}
+	readings := f.bmc.Readings()
+	temp, name, ok := MaxCPUTemp(readings, local)
+	if ok && !(temp < f.cfg.MaxTempC) {
+		return "fan_too_hot", tooHot(name, temp, f.cfg.MaxTempC) + ": only 100 % is accepted until it is cooler"
+	}
+	if !ok {
+		// MaxCPUTemp leaves out a reading that is not a number, so "no usable reading" can mean that a sensor
+		// is there and reports NaN. That is not "below the limit" either.
+		if name, v, bad := unusableTemp(readings, local); bad {
+			return "fan_too_hot", tooHot(name, v, f.cfg.MaxTempC) + ": only 100 % is accepted until it reads a temperature"
+		}
+	}
+	return "", ""
+}
+
+// unusableTemp returns the first temperature sensor whose reading MaxCPUTemp cannot use (NaN or -Inf).
+func unusableTemp(bmc []ipmi.Reading, local []collect.Temp) (string, float64, bool) {
+	unusable := func(v float64) bool { return math.IsNaN(v) || math.IsInf(v, -1) }
+	for _, r := range bmc {
+		if r.Sensor.Type == ipmi.TypeTemperature && unusable(r.Value) {
+			return r.Sensor.Name, r.Value, true
+		}
+	}
+	for _, t := range local {
+		if unusable(t.Current) {
+			name := t.Sensor
+			if t.Label != nil {
+				name += " " + *t.Label
+			}
+			return name, t.Current, true
+		}
+	}
+	return "", 0, false
+}
+
+// SetDuty is POST /fan/duty: only in "full" mode (the BMC ignores duties otherwise), never below MinDuty, and
+// below 100 % only while dutyRefusal has no objection (409 otherwise).
 func (f *Fan) SetDuty(ctx context.Context, zone, percent int, who string) (int, map[string]any) {
 	if zone != 0 && zone != 1 {
 		return 400, map[string]any{"error": "zone must be 0 or 1"}
@@ -174,6 +230,12 @@ func (f *Fan) SetDuty(ctx context.Context, zone, percent int, who string) (int, 
 	}
 	if mode != "full" {
 		return 409, map[string]any{"error": fmt.Sprintf("fan mode is %s; set mode 'full' first (duty is ignored otherwise)", mode)}
+	}
+	if percent < 100 {
+		if code, msg := f.dutyRefusal(); code != "" {
+			slog.Warn("fan duty refused", "zone", zone, "percent", percent, "by", who, "reason", msg)
+			return 409, map[string]any{"error": msg, "code": code}
+		}
 	}
 	if err := ipmi.SetDuty(ctx, f.t, byte(zone), percent); err != nil {
 		return 502, map[string]any{"error": "BMC refused the duty: " + safeErr(err)}
@@ -281,6 +343,7 @@ func tooHot(name string, temp, limit float64) string {
 // failSafe sets both zones to 100 % (mode stays "full"). Caller holds f.mu.
 func (f *Fan) failSafe(ctx context.Context, why string) {
 	f.noTemp = 0
+	f.actedAt = f.now()
 	firstErr := ipmi.SetDuty(ctx, f.t, 0, 100)
 	_ = ipmi.SetDuty(ctx, f.t, 1, 100) // boards without a peripheral zone refuse this; zone 0 is what matters
 	if firstErr != nil {
