@@ -11,7 +11,6 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
-	"path/filepath"
 	"strings"
 )
 
@@ -27,7 +26,7 @@ func ExecPathProblem(p string, windows bool) string {
 		}
 		return ""
 	}
-	if !filepath.IsAbs(p) {
+	if !strings.HasPrefix(p, "/") { // the Unix rule, whatever system this runs on (as filepath.IsAbs is on Unix)
 		return "must be an absolute path"
 	}
 	return ""
