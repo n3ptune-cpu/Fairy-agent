@@ -23,7 +23,8 @@ import (
 	"github.com/n3ptune-cpu/Fairy-agent/pkg/helper"
 )
 
-// dataDirTrusted is checked by join before it writes anything.
+// dataDirTrusted is checked by join before it writes anything, and by the commands an administrator types that
+// act on config.yaml (adminDataDirTrusted).
 var dataDirTrusted = func(cfgPath string) error { return trustedDataDir(cfgPath) }
 
 // tokensInConfigDir: join writes token files only into the config folder.

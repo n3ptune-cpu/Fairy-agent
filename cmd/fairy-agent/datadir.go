@@ -19,7 +19,8 @@ package main
 // on that open handle.
 //
 //   - checkDataDir: read-only. join, the updater, the helper and the migration state use it before they act
-//     on config.yaml; they refuse when it fails.
+//     on config.yaml; they refuse when it fails. So do the commands an administrator types that act on
+//     config.yaml (adminDataDirTrusted).
 //   - folders.ensure: one of Fairy's own folders exists as a plain folder with its permissions.
 //   - repairDataDir: `install` and `setup-self-update` (an administrator). What cannot be trusted is never
 //     adopted: it is moved aside (name.untrusted-<time>) and made anew; links are removed.
@@ -383,6 +384,24 @@ func configTokenFiles(cfgPath string) []string {
 }
 
 const repairHint = `; as Administrator run: & "C:\Program Files\Fairy\fairy-agent.exe" setup-self-update   (it repairs the folder; what it cannot trust is moved aside)`
+
+// adminDataDirTrusted is the data folder check (dataDirTrusted) for the commands an administrator types on the
+// machine and that act on what config.yaml says: `update` (the repository that is asked, the token file read
+// for the health check, the result written into update\), `config set`, `secret set` (the secrets file
+// config.yaml names is written), `bmc-relay add` and `fans-auto` (the BMC address and the secrets file).
+// A config.yaml someone else prepared must not steer an administrator's command: it is refused with the same
+// message join gives, before config.yaml is read. Like dataDirTrusted itself this does nothing off Windows.
+//
+// Someone who is not an administrator is not checked: with ordinary rights the folder's owner and permissions
+// cannot be read (that would say nothing about the folder), such a run has no rights a prepared config.yaml
+// could borrow, and the commands that write refuse it themselves ("run it in an Administrator PowerShell")
+// before they read anything.
+func adminDataDirTrusted(cfgPath string) error {
+	if !isAdmin() {
+		return nil
+	}
+	return dataDirTrusted(cfgPath)
+}
 
 // checkDataDir is the read-only check a privileged program makes before it acts on config.yaml: the folders
 // above, the folder itself, config.yaml and the token files it names in that folder, and alsoDirs (folders

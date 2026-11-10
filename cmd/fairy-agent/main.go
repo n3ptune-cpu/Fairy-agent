@@ -325,6 +325,11 @@ func fansAutoCmd(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "fairy-agent fans-auto takes no arguments (it reads "+agent.DefaultConfigPath()+")")
 		return 2
 	}
+	// Windows, typed by an administrator: config.yaml names the BMC and the secrets file; see adminDataDirTrusted
+	if err := adminDataDirTrusted(agent.DefaultConfigPath()); err != nil {
+		fmt.Fprintln(stderr, "fairy-agent fans-auto:", err)
+		return 1
+	}
 	return fansAuto(agent.DefaultConfigPath(), stdout, stderr)
 }
 
@@ -354,6 +359,13 @@ func fansAuto(cfgPath string, stdout, stderr io.Writer) int {
 func localUpdate(cfgPath string, check, yes, force bool) int {
 	if !check && runtime.GOOS == "linux" && os.Geteuid() != 0 {
 		fmt.Fprintln(os.Stderr, "fairy-agent update must run as root (it replaces the binary and restarts fairy-agent); --check works as any user")
+		return 1
+	}
+	// Windows: this runs as Administrator and config.yaml decides which repository is asked and which token
+	// file is read to check the restarted agent. A config.yaml that someone else could have written is not
+	// read at all (the same check as the updater service and apply-update; see adminDataDirTrusted).
+	if err := adminDataDirTrusted(cfgPath); err != nil {
+		fmt.Fprintln(os.Stderr, "fairy-agent update:", err)
 		return 1
 	}
 	cfg, err := agent.Load(cfgPath)

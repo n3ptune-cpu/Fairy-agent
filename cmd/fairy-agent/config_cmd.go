@@ -97,6 +97,13 @@ func configCmd(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stdout, configedit.Effective(cfg, s))
 		return 0
 	case pos[0] == "set" && len(pos) == 3:
+		// Windows: nothing is changed in a folder or a config.yaml that someone other than administrators and
+		// SYSTEM could have written (adminDataDirTrusted). Here and not in configSet: join calls configSet
+		// after it has made this check itself.
+		if err := adminDataDirTrusted(cfgPath); err != nil {
+			fmt.Fprintln(stderr, "fairy-agent config set:", err)
+			return 1
+		}
 		if err := configSet(cfgPath, pos[1], pos[2], stdout); err != nil {
 			fmt.Fprintln(stderr, "fairy-agent config set:", err)
 			return 1

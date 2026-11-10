@@ -32,6 +32,12 @@ func secretCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		fmt.Fprint(stderr, secretUsage)
 		return 2
 	}
+	// Windows: config.yaml names the file the secret is written to; one that someone else could have written
+	// is not followed (adminDataDirTrusted). Checked before the value is asked for.
+	if err := adminDataDirTrusted(cfgPath); err != nil {
+		fmt.Fprintln(stderr, "fairy-agent secret set:", err)
+		return 1
+	}
 	if err := secretSet(cfgPath, pos[1], stdin, stdout); err != nil {
 		fmt.Fprintln(stderr, "fairy-agent secret set:", err)
 		return 1
@@ -191,6 +197,10 @@ func bmcRelayCmd(args []string, stdout, stderr io.Writer) int {
 	}
 	if *cipher >= 0 {
 		item = append(item, configedit.KV{Key: "cipher_suite", Value: *cipher})
+	}
+	if err := adminDataDirTrusted(*cfgPath); err != nil { // Windows: see adminDataDirTrusted
+		fmt.Fprintln(stderr, "fairy-agent bmc-relay add:", err)
+		return 1
 	}
 	if err := bmcRelayAdd(*cfgPath, item, stdout); err != nil {
 		fmt.Fprintln(stderr, "fairy-agent bmc-relay add:", err)
