@@ -50,6 +50,11 @@ ETC=/etc/fairy-agent
 UNITS=/etc/systemd/system
 RULES=/etc/polkit-1/rules.d
 
+# For every fairy-agent this script runs: this installer never replaces a newer program with an older release
+# (step 3). A fairy-agent that guards itself against installers which do can tell the two apart by this.
+FAIRY_INSTALLER_KEEPS_NEWER=1
+export FAIRY_INSTALLER_KEEPS_NEWER
+
 say() { printf '%s\n' "fairy: $*"; }
 die() { printf '%s\n' "fairy: ERROR: $*" >&2; exit 1; }
 
