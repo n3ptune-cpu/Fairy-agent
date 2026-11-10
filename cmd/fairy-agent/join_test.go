@@ -25,6 +25,7 @@ func TestJoin(t *testing.T) {
 	if !isAdmin() {
 		t.Skip("join needs root / Administrator")
 	}
+	inTestFolders(t)
 	t.Setenv("FAIRY_AGENT_TOKEN", "")
 	t.Setenv("FAIRY_AGENT_CONTROL_TOKEN", "")
 	dir, state := t.TempDir(), t.TempDir()
@@ -117,6 +118,7 @@ func TestJoin(t *testing.T) {
 // joinDirect runs parseJoin and join without the root / Administrator check of joinCmd, in temporary folders.
 func joinDirect(t *testing.T, args ...string) (enroll.State, []byte, string) {
 	t.Helper()
+	inTestFolders(t)
 	t.Setenv("FAIRY_AGENT_TOKEN", "")
 	t.Setenv("FAIRY_AGENT_CONTROL_TOKEN", "")
 	dir, state := t.TempDir(), t.TempDir()

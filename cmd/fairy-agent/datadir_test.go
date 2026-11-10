@@ -1050,6 +1050,7 @@ func TestTokenPathProblem(t *testing.T) {
 // it said, replacing whatever file was there. Now join looks first and writes token files only in the config
 // folder.
 func TestJoinRefusesAnUntrustedOrOutwardConfig(t *testing.T) {
+	inTestFolders(t) // Windows: the state folder of step 3 is made without the installed service's account
 	t.Setenv("FAIRY_AGENT_TOKEN", "")
 	t.Setenv("FAIRY_AGENT_CONTROL_TOKEN", "")
 	dir, state := t.TempDir(), t.TempDir()

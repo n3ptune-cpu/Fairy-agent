@@ -19,6 +19,7 @@ func TestConfigCommand(t *testing.T) {
 	if !isAdmin() {
 		t.Skip("config set needs root / Administrator")
 	}
+	inTestFolders(t)
 	t.Setenv("FAIRY_AGENT_TOKEN", "")
 	t.Setenv("FAIRY_AGENT_CONTROL_TOKEN", "")
 	dir := t.TempDir()

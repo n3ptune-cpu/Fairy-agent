@@ -174,6 +174,11 @@ func joinCmd(args []string, stdout, stderr io.Writer) int {
 	return 0
 }
 
+// makeStateDir makes the state folder ready for the agent's account (prepareStateDir). It is a variable for the
+// tests on Windows, where the real one gives the folder the permissions of the installed service's account: a
+// test folder on a PC without the service has no such account to name.
+var makeStateDir = prepareStateDir
+
 func join(o joinOpts, out io.Writer) error {
 	dir := filepath.Dir(o.cfgPath)
 	if st, err := os.Stat(dir); err != nil || !st.IsDir() {
@@ -256,7 +261,7 @@ func join(o joinOpts, out io.Writer) error {
 	if err != nil {
 		return fmt.Errorf("config check: %w", err)
 	}
-	if err := prepareStateDir(o.stateDir); err != nil {
+	if err := makeStateDir(o.stateDir); err != nil {
 		return fmt.Errorf("state folder %s: %w", o.stateDir, err)
 	}
 	now := time.Now()

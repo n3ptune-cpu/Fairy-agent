@@ -166,6 +166,7 @@ func TestJoinProxmoxStoresTheGrant(t *testing.T) {
 	if !isAdmin() {
 		t.Skip("join needs root / Administrator")
 	}
+	inTestFolders(t)
 	t.Setenv("FAIRY_AGENT_TOKEN", "")
 	t.Setenv("FAIRY_AGENT_CONTROL_TOKEN", "")
 	dir, state := t.TempDir(), t.TempDir()
