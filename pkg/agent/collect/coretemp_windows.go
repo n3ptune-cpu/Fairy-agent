@@ -17,9 +17,10 @@ package collect
 // names through the system's Session\<id>\ link (lets a LocalSystem service read Core Temp without the global
 // setting). A name outside Global\ can be created by any program of the signed-in user, so it is used only when
 // the object belongs to Administrators or SYSTEM (Core Temp runs elevated); anything else under that name is
-// never mapped.
+// never mapped. A Global\ name can be created by any service in session 0: its owner is read too, and an object
+// of a service's account is never mapped (coretemp_source.go has the whole rule).
 //
-// Only OpenFileMappingW(FILE_MAP_READ, plus READ_CONTROL for a session name: to read its owner) +
+// Only OpenFileMappingW(FILE_MAP_READ plus READ_CONTROL, to read the object's owner from the same handle) +
 // MapViewOfFile(FILE_MAP_READ): the view is read-only, copied at once and unmapped. No synchronisation object
 // of Core Temp's is opened; a reading taken while Core Temp updates the block can mix old and new values of
 // single cores, which is harmless. The copy is at most the size of the block, only of committed readable
@@ -29,7 +30,9 @@ package collect
 import (
 	"errors"
 	"fmt"
+	"log/slog"
 	"runtime/debug"
+	"sync"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -38,6 +41,9 @@ import (
 var procOpenFileMappingW = kernel32.NewProc("OpenFileMappingW")
 
 var coreTempRead = readCoreTempWindows
+
+// coreTempNoted: what coreTempOwnerProblem had to say about an object that is used all the same, said once.
+var coreTempNoted sync.Map
 
 func coreTempNames() []coreTempName {
 	var own uint32
@@ -91,20 +97,22 @@ func readMapping(c coreTempName) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	access := uintptr(windows.FILE_MAP_READ)
-	if !c.Global {
-		access |= windows.READ_CONTROL // to read the object's owner before anything of it is mapped
-	}
+	// READ_CONTROL: to read the object's owner before anything of it is mapped, from the handle that is mapped
+	access := uintptr(windows.FILE_MAP_READ | windows.READ_CONTROL)
 	r, _, callErr := procOpenFileMappingW.Call(access, 0, uintptr(unsafe.Pointer(p)))
 	if r == 0 {
 		return nil, callErr
 	}
 	h := windows.Handle(r)
 	defer windows.CloseHandle(h)
-	if !c.Global {
-		owner, oerr := mappingOwner(h)
-		if err := coreTempOwnerProblem(c, owner, oerr); err != nil {
-			return nil, err
+	owner, oerr := mappingOwner(h)
+	note, problem := coreTempOwnerProblem(c, owner, oerr)
+	if problem != nil {
+		return nil, problem
+	}
+	if note != "" {
+		if _, said := coreTempNoted.LoadOrStore(note, true); !said {
+			slog.Warn(note)
 		}
 	}
 	addr, err := windows.MapViewOfFile(h, windows.FILE_MAP_READ, 0, 0, 0)

@@ -38,6 +38,9 @@ func TestCoreTempCandidates(t *testing.T) {
 
 // L32: a session name can be created by anyone signed in to that session. It is used only when the object
 // belongs to Administrators or SYSTEM.
+// N10 (review of the Windows side): a Global\ name can be created by any service in session 0. Its owner is
+// read too: an object of a service's account, or one whose owner cannot be read, is never used; one of a
+// person's account is used in this release, with a note for the log.
 func TestCoreTempOwnerProblem(t *testing.T) {
 	const user = "S-1-5-21-1111111111-2222222222-3333333333-1001"
 	global := coreTempName{`Global\CoreTempMappingObjectEx`, true}
@@ -46,19 +49,18 @@ func TestCoreTempOwnerProblem(t *testing.T) {
 	ok := []struct {
 		c     coreTempName
 		owner string
-		err   error
 	}{
-		{global, sidAdministrators, nil},
-		{global, user, nil},                       // creating a Global\ name needs a privilege ordinary users lack
-		{global, "", errors.New("access denied")}, // the owner of a Global\ name is not even asked for
-		{plain, sidAdministrators, nil},           // Core Temp started by an administrator (elevated)
-		{console, sidAdministrators, nil},         // the same, seen from the helper in session 0
-		{console, sidSystem, nil},                 // Core Temp started by a SYSTEM task
-		{console, sidTrustedInstaller, nil},
+		{global, sidAdministrators},
+		{global, sidSystem},
+		{global, sidTrustedInstaller},
+		{plain, sidAdministrators},   // Core Temp started by an administrator (elevated)
+		{console, sidAdministrators}, // the same, seen from the helper in session 0
+		{console, sidSystem},         // Core Temp started by a SYSTEM task
+		{console, sidTrustedInstaller},
 	}
 	for _, c := range ok {
-		if err := coreTempOwnerProblem(c.c, c.owner, c.err); err != nil {
-			t.Errorf("%q owned by %q: refused: %v", c.c.Name, c.owner, err)
+		if note, err := coreTempOwnerProblem(c.c, c.owner, nil); err != nil || note != "" {
+			t.Errorf("%q owned by %q: %v, note %q", c.c.Name, c.owner, err, note)
 		}
 	}
 	refused := []struct {
@@ -74,16 +76,42 @@ func TestCoreTempOwnerProblem(t *testing.T) {
 		{console, "", nil, "not to Administrators"},                  // no owner
 		{console, "", errors.New("access denied"), "cannot be read"}, // the object does not let its owner be read
 		{console, sidAdministrators, errors.New("x"), "cannot be read"},
+		// N10: who can take a Global\ name in session 0 without being an administrator
+		{global, "S-1-5-19", nil, "S-1-5-19"},                                             // another program's service running as LocalService
+		{global, "S-1-5-20", nil, "S-1-5-20"},                                             // ... as NetworkService
+		{global, "S-1-5-80-1111-2222-3333-4444-5555", nil, "a service's account"},         // ... as its own service account
+		{global, "S-1-5-82-1111-2222-3333-4444-5555", nil, "a service's account"},         // an IIS application pool
+		{global, "S-1-5-83-1-1111-2222-3333-4444", nil, "a service's account"},            // a virtual machine's worker
+		{global, sidFairySvc, nil, sidFairySvc},                                           // Fairy's own low-rights agent
+		{global, "", nil, "nobody"},                                                       // no owner
+		{global, "", errors.New("access denied"), "cannot be read"},                       // the owner is hidden
+		{global, sidAdministrators, errors.New("access denied"), "cannot be read"},        // not read is not known
+		{coreTempName{`Global\CoreTempMappingObject`, true}, "S-1-5-19", nil, "S-1-5-19"}, // the older name the same
 	}
 	for _, c := range refused {
-		err := coreTempOwnerProblem(c.c, c.owner, c.err)
-		if err == nil || !errors.Is(err, ErrCoreTempUntrusted) || !strings.Contains(err.Error(), c.want) ||
-			!strings.Contains(err.Error(), "global shared memory") {
-			t.Errorf("%q owned by %q (%v): %v", c.c.Name, c.owner, c.err, err)
+		note, err := coreTempOwnerProblem(c.c, c.owner, c.err)
+		if err == nil || !errors.Is(err, ErrCoreTempUntrusted) || !strings.Contains(err.Error(), c.want) || note != "" {
+			t.Errorf("%q owned by %q (%v): %v, note %q", c.c.Name, c.owner, c.err, err, note)
+			continue
+		}
+		// the way out fits the name: the global setting cures a session name, not a Global\ name
+		if strings.Contains(err.Error(), "global shared memory") == c.c.Global || strings.Contains(err.Error(), "Another program holds") != c.c.Global {
+			t.Errorf("%q: the wrong advice: %v", c.c.Name, err)
 		}
 		if errors.Is(err, errCoreTempAbsent) || errors.Is(err, errCoreTempDenied) {
 			t.Errorf("%q: reported as absent or denied: %v", c.c.Name, err)
 		}
+	}
+	// A Global\ object of a person's account: used in this release (the rule "an administrator's program makes
+	// objects that belong to Administrators" is not confirmed on a real PC for these names), and said in the log.
+	for _, owner := range []string{user, "S-1-5-21-1-2-3-500", "S-1-12-1-1-2-3-4"} {
+		note, err := coreTempOwnerProblem(global, owner, nil)
+		if err != nil || !strings.Contains(note, owner) || !strings.Contains(note, "used all the same") || !strings.Contains(note, global.Name) {
+			t.Errorf("Global\\ name owned by %s: %v, note %q", owner, err, note)
+		}
+	}
+	if serviceIdentity(sidAdministrators) || serviceIdentity(sidSystem) || serviceIdentity(user) || serviceIdentity("") {
+		t.Error("serviceIdentity")
 	}
 }
 
