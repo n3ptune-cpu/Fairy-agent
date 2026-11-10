@@ -3,9 +3,11 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
+	"github.com/n3ptune-cpu/Fairy-agent/internal/linktest"
 	"github.com/n3ptune-cpu/Fairy-agent/pkg/enroll"
 )
 
@@ -59,20 +61,28 @@ func TestPairingStateIsWrittenIntoTheFolderItself(t *testing.T) {
 			t.Fatalf("%s: something was written into the other folder: %v", what, ents)
 		}
 	}
-	swap := func() { // the agent's account: state\ is emptied and becomes a link to the other folder
-		if err := os.RemoveAll(state); err != nil {
-			t.Fatal(err)
+	// the agent's account: state\ is moved out of the way and a link to the other folder takes its name. (It is
+	// renamed, not deleted: Windows lets a folder that someone holds open be renamed, while a deleted one keeps
+	// its name until it is closed.)
+	gone := 0
+	swap := func() error {
+		gone++
+		if err := os.Rename(state, filepath.Join(base, "state-gone-"+itoa(gone))); err != nil {
+			return err
 		}
-		if err := os.Symlink(elsewhere, state); err != nil {
-			t.Skip("no symbolic links here:", err)
-		}
+		return mklink(elsewhere, state)
 	}
 	defer func() { beforeFolderOpened, afterFolderOpened = nil, nil }()
 
 	// 2. the swap between the look at the folder and its opening (the window the old code left open)
-	beforeFolderOpened = swap
+	var swapErr error
+	beforeFolderOpened = func() { swapErr = swap() }
 	err := writePairingState(state, st)
 	beforeFolderOpened = nil
+	if swapErr != nil {
+		untouched("no swap")
+		t.Skip("the plain case ran; the cases with a link did not, the folder could not be swapped for a link here:", swapErr)
+	}
 	if err == nil || !strings.Contains(err.Error(), "became a link") || !strings.Contains(err.Error(), "setup-self-update") {
 		t.Fatal(err)
 	}
@@ -85,15 +95,20 @@ func TestPairingStateIsWrittenIntoTheFolderItself(t *testing.T) {
 	untouched("a link from the start")
 
 	// 4. the swap after the folder was opened: the file goes into the folder that was opened, wherever the
-	//    name leads by then
-	_ = os.Remove(state)
+	//    name leads by then. On Windows there is nothing to lead elsewhere: a folder that is open the way
+	//    os.OpenRoot opens it (not shared for deleting) cannot be renamed or removed until it is closed, so
+	//    the swap itself fails there and the file is written into state\.
+	if err := os.RemoveAll(state); err != nil { // the link itself
+		t.Fatal(err)
+	}
 	_ = os.Mkdir(state, 0o755)
 	moved := filepath.Join(base, "state-moved")
+	var held error
 	afterFolderOpened = func() {
-		if err := os.Rename(state, moved); err != nil {
-			t.Fatal(err)
+		if held = os.Rename(state, moved); held != nil {
+			return
 		}
-		if err := os.Symlink(elsewhere, state); err != nil {
+		if err := mklink(elsewhere, state); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -103,22 +118,48 @@ func TestPairingStateIsWrittenIntoTheFolderItself(t *testing.T) {
 		t.Fatal(err)
 	}
 	untouched("swapped after the folder was opened")
-	if got, _ := os.ReadFile(filepath.Join(moved, "pairing.json")); string(got) != string(want) {
+	in := moved
+	if held != nil {
+		if runtime.GOOS != "windows" {
+			t.Fatal("the open folder could not be renamed:", held)
+		}
+		t.Log("Windows did not let the open folder be renamed:", held)
+		in = state
+	}
+	if got, _ := os.ReadFile(filepath.Join(in, "pairing.json")); string(got) != string(want) {
 		t.Fatalf("the file is not in the folder that was opened: %q", got)
 	}
 
 	// 5. inside the folder: a link under the final name is replaced, never followed; a folder there is an error
-	_ = os.Remove(state)
+	if err := os.RemoveAll(state); err != nil {
+		t.Fatal(err)
+	}
 	_ = os.Mkdir(state, 0o755)
-	if err := os.Symlink(victim, filepath.Join(state, "pairing.json")); err != nil {
+	if err := linktest.File(victim, filepath.Join(state, "pairing.json")); err == nil {
+		if err := writePairingState(state, st); err != nil {
+			t.Fatal(err)
+		}
+		untouched("a link under the final name")
+		if fi, _ := os.Lstat(filepath.Join(state, "pairing.json")); fi == nil || !fi.Mode().IsRegular() {
+			t.Fatal("the link under the final name was not replaced by the file")
+		}
+	} else if runtime.GOOS != "windows" {
 		t.Fatal(err)
 	}
-	if err := writePairingState(state, st); err != nil {
+	// a link to a folder under the final name (on Windows a junction, the link an ordinary user can make): the
+	// file replaces it or the write fails, and either way nothing is written where it points
+	_ = os.Remove(filepath.Join(state, "pairing.json"))
+	if err := mklink(elsewhere, filepath.Join(state, "pairing.json")); err != nil {
 		t.Fatal(err)
 	}
-	untouched("a link under the final name")
-	if fi, _ := os.Lstat(filepath.Join(state, "pairing.json")); fi == nil || !fi.Mode().IsRegular() {
-		t.Fatal("the link under the final name was not replaced by the file")
+	err = writePairingState(state, st)
+	untouched("a link to a folder under the final name")
+	fi, _ := os.Lstat(filepath.Join(state, "pairing.json"))
+	if fi == nil || (err == nil) != fi.Mode().IsRegular() || (err != nil) != linktest.IsLink(fi) {
+		t.Fatalf("a link to a folder under the final name: error %v, and the name is now %v", err, fi)
+	}
+	if ents, _ := os.ReadDir(state); len(ents) != 1 {
+		t.Fatalf("a temporary file was left behind: %v", ents)
 	}
 	_ = os.Remove(filepath.Join(state, "pairing.json"))
 	_ = os.MkdirAll(filepath.Join(state, "pairing.json", "x"), 0o755)
