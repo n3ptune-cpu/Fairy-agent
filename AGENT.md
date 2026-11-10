@@ -69,29 +69,98 @@ Like adding a machine to Tailscale: no editor, no token copying.
    self-update, Wake-on-LAN relay, reading the UPS of a local NUT server, Core Temp (Windows), attaching it to
    a Proxmox node, and the MAC addresses to wake it with.
 2. The panel asks you to confirm it's you (Pocket ID), then shows **one command** with a one-time code
-   (valid 15 minutes, works once). Copy it.
+   (valid 15 minutes, works once). Copy the whole command. Do not type it by hand and do not shorten it.
 3. Run it on the machine:
-   * **Linux** (as a user with sudo; on a Proxmox node, as root, the panel leaves out `sudo`):
-     `curl -fsSL https://github.com/n3ptune-cpu/Fairy-agent/releases/latest/download/install.sh | sudo sh -s -- --join CODE --panel 100.88.109.47 ...`
-   * **Windows** (PowerShell as Administrator, one line):
-     `iwr https://github.com/n3ptune-cpu/Fairy-agent/releases/latest/download/install.ps1 -OutFile $env:TEMP\fairy-install.ps1; powershell -ExecutionPolicy Bypass -File $env:TEMP\fairy-install.ps1 -Join CODE -PanelAddress 100.88.109.47 ...`
+   * **Linux**: as a user with sudo. On a Proxmox node, as root (the panel then leaves out `sudo`).
+   * **Windows**: in PowerShell as Administrator, as one line.
 4. The dialog goes from *waiting for the machine* to *paired* to *online*, and the host appears.
 
-What the command does: it downloads the latest release, checks every file against the signed `SHA256SUMS`
-(with the release key built into the downloaded fairy-agent on Windows, the installed agent's on a Linux re-run;
-on Windows an installed program is only run again after it has been replaced by the checked one and its
-SHA-256 matches; when the panel passes the SHA-256 of the release's `SHA256SUMS` it checked with its own key,
-`FAIRY_SUMS_SHA256` / `--sums-sha256` on Linux or `-SumsSha256` on Windows, a different `SHA256SUMS` is refused
-before anything in it is trusted, so a first install no longer rests on the downloaded program's own key),
-installs exactly as described
-in [Install on Windows](#install-on-windows) / [Install on Linux](#install-on-linux) (user, program, service,
-polkit / tmpfiles rules when needed, firewall rule for the panel only, on Windows the elevated helper service
-when Core Temp, IPMI or shutdown / reboot is chosen), then runs `fairy-agent join`: it makes the tokens on the machine, switches on the chosen
-features with the same checked edit as `fairy-agent config set`, and stores the code (only a hash of it) with its
-expiry and the panel's address. The panel then asks the agent `POST /pair` with proof of the code; the agent
-answers **once**, only to the panel's address, with its tokens, and closes pairing for good (`fairy-agent
-pair-status` shows it). The agent still never connects to the panel; the panel keeps the tokens in its own state
-folder, not in `config.yaml`.
+**Always use the command from the panel.** There is no "latest" install line any more. A line that downloads
+whatever is newest and runs it cannot be checked by anybody. The panel's command names **one** release, and the
+panel has already checked that release's signature with its own built-in release key.
+
+**How to recognise the command.** The panel fills in every value. The words in capitals below are not for you to
+replace; they only show where the panel's values are.
+
+Linux:
+
+```
+f=$(mktemp) && curl -fsSL --proto '=https' -o "$f" BASE/install.sh && echo "SH_HASH  $f" | sha256sum -c - && printf '%s' 'CODE' | sudo env FAIRY_RELEASE_URL=BASE sh "$f" --sums-sha256 SUMS --join-stdin --pair-v2 --panel PANEL [options]
+```
+
+Windows:
+
+```
+$u='BASE'; $b=(New-Object Net.WebClient).DownloadData("$u/install.ps1"); if ((([Security.Cryptography.SHA256]::Create().ComputeHash($b) | ForEach-Object { $_.ToString('x2') }) -join '') -ne 'PS1_HASH') { throw 'install.ps1 is not the release the panel checked: not run' }; $env:FAIRY_JOIN_CODE='CODE'; & ([scriptblock]::Create([Text.Encoding]::UTF8.GetString($b))) -ReleaseUrl $u -SumsSha256 SUMS -PanelAddress PANEL -PairV2 [options]
+```
+
+| In the line | What the panel puts there |
+| --- | --- |
+| `BASE` | the address of one release, `https://github.com/n3ptune-cpu/Fairy-agent/releases/download/build-<number>`. Never `latest`. |
+| `SH_HASH`, `PS1_HASH` | the SHA-256 of that release's `install.sh` / `install.ps1`. A script with any other content is not run. |
+| `SUMS` | the SHA-256 of that release's `SHA256SUMS` file, which the panel checked with its own release key. |
+| `CODE` | the one-time join code. |
+| `PANEL` | the panel's Tailscale address (an IPv4 address such as `100.64.0.10`). Only this address may pair. |
+| `[options]` | what you ticked. Linux: `--power-control`, `--self-update`, `--wol`, `--ipmi`, `--proxmox`, `--ups` or `--ups-name NAME`. Windows: `-PowerControl`, `-SelfUpdate`, `-Wol`, `-CoreTemp`, `-Ipmi`, `-Ups` or `-UpsName NAME`. |
+
+**The join code is never an argument of a program.** Other users of the machine can read the arguments of a
+running program. So:
+
+* Linux: `printf` hands the code to the script on standard input (`--join-stdin`). The script hands it to
+  `fairy-agent join --code-stdin` on standard input too.
+* Windows: the line puts the code into the environment variable `FAIRY_JOIN_CODE` of that PowerShell window. The
+  script reads it, removes the variable at once and hands the code to `fairy-agent join` through that
+  program's environment.
+* `install.sh` also takes the code from `FAIRY_JOIN_CODE` when `--join-stdin` is not given. `sudo` does not pass
+  that variable on by default, which is why the panel's line uses standard input.
+* The scripts and `fairy-agent join` never print the code.
+* On Windows the line you pasted stays in PowerShell's history file, with the code in it. The code works once
+  and for 15 minutes only.
+
+**Lines from an older panel** look different: they carry the code as `--join CODE` (Linux) or `-Join CODE`
+(Windows), have no `--pair-v2` / `-PairV2`, and on Windows save the script to a file first. The scripts still
+accept them. On Linux the script then prints a note that the code was readable on the command line while it
+ran. Update the panel to get the new line.
+
+**Without the panel's fingerprint the scripts stop.** `install.sh` without `--sums-sha256` and `install.ps1`
+without `-SumsSha256` end with `no release fingerprint` before they download anything. The options
+`--unverified` (Linux) and `-Unverified` (Windows) go on anyway. Then, on a first install, nothing checks the
+download but the downloaded program itself, and the script prints `NOT independently verified`. Do not use
+them unless you checked the release yourself as in
+[SETUP-UPDATES.md, part 2](SETUP-UPDATES.md#part-2-installing-or-updating-an-agent-by-hand).
+
+**What the command does**, in order:
+
+1. It downloads the install script of the named release and compares its SHA-256 with the one in the line. A
+   different script is not run.
+2. The script downloads the release's files. It refuses a `SHA256SUMS` whose SHA-256 is not the one the panel
+   passed, before it trusts a line of it. It then checks every file against `SHA256SUMS`, and the signature of
+   `SHA256SUMS` with the release key built into fairy-agent (on Linux the installed agent's key when there is
+   one, otherwise the downloaded program's; on Windows always the downloaded program's).
+3. **Never older.** When the installed fairy-agent is a newer build than the release in the line, the program
+   stays (on Linux its service files too). The script says so (`is NEWER than this installer's release`) and
+   goes on with the settings and the pairing. The cure is to update the panel, which then names a newer
+   release. On Windows the installed program is asked for its version only when nobody but administrators
+   could have changed it or its folder; otherwise it is replaced by the checked program without being run.
+4. It installs as described in [Install on Windows](#install-on-windows) / [Install on Linux](#install-on-linux):
+   user, program, service, polkit / tmpfiles rules when needed, a firewall rule for the panel only, and on
+   Windows the elevated helper service when Core Temp, IPMI or shutdown / reboot is chosen.
+5. It runs `fairy-agent join`. That makes the tokens on the machine, switches on the chosen features with the
+   same checked edit as `fairy-agent config set`, and stores what the agent needs to recognise the panel, with
+   its expiry and the panel's address. The code itself is never stored.
+6. The panel asks the agent `POST /pair`. The agent answers **once**, only to the panel's address, with its
+   tokens, and closes pairing for good (`fairy-agent pair-status` shows it).
+
+The agent still never connects to the panel. The panel keeps the tokens in its own state folder, not in
+`config.yaml`.
+
+**Pairing v2** (`--pair-v2` / `-PairV2`, in the line when the panel speaks it): the panel must first prove that
+it has the join code, and the agent's answer with the tokens is encrypted so that only a holder of the code
+can open it. A program that only listens on the network learns nothing, and a program that answers in the
+agent's place is not believed. The version is fixed by the command, never agreed over the network: an agent
+that was given a v2 code refuses a v1 request (`400 wrong_version`) and the other way round. Without the option
+(older panels) pairing works as before 0.6.0: the panel sends a proof of the code and the tokens come back
+unencrypted inside Tailscale.
 
 * **Lost the panel's copy of the tokens**, or the code expired before the machine ran it: **Re-pair** on the
   host's page makes a new code and the same command; running it again keeps the machine's settings but makes
