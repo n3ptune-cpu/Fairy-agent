@@ -22,7 +22,7 @@
 
 processes:
   enabled: true                # the panel's Processes tab (false: the agent never looks at other programs)
-  cmdline: true                # Linux: command lines (passwords/tokens are blanked); Windows: program paths
+  cmdline: false               # true: Linux sends command lines (a filter blanks the secrets it recognises: best effort); Windows: program paths
   never_open: []               # Windows: programs listed by name only, never opened, e.g. [VALORANT-Win64-Shipping.exe]
 
 gpu:

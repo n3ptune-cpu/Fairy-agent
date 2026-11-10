@@ -64,7 +64,7 @@ const linuxStarter = `# fairy-agent configuration: /etc/fairy-agent/config.yaml 
 
 processes:
   enabled: true          # the panel's Processes tab; false = the agent never looks at other programs
-  cmdline: true          # command lines (passwords and tokens are blanked)
+  cmdline: false         # true = also send command lines (a filter blanks the secrets it recognises; best effort)
 
 gpu:
   nvidia_smi: auto       # auto | off | full path to nvidia-smi
