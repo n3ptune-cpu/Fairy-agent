@@ -1,4 +1,3 @@
-#Requires -RunAsAdministrator
 <#
 .SYNOPSIS
   Fairy agent installer for Windows, the machine side of the panel's "Add host".
@@ -20,9 +19,14 @@
   -PairV2 (the panel's line says so when the panel speaks it): the agent answers the panel encrypted, and
   only a panel that proves it has this join code.
 
+  The panel's line downloads this script into memory, checks the SHA-256 of exactly those bytes and runs
+  them, with no file in between that another program could swap after the check. The script therefore has
+  no "#Requires" line (it checks for an Administrator window itself) and works both run from memory and
+  as a file (powershell -ExecutionPolicy Bypass -File install.ps1 ..., lines of older panels).
+
 .DESCRIPTION
-  1. downloads the release: fairy-agent-windows-amd64.exe, SHA256SUMS (+ signature), VERSION and
-     install-fairy-agent.ps1, and checks each file's SHA-256 against SHA256SUMS and SHA256SUMS' signature with
+  1. downloads the release into a new folder that only Administrators and SYSTEM can reach:
+     fairy-agent-windows-amd64.exe, SHA256SUMS (+ signature), VERSION and install-fairy-agent.ps1, and checks each file's SHA-256 against SHA256SUMS and SHA256SUMS' signature with
      the release key built into the downloaded fairy-agent. An already installed fairy-agent.exe is never run
      before it has been replaced by the checked one (fairy-agent 0.4.2 and older let the service's own account
      change it);
@@ -73,6 +77,10 @@ if ($code -notmatch '^[A-Za-z2-7 -]+$') { throw 'that is not a Fairy join code (
 if ($PanelAddress -notmatch '^\d{1,3}(\.\d{1,3}){3}$') { throw "-PanelAddress must be the panel's Tailscale IPv4 address, e.g. 100.64.0.10" }
 if ($UpsName -and $UpsName -notmatch '^[A-Za-z0-9_.-]{1,64}$') { throw '-UpsName: letters, digits, _ . - only' }
 if ($SumsSha256 -and $SumsSha256 -notmatch '^[0-9a-fA-F]{64}$') { throw '-SumsSha256 must be 64 hex digits (the SHA-256 of SHA256SUMS)' }
+$principal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
+if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+    throw 'this must run in an Administrator PowerShell (right-click Windows PowerShell, "Run as administrator")'
+}
 # The release's fingerprint from the panel. Without it nothing vouches for the download but the download itself.
 if (-not $SumsSha256 -and -not $Unverified) {
     throw "no release fingerprint (-SumsSha256). Use the line from the panel's Add host dialog: it carries the fingerprint of the release the panel checked. To install without it, at your own risk, add -Unverified."
@@ -85,9 +93,16 @@ function Invoke-Quiet([string]$cmd, [string[]]$cmdArgs) {
     return @{ Code = $LASTEXITCODE; Text = $out.Trim() }
 }
 
+# The work folder: new, with a random name, and reachable only by Administrators and SYSTEM before anything
+# is downloaded into it. What is downloaded is checked and then run from here as Administrator, so no other
+# account may be able to swap a file between the check and the run (a window that runs as SYSTEM, as some
+# remote-support tools give, has a temp folder that other users can write to).
 $dir = Join-Path $env:TEMP ('fairy-install-' + [guid]::NewGuid().ToString('N'))
-New-Item -ItemType Directory -Force -Path $dir | Out-Null
+New-Item -ItemType Directory -Path $dir | Out-Null   # no -Force: a folder of that name must not exist yet
 try {
+    & (Join-Path $env:SystemRoot 'System32\icacls.exe') $dir /inheritance:r /grant:r '*S-1-5-32-544:(OI)(CI)F' '*S-1-5-18:(OI)(CI)F' /Q | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "could not restrict the work folder $dir to administrators (icacls exit code $LASTEXITCODE); nothing was downloaded" }
+    if (@(Get-ChildItem -LiteralPath $dir -Force).Count -ne 0) { throw "the new work folder $dir is not empty: something else wrote to it; nothing was downloaded" }
     Write-Host "fairy: downloading the release from $ReleaseUrl"
     $files = 'fairy-agent-windows-amd64.exe', 'SHA256SUMS', 'SHA256SUMS.sig', 'VERSION', 'install-fairy-agent.ps1'
     foreach ($f in $files) { Invoke-WebRequest -UseBasicParsing -Uri "$ReleaseUrl/$f" -OutFile (Join-Path $dir $f) }
