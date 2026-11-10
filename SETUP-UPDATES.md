@@ -581,6 +581,10 @@ you to confirm with Pocket ID (like power actions), writes it to the Audit log, 
 *downloading*, *applying* (offline for a few seconds), then the new version with "last update OK". If the new
 version did not come up, the agent is back on the old one and shows why ("rolled back").
 
+Since 0.6.0: after an update was installed, another one asked for through the panel within 10 minutes is
+refused and shown as failed with the reason. Wait, or run `fairy-agent update` on the machine. A release whose
+version does not start with a build number is refused. Details: AGENT.md, "The rules of an update".
+
 Linux details: `journalctl -u fairy-agent-update` (installer), `journalctl -u fairy-agent` (agent). Windows:
 `C:\ProgramData\fairy-agent\update\installer.log` (installer), `C:\ProgramData\fairy-agent\logs\agent.log`
 (agent), `C:\ProgramData\fairy-agent\helper\helper.log` (helper). The panel's own version is on the same page, with "Panel update

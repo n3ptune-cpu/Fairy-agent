@@ -899,6 +899,36 @@ itself, and the agent:
 The panel shows each step (downloading, applying, the result) on the Updates page and next to the version on
 the host's page. Programs you build yourself (without the release key) never update themselves and say so.
 
+**The rules of an update (0.6.0).**
+
+* **Versions carry a build number.** A release's version is `<build number>-<short commit>`, for example
+  `42-1a2b3c4`. `fairy-agent version` shows it. "Newer" and "older" are decided by the build number alone. A release whose version does not start with a build number (or has one
+  of more than nine digits) cannot be compared, so it is refused: by the agent before it downloads anything,
+  and again by the installer.
+* **Never older, never the same again.** A request from the panel never installs an older release and never
+  reinstalls the running one: the agent answers "already up to date" or refuses. A `force` in the request is
+  ignored. Only root / an administrator at the machine can do either: `fairy-agent update --force`.
+* **Ten minutes between two updates.** After an installer run that replaced the program, another run asked
+  for through the panel is refused for 10 minutes. The panel shows that run as failed with the reason ("an
+  update was installed on this machine less than 10 minutes ago; refused, try again in ..."). Without this,
+  whoever holds the control token could keep a machine restarting. The installer keeps the time itself, in a
+  file the agent's account cannot write: `/var/lib/fairy-agent-update/last-apply` (Linux),
+  `C:\ProgramData\fairy-agent\update\last-apply` (Windows). `fairy-agent update` typed at the machine is not
+  held back. The pause starts with the first update that 0.6.0's own installer runs: the update *to* 0.6.0 is
+  still run by the old installer.
+* **The check after the swap sends no token.** The installer asks the agent's new `GET /health?c=<random
+  value>`. The answer proves that the agent on that port holds this machine's read token and runs the new
+  version, without the token or the version going over the wire. A program that only sits on the agent's
+  port cannot pass. (The update *to* 0.6.0 is checked the old way, by the old installer.)
+* **A port held by another program.** If another program is listening on the agent's port, the agent no
+  longer waits silently: after five tries it ends with `another program is listening on the agent's port`,
+  and the service manager shows the failure and starts it again later.
+* **What a failed update reports.** When the new version does not come up, the installer puts the old
+  program back, starts it and checks that it answers. The report then ends with `rolled back to the previous
+  version`: the machine runs the old version and is fine. Only when the old version does not come up either
+  does it say `rolling back FAILED too`: then look at the machine. (Up to 0.5.3 a clean rollback was reported
+  as a failed one.)
+
 **On the machine itself** (like `tailscale update`), as root on Linux or in an Administrator PowerShell on
 Windows; this works even without `self_update` switched on:
 
@@ -943,8 +973,8 @@ self_update:
   access by itself when it starts, and since 0.5.1 does all of `setup-self-update` by itself, see
   [Moving to the new account by itself](#moving-to-the-new-account-by-itself-051-localsystem-only);
   re-running `install.ps1` from the panel's Re-pair does all of it too.)
-  Updates never go to an older release through the panel any more, not even with force: by hand only, with
-  `fairy-agent update --force` as root / Administrator.
+  Updates never go to an older release through the panel, not even with force: by hand only, with
+  `fairy-agent update --force` as root / Administrator (see "The rules of an update" above).
 
 The very first program with self-update has to be installed by hand once per machine;
 [SETUP-UPDATES.md](SETUP-UPDATES.md) has the exact commands. `self_update.repo` can point at a fork (its
