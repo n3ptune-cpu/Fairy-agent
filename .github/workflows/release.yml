@@ -1,5 +1,6 @@
-# Every push to main (or a manual run) builds, signs and publishes a GitHub release that agents install when an
-# admin presses Update in the panel (see SETUP-UPDATES.md). Nothing installs it automatically.
+# Every push to main that changes more than Markdown files (or a manual run) builds, signs and publishes a
+# GitHub release that agents install when an admin presses Update in the panel (see SETUP-UPDATES.md). Nothing
+# installs it automatically. A push that only touches *.md (a README edit on GitHub) starts no release.
 #
 # Release tag: build-<run number> (never vX.Y.Z: Go would read that as a version of this Go module).
 # Version in the binaries: <run number>-<short commit>, e.g. 42-1a2b3c4.
@@ -11,6 +12,8 @@ name: release
 on:
   push:
     branches: [main]
+    paths-ignore:
+      - '**.md'
   workflow_dispatch:
 
 permissions:
