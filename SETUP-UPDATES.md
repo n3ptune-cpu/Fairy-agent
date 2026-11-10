@@ -62,8 +62,10 @@ go run ./cmd/fairy-release-key gen
 
 This writes two files:
 
-* `C:\Users\<you>\fairy-release-key.txt`: the **private key**, one line. It goes into GitHub as a secret (next
-  step) and nowhere else. Never commit it, never paste it into chat.
+* `C:\Users\<you>\fairy-release-key.txt`: the **private key**, one line. Whoever has it can sign a release
+  that every agent and the panel will install. It belongs in exactly two places: the GitHub Environment
+  `release` of both repositories (next step), and your own offline copy. See
+  [1.6 Rules for the private key](#16-rules-for-the-private-key).
 * `E:\Projects\Fairy-agent\release\signing.pub`: the **public key**. It is committed in both repositories and
   built into every release; agents and the panel accept only releases signed with the matching private key.
 
@@ -82,26 +84,41 @@ Copy the key to the clipboard:
 Get-Content "$HOME\fairy-release-key.txt" | Set-Clipboard
 ```
 
-Then in your browser, for **Fairy-agent** (its release job reads the key only from the GitHub Environment
-`release`, so every release waits for your approval):
+Then in your browser, do the steps below for **Fairy-agent**, and then the same steps again for
+**Fairy-dashboard**. Both release jobs read the key only from the GitHub Environment `release`, so every
+release waits for your approval before the job can read the key.
 
-1. open the repository on github.com, click **Settings** (top right of the repository, not your account
-   settings);
-2. in the left menu: **Environments** > **New environment**; Name: `release`; **Configure environment**;
-3. tick **Required reviewers**, type your own GitHub name, pick yourself; **Save protection rules**. (Optional,
-   same page: **Deployment branches and tags** > **Selected branches and tags** > **Add deployment branch or
-   tag rule** > `main`.) Leave "Prevent self-review" off: you are the only reviewer;
-4. on the same page under **Environment secrets**: **Add environment secret**; Name: `FAIRY_RELEASE_KEY`; Value:
-   paste (Ctrl+V); **Add secret**;
-5. if the key was already a repository secret (before 0.4.3): **Secrets and variables** > **Actions**, and under
-   **Repository secrets** delete `FAIRY_RELEASE_KEY` (the trash icon), so only the environment has it.
+1. Open the repository on github.com and click **Settings** (top right of the repository, not your account
+   settings).
+2. In the left menu: **Environments** > **New environment**; Name: `release`; **Configure environment**.
+3. Tick **Required reviewers**, type your own GitHub name, pick yourself; **Save protection rules**. Leave
+   "Prevent self-review" off: you are the only reviewer.
+4. On the same page: **Deployment branches and tags** > **Selected branches and tags** > **Add deployment branch
+   or tag rule** > `main`. This step is required, not optional. It limits the environment, and so the key, to
+   the `main` branch.
+5. On the same page under **Environment secrets**: **Add environment secret**; Name: `FAIRY_RELEASE_KEY`; Value:
+   paste (Ctrl+V); **Add secret**.
+6. In the left menu: **Secrets and variables** > **Actions**. Under **Repository secrets** there must be **no**
+   `FAIRY_RELEASE_KEY`. If there is one (setups from before 0.4.3, and older versions of this guide for
+   Fairy-dashboard), delete it with the trash icon. A repository secret can be read by a workflow on any
+   branch, without your approval. The environment is the only place on GitHub that holds the key.
 
-For **Fairy-dashboard** (until its release workflow uses the environment too): **Settings** > **Secrets and
-variables** > **Actions** > **New repository secret**; Name: `FAIRY_RELEASE_KEY`; Secret: paste; **Add secret**.
+Check these three things in **both** repositories before the first release, and again whenever you change
+the settings:
 
-Afterwards you can clear the clipboard (copy something else) and move `fairy-release-key.txt` to a USB stick or
-your password manager, or delete it. If it is ever lost, make a new key (1.2 to 1.4 again); machines then need
-one more update by hand (part 2), because they only trust the old key.
+| Where | Must be |
+| --- | --- |
+| **Settings** > **Secrets and variables** > **Actions** > **Repository secrets** | no `FAIRY_RELEASE_KEY` |
+| **Settings** > **Environments** > `release` > **Deployment branches and tags** | **Selected branches and tags**, one rule: `main` |
+| **Settings** > **Environments** > `release` > **Required reviewers** | ticked, with you as reviewer |
+
+Afterwards clear the clipboard (copy something else). Then take `fairy-release-key.txt` off this PC's
+everyday folders: keep it as your own offline copy, or delete it. Where you keep it is for you alone to know.
+Do not write it down in a repository, an issue or a chat.
+
+If the key is ever **lost**, make a new key (1.2 to 1.4 again); machines then need one more update by hand
+(part 2), because they only trust the old key. If the key may have **leaked**, see
+[1.7](#17-if-the-private-key-may-have-leaked).
 
 ### 1.4 Commit the public key and push
 
@@ -129,8 +146,8 @@ repository's **Releases** (right side of the repository page) shows `build-1` (o
 
 If a run is red:
 
-* "The FAIRY_RELEASE_KEY secret is missing": step 1.3 for that repository (Fairy-agent: the secret must be in
-  the environment `release`, and the environment must be named exactly `release`).
+* "The FAIRY_RELEASE_KEY secret is missing": step 1.3 for that repository (the secret must be in the
+  environment `release`, and the environment must be named exactly `release`).
 * "release/signing.pub is missing": step 1.4.
 * "the private key does not belong to release/signing.pub": the secret and the committed file come from
   different `gen` runs; paste the right key again (1.3).
@@ -145,6 +162,57 @@ the Fairy-agent folder first):
 ```powershell
 go run ./cmd/fairy-release-key verify --pub release\signing.pub SHA256SUMS
 ```
+
+Expected: `OK: signature of SHA256SUMS is good`.
+
+### 1.6 Rules for the private key
+
+1. The key is in two places only: the GitHub Environment `release` of Fairy-agent and of Fairy-dashboard, and
+   your own offline copy.
+2. Never paste the key into a chat, an issue, a pull request, a log, a screenshot or a support request. Never
+   send it to anyone. Nobody who helps you with Fairy needs it: only the release job on GitHub signs.
+3. Never commit it. `release/signing.pub` is the public half and is the only key file in the repositories.
+4. Never store it as a repository secret (1.3, step 6), and never add it to another workflow.
+5. A release is published only after you approve its run (**Review deployments**, 1.5). Before you approve,
+   look at which commit the run is for. Reject a run you did not expect.
+6. Whoever can sign in to your GitHub account can approve a run. Protect that account with two-factor
+   sign-in.
+
+### 1.7 If the private key may have leaked
+
+Treat the key as leaked if it was pasted or sent anywhere outside the two places above, or if a PC that held
+`fairy-release-key.txt` was compromised. A leaked key lets someone else sign a release. Agents and the panel
+download releases only from GitHub over HTTPS, so that person would also have to control what the download
+returns. Do not wait to find out: change the key.
+
+1. On GitHub, in the **Actions** tab of both repositories: do not approve any waiting release run.
+2. In both repositories: **Settings** > **Environments** > `release` > **Environment secrets**: delete
+   `FAIRY_RELEASE_KEY`.
+3. Make a new key pair on your PC. `gen` never overwrites a key file, so move the old ones away first:
+
+   ```powershell
+   cd E:\Projects\Fairy-agent
+   Remove-Item release\signing.pub
+   Remove-Item "$HOME\fairy-release-key.txt" -ErrorAction SilentlyContinue
+   go run ./cmd/fairy-release-key gen
+   Copy-Item release\signing.pub E:\Projects\Fairy-dashboard\release\signing.pub
+   ```
+
+4. Put the new private key into the environment `release` of both repositories (1.3), then commit and push
+   the new `release/signing.pub` in both (1.4, without the tag line). Approve the two release runs (1.5).
+   These releases are signed with the new key.
+5. Every agent and the panel that are already installed still carry the **old** public key. They refuse the
+   new releases (the Update button and `fairy-agent update` fail with "the release signature does not match
+   this build's release key"), and they would still accept a release signed with the leaked key. So install
+   the new program by hand once on **every** machine: agents as in [2.3](#23-by-hand-from-one-named-release-checked),
+   the panel as in [3.1](#31-install-the-release-build-of-the-panel-once). `fairy-agent version` and
+   `fairy version` then show the new build.
+6. Only when every machine runs a build with the new key is the leaked key trusted nowhere. Until then keep
+   the list of machines that are still on an old build, and finish it.
+
+On a Linux machine the panel's Re-pair command cannot do step 5: with an agent installed, `install.sh` checks
+the release with the **installed** agent's key and stops with "the release signature does not match the
+installed fairy-agent's release key". Use 2.3 there.
 
 ---
 
