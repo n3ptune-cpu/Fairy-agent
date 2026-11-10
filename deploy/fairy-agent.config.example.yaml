@@ -8,7 +8,8 @@
 
 # Accept connections only from the panel that added this machine (Add host) and from this machine itself. Off by
 # default. With it on, your own `curl` from another machine gets no answer, and a new panel address needs a new
-# Add host / Re-pair. No effect on an agent that was never paired through Add host.
+# Add host / Re-pair. An agent that has no panel on record (never added with Add host, or its last join code
+# expired) then answers nobody but this machine until the Add host / Re-pair command has been run on it.
 # only_from_panel: true
 
 # The panel's token for this machine (its token_env value), one line, at least 24 characters. Default: the file

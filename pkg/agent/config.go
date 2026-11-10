@@ -40,7 +40,8 @@ type Config struct {
 	AllowAllInterfaces bool   `yaml:"allow_all_interfaces"`
 	// OnlyFromPanel (off by default) accepts connections only from the address of the panel that paired with
 	// this agent (Add host) and from this machine itself; everybody else is hung up on before a byte is read.
-	// It has no effect on an agent that was never paired through Add host (no panel address on record).
+	// An agent with no panel address on record (never paired through Add host, or its last join code expired
+	// or was closed) then accepts this machine only, until it is paired: the setting fails closed.
 	OnlyFromPanel bool `yaml:"only_from_panel"`
 
 	// Tokens: the panel's token_env (read) and control_token_env (control) values. FAIRY_AGENT_TOKEN and

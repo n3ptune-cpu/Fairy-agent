@@ -138,10 +138,34 @@ func TestConnPanelOnly(t *testing.T) {
 	if why := l.admit("local", true); why != "" {
 		t.Fatal(why)
 	}
-	// without a panel address on record the setting cannot lock everybody out: it does not apply
-	panel = ""
-	if why := l.admit("100.88.0.8", false); why != "" {
+	// Without a panel address on record the setting fails closed: "nobody but the panel" must not turn into
+	// "everybody" because the panel is unknown (never paired through Add host, a join code that expired or
+	// was closed for wrong codes, an unreadable state file). This machine itself is still accepted: the
+	// update's health check, and `fairy-agent join` runs here anyway.
+	for _, p := range []string{"", "not an address", "100.88.0.7:9101"} {
+		panel = p
+		before := l.Stats()
+		for _, stranger := range []string{"100.88.0.8", "100.88.0.7", "fd7a:115c:a1e0::/64", "unknown"} {
+			why := l.admit(stranger, false)
+			if why != NoPanelRefusal || !strings.Contains(why, "no panel address on record") || !strings.Contains(why, "Re-pair") {
+				t.Fatalf("panel %q, sender %s: %q", p, stranger, why)
+			}
+		}
+		if why := l.admit("local", true); why != "" {
+			t.Fatalf("panel %q: this machine was refused: %s", p, why)
+		}
+		l.release("local", true)
+		if after := l.Stats(); after.Refused != before.Refused+4 || after.Open != before.Open {
+			t.Fatalf("panel %q: %+v -> %+v", p, before, after)
+		}
+	}
+	// once a panel is on record (the join command ran) it is accepted again, and only it
+	panel = "100.88.0.9"
+	if why := l.admit("panel", true); why != "" {
 		t.Fatal(why)
+	}
+	if why := l.admit("100.88.0.8", false); !strings.Contains(why, "only the panel") {
+		t.Fatal("a stranger was accepted:", why)
 	}
 	// off (the default): strangers are accepted within the caps
 	l = LimitConns(nil, ConnLimits{Panel: func() string { return "100.88.0.7" }})
@@ -467,6 +491,63 @@ func TestConnPanelOnlyServer(t *testing.T) {
 	}
 	if s := ln.Stats(); s.Refused != before+1 || s.Peak > 2 {
 		t.Fatalf("%+v", s)
+	}
+
+	// No panel address on record: closed to every other machine, the address that used to be the panel's
+	// included; this machine is still served (the update's health check).
+	ln, addr = serveLimited(t, ConnLimits{PanelOnly: true, Panel: func() string { return "" }})
+	for _, src := range []string{"127.0.1.1", "127.0.2.50", floodPanel} {
+		if st, err := metricsFrom(src, addr); err == nil {
+			t.Fatalf("no panel on record, but %s was answered: HTTP %d", src, st)
+		}
+	}
+	if st, err := metricsFrom(floodLocal, addr); err != nil || st != 200 {
+		t.Fatal("this machine was refused:", st, err)
+	}
+	if s := ln.Stats(); s.Refused != 3 || s.Peak > 1 {
+		t.Fatalf("%+v", s)
+	}
+}
+
+// The state file decides, through PairedPanel, as the running agent uses it: only_from_panel with a join code
+// that expired unused, or one closed for wrong codes, is closed; a new join command opens it to the new panel
+// address.
+func TestOnlyFromPanelFollowsThePairingState(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "pairing.json")
+	now := time.Now().Unix()
+	admit := func() (stranger, panel string) {
+		l := LimitConns(nil, ConnLimits{Panel: PairedPanel(path), PanelOnly: true}) // a fresh reader: no five-second cache
+		key, trusted := l.sender(fakeConn{remote: "100.88.0.7:40000", local: "100.70.0.1:9101"})
+		return l.admit("100.88.0.8", false), l.admit(key, trusted)
+	}
+	write := func(st enroll.State) {
+		t.Helper()
+		if err := enroll.WriteState(path, st); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// never paired: no file
+	if s, p := admit(); s != NoPanelRefusal || p != NoPanelRefusal {
+		t.Fatalf("no state file: stranger %q, panel %q", s, p)
+	}
+	for name, st := range map[string]enroll.State{
+		"code expired unused":        {Version: 1, Panel: "100.88.0.7", Key2: "k", CreatedAt: now - 1000, ExpiresAt: now - 100},
+		"closed for wrong codes":     {Version: 1, Panel: "100.88.0.7", Closed: "too many wrong codes", ExpiresAt: now + 600},
+		"paired, address not stored": {Version: 1, Closed: "paired", PairedAt: now},
+	} {
+		write(st)
+		if s, p := admit(); s != NoPanelRefusal || p != NoPanelRefusal {
+			t.Fatalf("%s: stranger %q, panel's old address %q", name, s, p)
+		}
+	}
+	// the join command ran: open to the address the code is for, and to nobody else
+	write(enroll.State{Version: 1, Panel: "100.88.0.7", Key2: "k", CreatedAt: now, ExpiresAt: now + 600})
+	if s, p := admit(); !strings.Contains(s, "only the panel") || p != "" {
+		t.Fatalf("code open: stranger %q, panel %q", s, p)
+	}
+	write(enroll.State{Version: 1, Panel: "100.88.0.7", PairedBy: "100.88.0.7", PairedAt: now, Closed: "paired"})
+	if s, p := admit(); !strings.Contains(s, "only the panel") || p != "" {
+		t.Fatalf("paired: stranger %q, panel %q", s, p)
 	}
 }
 

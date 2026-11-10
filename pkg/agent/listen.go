@@ -185,13 +185,19 @@ type ConnLimits struct {
 	Reserved  int
 	// Panel returns the paired panel's address ("" while there is none). See PairedPanel.
 	Panel func() string
-	// PanelOnly refuses every sender but the panel's address and this machine itself. It only applies while
-	// Panel returns an address: an agent that has no panel address on record keeps accepting.
+	// PanelOnly refuses every sender but the panel's address and this machine itself. While Panel returns no
+	// address (never paired through Add host, or a join code that expired or was closed) it refuses every
+	// sender but this machine: the setting says "nobody but the panel", so not knowing the panel must not
+	// mean "everybody".
 	PanelOnly bool
 	// Local reports whether a connection comes from this machine itself (default: a loopback address, or the
 	// very address it connected to).
 	Local func(remote, local netip.Addr) bool
 }
+
+// NoPanelRefusal is why a connection is refused while only_from_panel is on and no panel address is on record.
+const NoPanelRefusal = "only_from_panel is on and this agent has no panel address on record: only this machine itself is " +
+	"accepted (run the panel's Add host or Re-pair command on this machine, or remove only_from_panel from config.yaml)"
 
 // LimitConns wraps ln so that at most o.Total connections are open, at most o.PerSender per sending address
 // (IPv6: per /64), with o.Reserved of them kept for the panel's address and this machine. A connection over a
@@ -307,10 +313,13 @@ func (l *LimitListener) panel() netip.Addr {
 
 // admit counts a connection in, or says why not.
 func (l *LimitListener) admit(key string, trusted bool) (refusal string) {
-	panelOnly := l.o.PanelOnly && !trusted && l.panel().IsValid()
+	panelOnly := l.o.PanelOnly && !trusted
+	noPanel := panelOnly && !l.panel().IsValid()
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	switch {
+	case noPanel:
+		refusal = NoPanelRefusal
 	case panelOnly:
 		refusal = "only the panel's address is accepted"
 	case l.open[key] >= l.o.PerSender:

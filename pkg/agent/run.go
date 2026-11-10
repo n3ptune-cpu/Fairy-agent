@@ -288,8 +288,7 @@ func Run(ctx context.Context, cfg *Config, b Build) error {
 		if p := panel(); p != "" {
 			slog.Info("only_from_panel: connections are accepted only from the panel and from this machine", "panel", p)
 		} else {
-			slog.Warn("only_from_panel is on, but this agent has no panel address on record (it was not paired with the " +
-				"panel's Add host): every sender is accepted until it is")
+			slog.Warn("only_from_panel: EVERY connection from another machine is refused, the panel's too: " + NoPanelRefusal)
 		}
 	}
 	ln := LimitConns(tcp, ConnLimits{Panel: panel, PanelOnly: cfg.OnlyFromPanel})
