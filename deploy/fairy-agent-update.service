@@ -6,8 +6,9 @@
 #   - checks the staged SHA256SUMS signature again with the key built into the INSTALLED binary, then the
 #     binary's hash, on the copy it makes next to /usr/local/bin/fairy-agent (the stage itself is not trusted);
 #   - keeps the old binary as /usr/local/bin/fairy-agent.old, moves the new one in, runs restorecon (SELinux);
-#   - restarts fairy-agent.service and waits up to ~40 s until it is active and answers /metrics with the new
-#     version; otherwise it puts the old binary back and restarts that.
+#   - restarts fairy-agent.service and waits up to ~40 s until it is active and proves that it runs the new
+#     version (GET /health: the agent's token is never sent); otherwise it puts the old binary back and
+#     restarts that. It refuses to run again within ten minutes of its last run.
 # Its result goes to /var/lib/fairy-agent-update/result.json (the agent shows it to the panel) and the journal:
 #   journalctl -u fairy-agent-update
 [Unit]

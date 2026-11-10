@@ -702,21 +702,3 @@ func TestApplyStagedRefusesLinkedStage(t *testing.T) {
 		t.Fatalf("%+v", res)
 	}
 }
-
-func TestCheckRunning(t *testing.T) {
-	r := newUpdRig(t, "42-bbbbbbb", nil)
-	dir := t.TempDir()
-	_ = os.WriteFile(filepath.Join(dir, "token"), []byte(readTok), 0o600)
-	_ = os.WriteFile(filepath.Join(dir, "control-token"), []byte(ctlTok), 0o600)
-	addr := strings.TrimPrefix(r.srv.URL, "http://")
-	cfg, err := Parse([]byte("listen: "+addr+"\nself_update: {enabled: true}\n"), filepath.Join(dir, "config.yaml"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := CheckRunning(context.Background(), cfg, "42-bbbbbbb"); err != nil {
-		t.Fatal(err)
-	}
-	if err := CheckRunning(context.Background(), cfg, "43-ccccccc"); err == nil {
-		t.Fatal("wrong version accepted")
-	}
-}

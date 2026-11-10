@@ -8,10 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
-	"net"
-	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -38,8 +35,8 @@ import (
 //  2. The installer (`fairy-agent apply-update`, ApplyUpdate): verifies everything AGAIN with its own built-in
 //     key (it never trusts the stage, and refuses links / junctions in it), copies the binary next to the
 //     installed one while hashing exactly the copied bytes, swaps it in (keeping fairy-agent.old), restarts the
-//     service and waits until the agent answers /metrics with the new version; otherwise it puts the old binary
-//     back and restarts that. The result goes to a file only the installer may write, which the agent reads (and
+//     service and waits until the agent proves that it runs the new version (GET /health, see health.go: the
+//     token is never sent); otherwise it puts the old binary back and restarts that. The result goes to a file only the installer may write, which the agent reads (and
 //     reports in /metrics as self_update.last).
 
 // UpdateStatus is the /metrics "self_update" block.
@@ -594,48 +591,6 @@ func writeAtomic(path string, b []byte) error {
 	return err
 }
 
-// CheckRunning asks the running agent (with the read token) for /metrics and compares its version with want.
-func CheckRunning(ctx context.Context, cfg *Config, want string) error {
-	tok, err := cfg.LoadTokens()
-	if err != nil {
-		return err
-	}
-	addr, err := ListenAddr(ctx, cfg, 0)
-	if err != nil {
-		return err
-	}
-	if host, port, err := net.SplitHostPort(addr); err == nil {
-		if ip := net.ParseIP(host); host == "" || (ip != nil && ip.IsUnspecified()) {
-			addr = net.JoinHostPort("127.0.0.1", port)
-		}
-	}
-	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
-	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+addr+"/metrics", nil)
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Authorization", "Bearer "+tok.Read)
-	resp, err := (&http.Client{Transport: &http.Transport{Proxy: nil}}).Do(req)
-	if err != nil {
-		return fmt.Errorf("agent not answering on %s", addr)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != 200 {
-		return fmt.Errorf("agent answered HTTP %d", resp.StatusCode)
-	}
-	var m struct {
-		Version string `json:"agent_version"`
-	}
-	if err := json.NewDecoder(io.LimitReader(resp.Body, 4<<20)).Decode(&m); err != nil {
-		return errors.New("agent answered with invalid JSON")
-	}
-	if m.Version != want {
-		return fmt.Errorf("agent reports version %s, want %s", strconv.Quote(m.Version), want)
-	}
-	return nil
-}
-
 // DefaultUpdaterOptions are the real updater's settings: GitHub, this platform's paths and installer.
 func DefaultUpdaterOptions(cfg *Config, version, releaseKey string) (UpdaterOptions, error) {
 	c, err := release.NewClient(cfg.SelfUpdate.Repo, "fairy-agent/"+version)
@@ -671,6 +626,7 @@ func ApplyUpdate(ctx context.Context, cfg *Config, version, releaseKey string) e
 			if err := serviceRunning(ctx); err != nil {
 				return err
 			}
+			// want is a newer release or, after a rollback, this very version: both know /health
 			return CheckRunning(ctx, cfg, want)
 		}})
 	if !res.OK {
@@ -726,7 +682,7 @@ func NewUpdateCLI(ctx context.Context, cfg *Config, version, releaseKey string) 
 					if cfg == nil {
 						return nil
 					}
-					return CheckRunning(ctx, cfg, v)
+					return checkRunningFrom(ctx, cfg, version, v)
 				}
 			}
 			// after a rollback this binary's own version runs again

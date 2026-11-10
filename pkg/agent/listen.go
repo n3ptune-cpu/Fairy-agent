@@ -115,27 +115,54 @@ func countTailnet(addrs []IfaceAddr) int {
 	return n
 }
 
+// listenRetry is the pause between two tries of Listen; addrInUseTries is how many tries in a row may find the
+// port taken by another program before Listen gives up.
+var listenRetry = 3 * time.Second
+
+const addrInUseTries = 5
+
+// ErrAddrInUse is returned by Listen when another program holds the agent's port.
+var ErrAddrInUse = errors.New("another program is listening on the agent's port")
+
 // Listen opens addr, retrying while the address does not exist yet (Tailscale still starting): up to wait, or
 // as long as it takes with WaitForever (logged once a minute).
+//
+// A port that another program holds is a different matter: waiting for it kept the service "running" with
+// nothing listening, for as long as that program stayed, and an update's health check then talked to that
+// program. After addrInUseTries tries in a row Listen gives up with ErrAddrInUse, the agent ends, and the
+// service manager shows the failure and starts it again later. On Windows the port is opened for exclusive
+// use, so that no other program can open the same address next to the agent.
 func Listen(ctx context.Context, addr string, wait time.Duration) (net.Listener, error) {
 	start := time.Now()
 	var lastLog time.Time
+	inUse := 0
 	for {
-		ln, err := net.Listen("tcp", addr)
+		ln, err := listenTCP(ctx, addr)
 		if err == nil {
 			return ln, nil
+		}
+		if addrInUse(err) {
+			if inUse++; inUse >= addrInUseTries {
+				return nil, fmt.Errorf("cannot listen on %s: %w (%v); tried %d times", addr, ErrAddrInUse, err, inUse)
+			}
+		} else {
+			inUse = 0
 		}
 		if wait >= 0 && time.Since(start) > wait {
 			return nil, fmt.Errorf("cannot listen on %s: %w", addr, err)
 		}
 		if time.Since(lastLog) >= time.Minute {
-			slog.Warn("waiting for the listen address to appear", "listen", addr, "error", err.Error())
+			if inUse > 0 {
+				slog.Warn("the agent's port is taken by another program; trying a few more times", "listen", addr, "error", err.Error())
+			} else {
+				slog.Warn("waiting for the listen address to appear", "listen", addr, "error", err.Error())
+			}
 			lastLog = time.Now()
 		}
 		select {
 		case <-ctx.Done():
 			return nil, ctx.Err()
-		case <-time.After(3 * time.Second):
+		case <-time.After(listenRetry):
 		}
 	}
 }
