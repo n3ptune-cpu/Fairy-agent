@@ -340,6 +340,134 @@ func TestPairHandsTheProxmoxTokenOutOnce(t *testing.T) {
 	}
 }
 
+// A join code that runs out unused leaves nothing made from it in the state file: not the v2 pairing key (it
+// opens a recorded pairing answer), not the v1 verifier, not a Proxmox token secret. Nobody has to ask for
+// that: the running agent sweeps by itself.
+func TestExpiredJoinCodeIsWipedFromTheState(t *testing.T) {
+	grant := &enroll.ProxmoxGrant{TokenID: "fairy@pve!panel-x", TokenSecret: "0b7c4e2a-1111-2222-3333-444455556666", Node: "x"}
+	for name, mk := range map[string]func(t *testing.T) *pairRig{
+		"v1": func(t *testing.T) *pairRig { return newPairRig(t, "", "127.0.0.1") },
+		"v2": func(t *testing.T) *pairRig { return newPairRigV2(t, "", "127.0.0.1") },
+		"v2 with a Proxmox token": func(t *testing.T) *pairRig {
+			r := newPairRigV2(t, "", "127.0.0.1")
+			s, _ := enroll.ReadState(r.path)
+			s.Proxmox = grant
+			_ = enroll.WriteState(r.path, s)
+			return r
+		},
+	} {
+		r := mk(t)
+		before, _ := os.ReadFile(r.path)
+		// while the code is good nothing is touched, however often the sweep runs
+		for _, d := range []time.Duration{0, time.Minute, enroll.TTL - time.Second} {
+			r.now = time.Unix(1_800_000_000, 0).Add(d)
+			if r.p.Sweep() {
+				t.Fatalf("%s: swept a live code after %s", name, d)
+			}
+		}
+		if now, _ := os.ReadFile(r.path); !bytes.Equal(now, before) {
+			t.Fatalf("%s: the state of a live code was rewritten", name)
+		}
+		// expired: the sweep alone (no /pair request) removes it
+		r.now = time.Unix(1_800_000_000, 0).Add(enroll.TTL)
+		if !r.p.Sweep() {
+			t.Fatalf("%s: not swept", name)
+		}
+		raw, _ := os.ReadFile(r.path)
+		s, err := enroll.ReadState(r.path)
+		if err != nil || s.Verifier != "" || s.Key2 != "" || s.Proxmox != nil || s.PairVersion() != 0 {
+			t.Fatalf("%s: left in the state: %s (%v)", name, raw, err)
+		}
+		for _, secret := range []string{hex.EncodeToString(r.key), enroll.Verifier(r.proof), r.proof, grant.TokenSecret, "key2", "verifier", "token_secret"} {
+			if bytes.Contains(raw, []byte(secret)) {
+				t.Fatalf("%s: %q is still in the file: %s", name, secret, raw)
+			}
+		}
+		// what is left says what happened, for pair-status and the installer
+		if !strings.HasPrefix(s.Closed, ExpiredUnused+" at 2027-") || s.Panel != "127.0.0.1" || s.Active(r.now) {
+			t.Fatalf("%s: %+v", name, s)
+		}
+		if d := s.Describe(r.now); !strings.Contains(d, "expired unused") || !strings.Contains(d, "make a new code in the panel") {
+			t.Fatalf("%s: pair-status would say %q", name, d)
+		}
+		if fi, _ := os.Stat(r.path); fi.Mode().Perm() != 0o600 {
+			t.Fatalf("%s: mode %v", name, fi.Mode())
+		}
+		// once is enough: the file is not written again
+		if r.p.Sweep() {
+			t.Fatalf("%s: swept twice", name)
+		}
+		// and the right code no longer pairs, with either version
+		if st, _ := r.pair(t, r.proof); st != 404 {
+			t.Fatalf("%s: v1 after expiry: %d", name, st)
+		}
+		if st, _, _, _ := panelPairV2(t, r.srv.URL, r.key); st != 404 {
+			t.Fatalf("%s: v2 after expiry: %d", name, st)
+		}
+	}
+
+	// the /pair request that finds the code expired removes it too (the path that already took the Proxmox secret)
+	r := newPairRigV2(t, "", "127.0.0.1")
+	r.now = r.now.Add(enroll.TTL + time.Second)
+	if st, _, _, _ := panelPairV2(t, r.srv.URL, r.key); st != 404 {
+		t.Fatal(st)
+	}
+	if s, _ := enroll.ReadState(r.path); s.Key2 != "" || !strings.HasPrefix(s.Closed, ExpiredUnused) {
+		t.Fatalf("%+v", s)
+	}
+
+	// states that are not an expired, unused code are left alone
+	for name, st := range map[string]enroll.State{
+		"paired":                 {Version: 1, Panel: "127.0.0.1", Closed: "paired", PairedBy: "127.0.0.1", PairedAt: 1_800_000_100, ExpiresAt: 1_800_000_900},
+		"closed for wrong codes": {Version: 1, Panel: "127.0.0.1", Closed: "too many wrong codes", ExpiresAt: 1_800_000_900},
+		"no code at all":         {Version: 1},
+	} {
+		r := newPairRig(t, "", "127.0.0.1")
+		_ = enroll.WriteState(r.path, st)
+		before, _ := os.ReadFile(r.path)
+		r.now = r.now.Add(24 * time.Hour)
+		if r.p.Sweep() {
+			t.Fatalf("%s: swept", name)
+		}
+		if now, _ := os.ReadFile(r.path); !bytes.Equal(now, before) {
+			t.Fatalf("%s: rewritten", name)
+		}
+	}
+	// no file, no path, no pairer
+	r = newPairRig(t, "", "127.0.0.1")
+	r.p.Path = filepath.Join(t.TempDir(), "none.json")
+	var none *Pairer
+	if r.p.Sweep() || (&Pairer{}).Sweep() || none.Sweep() {
+		t.Fatal("swept nothing")
+	}
+}
+
+// The running agent sweeps without being asked: at start (a code that ran out while it was down) and then
+// every half minute.
+func TestRunningAgentSweepsExpiredJoinCode(t *testing.T) {
+	r := newPairRigV2(t, "", "127.0.0.1")
+	r.now = r.now.Add(enroll.TTL + time.Second) // the code ran out while the agent was not running
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { r.p.KeepClean(ctx); close(done) }()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if s, err := enroll.ReadState(r.path); err == nil && s.Key2 == "" && strings.HasPrefix(s.Closed, ExpiredUnused) {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the key is still in the state file")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("KeepClean did not end with its context")
+	}
+}
+
 // ---- pairing v2 (M3) ----
 
 // newPairRigV2 is newPairRig after `fairy-agent join --pair-v2`: the state holds the v2 key and no verifier.

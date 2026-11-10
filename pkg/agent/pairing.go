@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -106,11 +107,8 @@ func (p *Pairer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if err != nil && !errors.Is(err, os.ErrNotExist) {
 			slog.Warn("pairing state unreadable", "error", err.Error())
 		}
-		if err == nil && st.Proxmox != nil { // an expired code: the Proxmox token secret does not stay behind
-			st.Proxmox = nil
-			if werr := enroll.WriteState(p.Path, st); werr != nil {
-				slog.Error("cannot write the pairing state", "error", werr.Error())
-			}
+		if err == nil {
+			p.wipeExpired(st, now) // an expired code: nothing made from it stays behind
 		}
 		pairErr(w, 404, "pairing_inactive", "pairing is not active on this agent")
 		return
@@ -201,6 +199,61 @@ func (p *Pairer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	slog.Info("paired with panel", "remote", ip, "pairing", want, "control_token", tok.Control != "", "proxmox_token", grant != nil)
 	writeJSON(w, 200, answer)
+}
+
+// ExpiredUnused is how the state of a join code that ran out without being used is marked (enroll.State.Closed
+// starts with it; the time follows).
+const ExpiredUnused = "the join code expired unused"
+
+// sweepEvery is how often the running agent looks for a join code that has run out.
+const sweepEvery = 30 * time.Second
+
+// wipeExpired removes what was made from a join code that was not used in time: the v1 verifier, the v2
+// pairing key and a Proxmox token secret. Before, only a later /pair request removed the Proxmox secret, and
+// the verifier and the key stayed in the file for good. Neither can pair any more, but the key opens a
+// recorded pairing answer, so it does not stay on disk a minute longer than it is of use. Caller holds p.mu.
+func (p *Pairer) wipeExpired(st enroll.State, now time.Time) bool {
+	if st.Closed != "" || st.Active(now) || (st.PairVersion() == 0 && st.Proxmox == nil) {
+		return false
+	}
+	st.Closed = ExpiredUnused + " at " + time.Unix(st.ExpiresAt, 0).UTC().Format(time.RFC3339)
+	st.Verifier, st.Key2, st.Proxmox = "", "", nil
+	if err := enroll.WriteState(p.Path, st); err != nil {
+		slog.Error("cannot remove the expired join code from the pairing state", "error", err.Error())
+		return false
+	}
+	slog.Info("the join code expired unused: removed from the pairing state (make a new one in the panel)", "panel", st.Panel)
+	return true
+}
+
+// Sweep removes an expired, unused join code from the state file and reports whether it did.
+func (p *Pairer) Sweep() bool {
+	if p == nil || p.Path == "" {
+		return false
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	st, err := enroll.ReadState(p.Path)
+	if err != nil {
+		return false
+	}
+	return p.wipeExpired(st, p.Now())
+}
+
+// KeepClean sweeps now and then every half minute until ctx ends: a code that nobody asks about after it has
+// run out (the panel stops asking when its own copy expires) is removed all the same, also one that ran out
+// while the agent was not running.
+func (p *Pairer) KeepClean(ctx context.Context) {
+	t := time.NewTicker(sweepEvery)
+	defer t.Stop()
+	for {
+		p.Sweep()
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+	}
 }
 
 // pairRequest is a POST /pair body of either version: {"proof"} (v1, enroll.Request) or {"v":2,"nonce","mac"}

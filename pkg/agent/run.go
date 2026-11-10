@@ -269,6 +269,7 @@ func Run(ctx context.Context, cfg *Config, b Build) error {
 	}
 	pairPath := PairingPath(cfg)
 	d.Pairer = NewPairer(pairPath, cfg.LoadTokens, func() enroll.Response { return a.PairInfo() })
+	go d.Pairer.KeepClean(ctx) // a join code that ran out unused leaves nothing in the state file
 	if st, err := enroll.ReadState(pairPath); err == nil && st.Active(time.Now()) {
 		slog.Info("waiting for the panel to pair (Add host)", "panel", st.Panel, "until", time.Unix(st.ExpiresAt, 0).Format(time.RFC3339))
 	}
