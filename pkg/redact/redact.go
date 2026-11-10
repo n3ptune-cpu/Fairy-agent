@@ -58,6 +58,11 @@ var (
 	slashOpt = regexp.MustCompile(`(?i)^(/(?:p|pw|pwd|pass|password)):(.+)$`)
 	// tokens that are recognisable by their shape wherever they stand
 	shapes = regexp.MustCompile(`\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_\w{20,}|glpat-[\w-]{20,}|xox[abprs]-[\w-]{10,}|sk-[\w-]{20,}|hvs\.[\w-]{20,}|eyJ[\w-]{8,}\.[\w-]{8,}\.[\w-]{8,})`)
+	// a Fairy join code (pkg/enroll: 32 characters A-Z / 2-7, shown in groups of four), wherever it stands: as
+	// the panel shows it (eight groups of four, either case), in capitals with dashes anywhere or none, or
+	// in small letters without dashes. It is one-time and short-lived, but while it is valid it pairs a panel
+	// with this machine, and the installer's own command line carries it (install.sh --join CODE).
+	joinCode = regexp.MustCompile(`\b(?:[A-Za-z2-7]{4}(?:-[A-Za-z2-7]{4}){7}|(?:[A-Z2-7]-?){31}[A-Z2-7]|[a-z2-7]{32})\b`)
 	// a port, as in host:8443 (so "admin:pa" in front of a later @ is not taken for host:port)
 	digits = regexp.MustCompile(`^[0-9]*$`)
 )
@@ -81,6 +86,9 @@ var (
 	ldap    = &program{next: []string{"-w"}}
 	putty   = &program{next: []string{"-pw"}}
 	smb     = &program{userPass: []string{"-U", "--user"}, sep: "%"}
+	// fairy-agent join --code CODE / --code=CODE: hidden whatever the value looks like (a mistyped code too).
+	// Not a `next` option: --code-stdin starts with the same letters and carries nothing.
+	fairyAgent = &program{}
 	// docker login / podman login: only after the word "login" (docker run -p is a port)
 	registryLogin = &program{next: []string{"-p"}}
 	registryTools = map[string]bool{"docker": true, "podman": true, "nerdctl": true, "buildah": true, "skopeo": true, "helm": true, "oras": true}
@@ -105,6 +113,21 @@ var programs = map[string]*program{
 	"http": {userPass: []string{"-a"}}, "https": {userPass: []string{"-a"}},
 	"lftp":      {userPass: []string{"-u", "--user"}, sep: ","},
 	"smbclient": smb, "smbget": smb, "rpcclient": smb, "smbcacls": smb,
+	"fairy-agent": fairyAgent,
+}
+
+// joinCodeEnv is the variable `fairy-agent join` reads the join code from (cmd/fairy-agent/join.go).
+const joinCodeEnv = "FAIRY_JOIN_CODE="
+
+// joinCodeLen is the length of a join code without its dashes (enroll.CodeLen).
+const joinCodeLen = 32
+
+// joinEnv hides the value of FAIRY_JOIN_CODE=value (the name has none of the secret words).
+func joinEnv(a string) (string, bool) {
+	if v, ok := strings.CutPrefix(a, joinCodeEnv); ok && v != "" {
+		return joinCodeEnv + mask, true
+	}
+	return "", false
 }
 
 // what the next argument is, as far as the one before it told
@@ -140,7 +163,9 @@ type scanner struct {
 //     and the word after a lone Bearer / Basic;
 //   - short options of programs whose options are known: mysql -pX (and its relatives), sshpass -p X,
 //     curl -u user:X, redis-cli -a X, 7z -pX, docker login -p X, and a few more (see programs);
-//   - tokens with a recognisable shape wherever they stand (GitHub, GitLab, Slack, sk-..., Vault, JWT).
+//   - tokens with a recognisable shape wherever they stand (GitHub, GitLab, Slack, sk-..., Vault, JWT);
+//   - a Fairy join code wherever it stands (the shape the panel shows), the value of `fairy-agent join --code`
+//     and of FAIRY_JOIN_CODE=.
 func Args(args []string, maxLen int) string {
 	maxLen = limit(maxLen)
 	s := &scanner{}
@@ -234,6 +259,16 @@ func (s *scanner) arg(a string) string {
 	}
 	if m := envEq.FindStringSubmatch(a); m != nil {
 		return m[1] + "=" + mask
+	}
+	if r, ok := joinEnv(a); ok {
+		return r
+	}
+	if s.prog == fairyAgent {
+		for _, o := range []string{"--code=", "-code="} {
+			if strings.HasPrefix(a, o) {
+				return o + mask
+			}
+		}
 	}
 	return (&scanner{}).line(a, len(a))
 }
@@ -334,6 +369,17 @@ func (s *scanner) word(w string) string {
 				return pre + "--header=" + r + suf
 			}
 		}
+		if s.prog == fairyAgent {
+			if core == "--code" || core == "-code" {
+				s.next = nextSecret
+				return pre + core + suf
+			}
+			for _, o := range []string{"--code=", "-code="} {
+				if len(core) > len(o) && strings.HasPrefix(core, o) {
+					return pre + o + mask + suf
+				}
+			}
+		}
 		if r, ok := s.option(core); ok {
 			return pre + r + suf
 		}
@@ -349,6 +395,11 @@ func (s *scanner) word(w string) string {
 	}
 	if strings.ContainsAny(core, "_-.") {
 		core = shapes.ReplaceAllString(core, mask)
+	}
+	if r, ok := joinEnv(core); ok {
+		core = r
+	} else if len(core) >= joinCodeLen {
+		core = joinCode.ReplaceAllString(core, mask)
 	}
 	w = pre + core + suf
 	if hint && strings.Contains(w, ":") { // on the whole word: the quotes around it can be the value's own
