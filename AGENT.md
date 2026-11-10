@@ -1202,6 +1202,15 @@ on the first install and report anything odd:
   entry on a failed start, automatic restart;
 * CPU %, memory, disks, network counters, uptime, OS name and hardware strings (registry);
 * ACPI thermal-zone temperatures (PDH);
+* **0.6.0's security fixes** (TEST-ON-WINDOWS.md, section 12, is the checklist; none of this has run on
+  Windows): the trust check and repair of the data folder (owners and access lists read from the objects
+  themselves, the rename to `*.untrusted-<time>`, folders created with their final permissions), the updater
+  and the helper refusing an untrusted folder, the helper remembering its own pending shutdown
+  (`power-pending.json`) and Cancel aborting only that, the owner check on Core Temp's session object, the
+  helper retrying while its pipe name is held, the agent's port opened for exclusive use, and both install
+  scripts in their 0.6.0 form (`install.ps1` run from memory with the join code in `FAIRY_JOIN_CODE`, its
+  work folder restricted with `icacls`, the "never older" check in `install-fairy-agent.ps1`): written and
+  re-read, not parsed or run;
 * **0.5.1's self-migration** from LocalSystem (TEST-ON-WINDOWS.md, section 8): the state machine is
   unit-tested on Linux (every step failing, resume after a crash, rollback, the pauses), the Windows calls are
   not: the switch and the rollback (`ChangeServiceConfig` to LocalSystem with an empty password,
