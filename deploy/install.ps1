@@ -8,8 +8,17 @@
   the release's fingerprint (-SumsSha256). There is no "latest" one-liner any more: nobody can check a line
   that downloads whatever is newest and runs it.
 
-  install.ps1 -ReleaseUrl URL -SumsSha256 HASH -Join CODE -PanelAddress 100.x.y.z
+  install.ps1 -ReleaseUrl URL -SumsSha256 HASH -PanelAddress 100.x.y.z [-PairV2]
               [-PowerControl] [-SelfUpdate] [-Wol] [-Ups] [-UpsName NAME] [-CoreTemp] [-Ipmi]
+
+  The one-time join code comes from the environment variable FAIRY_JOIN_CODE, which the panel's line sets
+  just before ($env:FAIRY_JOIN_CODE='CODE'). It is then on no program's command line, where every user of
+  the PC could read it while the installer runs. The script removes the variable again, never shows the
+  code and hands it to `fairy-agent join` through that program's environment. -Join CODE (lines of older
+  panels) still works.
+
+  -PairV2 (the panel's line says so when the panel speaks it): the agent answers the panel encrypted, and
+  only a panel that proves it has this join code.
 
 .DESCRIPTION
   1. downloads the release: fairy-agent-windows-amd64.exe, SHA256SUMS (+ signature), VERSION and
@@ -35,8 +44,9 @@
   no other program touched.
 #>
 param(
-    [Parameter(Mandatory = $true)][string]$Join,
+    [string]$Join = '',
     [Parameter(Mandatory = $true)][string]$PanelAddress,
+    [switch]$PairV2,
     [switch]$PowerControl,
     [switch]$SelfUpdate,
     [switch]$Wol,
@@ -52,7 +62,16 @@ $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
 
-if ($PanelAddress -notmatch '^\d{1,3}(\.\d{1,3}){3}$') { throw "-PanelAddress must be the panel's Tailscale IPv4 address, e.g. 100.88.109.47" }
+# The join code: from the environment (the panel's line), or -Join (older panels). Never shown. The variable
+# is removed at once, also from the window this runs in, so that nothing started later inherits it.
+$code = $Join
+$Join = ''
+if (-not $code) { $code = $env:FAIRY_JOIN_CODE }
+Remove-Item Env:FAIRY_JOIN_CODE -ErrorAction SilentlyContinue
+if (-not $code) { throw "no join code: use the line from the panel's Add host dialog (it sets FAIRY_JOIN_CODE), or -Join CODE" }
+if ($code -notmatch '^[A-Za-z2-7 -]+$') { throw 'that is not a Fairy join code (letters A-Z and digits 2-7, in groups of four)' }
+if ($PanelAddress -notmatch '^\d{1,3}(\.\d{1,3}){3}$') { throw "-PanelAddress must be the panel's Tailscale IPv4 address, e.g. 100.64.0.10" }
+if ($UpsName -and $UpsName -notmatch '^[A-Za-z0-9_.-]{1,64}$') { throw '-UpsName: letters, digits, _ . - only' }
 if ($SumsSha256 -and $SumsSha256 -notmatch '^[0-9a-fA-F]{64}$') { throw '-SumsSha256 must be 64 hex digits (the SHA-256 of SHA256SUMS)' }
 # The release's fingerprint from the panel. Without it nothing vouches for the download but the download itself.
 if (-not $SumsSha256 -and -not $Unverified) {
@@ -141,15 +160,18 @@ try {
         if ($got -ne $sums['fairy-agent-windows-amd64.exe']) { throw "$exe does not match the signed SHA256SUMS: not running it" }
     }
 
-    # 4. tokens, settings and the join code (prints no secret)
-    $joinArgs = @('join', '--code', $Join, '--panel', $PanelAddress)
+    # 4. tokens, settings and the join code (prints no secret). The code is not on the command line: join
+    #    takes it from its own environment and removes it there.
+    $joinArgs = @('join', '--panel', $PanelAddress)
+    if ($PairV2) { $joinArgs += '--pair-v2' }
     if ($PowerControl) { $joinArgs += '--power-control' }
     if ($SelfUpdate) { $joinArgs += '--self-update' }
     if ($Wol) { $joinArgs += '--wol' }
     if ($CoreTemp) { $joinArgs += '--coretemp' }
     if ($Ipmi) { $joinArgs += '--ipmi' }
     if ($UpsName) { $joinArgs += @('--ups-name', $UpsName) } elseif ($Ups) { $joinArgs += '--ups' }
-    & $exe @joinArgs
+    $env:FAIRY_JOIN_CODE = $code
+    try { & $exe @joinArgs } finally { Remove-Item Env:FAIRY_JOIN_CODE -ErrorAction SilentlyContinue; $code = '' }
     if ($LASTEXITCODE -ne 0) { throw 'fairy-agent join failed (see above)' }
     # the helper reads config.yaml when it starts: restart it so it serves what join just switched on
     if (Get-Service fairy-agent-helper -ErrorAction SilentlyContinue) { Restart-Service fairy-agent-helper }
