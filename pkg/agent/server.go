@@ -9,6 +9,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"math"
 	"net"
 	"net/http"
 	"reflect"
@@ -749,6 +750,10 @@ func (a *Agent) processes(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+	// before sorting: a value that is not a number has no place in an order either (it sorts last, as unknown)
+	if n := cleanProcessNumbers(procs); n > 0 {
+		a.logOnce("processes-nan", "processes: a value that is not a number was left out (null in the answer)", "values", n)
+	}
 	SortProcesses(procs, sortBy)
 	if len(procs) > limit {
 		procs = procs[:limit]
@@ -761,6 +766,25 @@ func (a *Agent) processes(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, 200, map[string]any{"sampled_at": collect.Round(float64(time.Now().UnixMilli())/1000, 3),
 		"sort": sortBy, "total_processes": total, "processes": orEmpty(procs)})
+}
+
+// cleanProcessNumbers replaces every CPU percent, memory percent and start time that is not a number (NaN, an
+// infinity) by "unknown" (null in the answer) and returns how many it found. encoding/json refuses a whole
+// document for one such value, which turned one odd process into a 500 for the whole list; the rows stay, as
+// in GET /metrics.
+func cleanProcessNumbers(procs []collect.Process) (cleaned int) {
+	bad := func(v **float64) {
+		if *v != nil && (math.IsNaN(**v) || math.IsInf(**v, 0)) {
+			*v = nil
+			cleaned++
+		}
+	}
+	for i := range procs {
+		bad(&procs[i].CPUPercent)
+		bad(&procs[i].MemPercent)
+		bad(&procs[i].CreateTime)
+	}
+	return cleaned
 }
 
 // SortProcesses orders by CPU, memory (RSS) or GPU memory, highest first; unknown values last, then by pid.

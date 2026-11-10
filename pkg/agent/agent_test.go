@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"io"
 	"log/slog"
+	"math"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -309,6 +310,63 @@ func TestMetricsShape(t *testing.T) {
 	}
 	if len(m2["temps"].([]any)) != 1 {
 		t.Fatal("ipmi.sensors false: no BMC sensors in /metrics")
+	}
+}
+
+// GET /processes with values that are not numbers in some rows (a collector's division by zero, a counter that
+// went backwards): it used to answer 500 for the whole list. The rows stay, the value is null, and such a row
+// sorts last like any other unknown value.
+func TestProcessesSurviveValuesThatAreNotNumbers(t *testing.T) {
+	r := newRig(t, "")
+	c := r.a.d.Collector.(*agenttest.Collector)
+	c.Procs = append(c.Procs,
+		collect.Process{PID: 8000, Name: collect.P("nan-cpu"), CPUPercent: collect.P(math.NaN()), RSS: collect.P(int64(1 << 20)),
+			CreateTime: collect.P(1.7e9)},
+		collect.Process{PID: 8001, Name: collect.P("inf-cpu"), CPUPercent: collect.P(math.Inf(1)), CreateTime: collect.P(math.Inf(-1))},
+		collect.Process{PID: 8002, Name: collect.P("nan-start"), CPUPercent: collect.P(1.5), CreateTime: collect.P(math.NaN())})
+	for _, by := range []string{"cpu", "mem", "gpu"} {
+		st, b := r.do(t, "GET", "/processes?limit=200&sort="+by, readTok, nil)
+		if st != 200 {
+			t.Fatalf("sort=%s: %d %v", by, st, b)
+		}
+		ps := b["processes"].([]any)
+		if len(ps) != 7 || b["total_processes"] != 212.0 {
+			t.Fatalf("sort=%s: %d rows, total %v", by, len(ps), b["total_processes"])
+		}
+		rows := map[string]map[string]any{}
+		var order []string
+		for _, p := range ps {
+			m := p.(map[string]any)
+			rows[m["name"].(string)] = m
+			order = append(order, m["name"].(string))
+		}
+		if v, has := rows["nan-cpu"]["cpu_percent"]; !has || v != nil || rows["nan-cpu"]["create_time"] != 1.7e9 || rows["nan-cpu"]["rss"] != float64(1<<20) {
+			t.Fatalf("sort=%s: nan-cpu %v", by, rows["nan-cpu"])
+		}
+		if rows["inf-cpu"]["cpu_percent"] != nil || rows["inf-cpu"]["create_time"] != nil || rows["inf-cpu"]["pid"] != 8001.0 {
+			t.Fatalf("sort=%s: inf-cpu %v", by, rows["inf-cpu"])
+		}
+		if rows["nan-start"]["cpu_percent"] != 1.5 || rows["nan-start"]["create_time"] != nil {
+			t.Fatalf("sort=%s: nan-start %v", by, rows["nan-start"])
+		}
+		if rows["Ollama.exe"]["cpu_percent"] != 30.0 || rows["obs64.exe"]["cmdline"] == nil {
+			t.Fatalf("sort=%s: the good rows changed: %v", by, rows["Ollama.exe"])
+		}
+		if by == "cpu" {
+			// known values first, highest first; the three without a usable CPU value last, by pid
+			want := "Ollama.exe,obs64.exe,backup.exe,nan-start,VALORANT-Win64-Shipping.exe,nan-cpu,inf-cpu"
+			if got := strings.Join(order, ","); got != want {
+				t.Fatalf("order %s", got)
+			}
+		}
+	}
+	// an infinite value does not take the first place when the list is cut
+	_, b := r.do(t, "GET", "/processes?limit=1&sort=cpu", readTok, nil)
+	if ps := b["processes"].([]any); len(ps) != 1 || ps[0].(map[string]any)["name"] != "Ollama.exe" {
+		t.Fatal(ps)
+	}
+	if n := cleanProcessNumbers([]collect.Process{{CPUPercent: collect.P(1.0), MemPercent: collect.P(0.0)}, {}}); n != 0 {
+		t.Fatal("clean values were counted:", n)
 	}
 }
 
