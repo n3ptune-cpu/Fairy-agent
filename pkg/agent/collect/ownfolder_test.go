@@ -71,3 +71,55 @@ func TestCheckOwnFolderACL(t *testing.T) {
 		t.Error(err)
 	}
 }
+
+// N9 (review of the Windows side): a file in a folder of Fairy's own is looked at itself before a LocalSystem
+// program believes what is in it.
+func TestOwnFileProblem(t *testing.T) {
+	const (
+		path = `C:\ProgramData\fairy-agent\helper\power-pending.json`
+		// as the helper (LocalSystem) writes it: owner Administrators, everything inherited from helper\
+		written = "O:BAD:AI(A;ID;FA;;;SY)(A;ID;FA;;;BA)(A;ID;0x1200a9;;;" + sidFairySvc + ")"
+	)
+	problem := func(sddl string, dir, link bool, names uint32) string {
+		owner, null, aces := parsedSDDL(t, sddl)
+		return OwnFileProblem(path, dir, link, names, owner, null, aces)
+	}
+	for name, sddl := range map[string]string{
+		"as the helper writes it":    written,
+		"owner SYSTEM":               strings.Replace(written, "O:BA", "O:SY", 1),
+		"someone else may read it":   written + "(A;ID;0x1200a9;;;BU)", // reading a pending shutdown's time steers nothing
+		"a deny entry":               written + "(D;;FA;;;BU)",
+		"its own protected list":     "O:BAD:P(A;;FA;;;SY)(A;;FA;;;BA)",
+		"CREATOR OWNER, not applied": written + "(A;OICIIO;GA;;;CO)",
+	} {
+		if why := problem(sddl, false, false, 1); why != "" {
+			t.Errorf("%s: refused: %s", name, why)
+		}
+	}
+	for name, c := range map[string]struct{ sddl, want string }{
+		"planted before the folder was locked: the planter owns it": {strings.Replace(written, "O:BA", "O:"+sidSomeUser, 1), "owned by " + sidSomeUser},
+		"the planter may still write it":                            {written + "(A;;0x1301bf;;;" + sidSomeUser + ")", sidSomeUser},
+		"Users may write":                                           {written + "(A;;FW;;;BU)", "S-1-5-32-545"},
+		"Users may delete it":                                       {written + "(A;;SD;;;BU)", "S-1-5-32-545"},
+		"the agent's own account may write it":                      {"O:BAD:AI(A;ID;FA;;;SY)(A;ID;FA;;;BA)(A;ID;0x1301bf;;;" + sidFairySvc + ")", sidFairySvc},
+		"owned by the agent's account":                              {strings.Replace(written, "O:BA", "O:"+sidFairySvc, 1), "owned by"},
+		"no permissions at all":                                     {"O:BAD:NO_ACCESS_CONTROL", "no permissions"},
+	} {
+		if why := problem(c.sddl, false, false, 1); !strings.Contains(why, c.want) || why == "" {
+			t.Errorf("%s: %q", name, why)
+		}
+	}
+	// not a plain file with one name, whatever its permissions
+	if why := problem(written, false, true, 1); !strings.Contains(why, "is a link") {
+		t.Error("a link:", why)
+	}
+	if why := problem(written, true, false, 1); !strings.Contains(why, "folder where a file belongs") {
+		t.Error("a folder:", why)
+	}
+	if why := problem(written, false, false, 2); !strings.Contains(why, "more than one name") {
+		t.Error("a hard link:", why)
+	}
+	if why := problem(written, false, false, 0); why != "" { // the number of names is not known: not a reason
+		t.Error(why)
+	}
+}

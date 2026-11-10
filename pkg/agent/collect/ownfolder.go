@@ -2,10 +2,10 @@ package collect
 
 import "fmt"
 
-// Folders of Fairy's own that a LocalSystem program writes files in (the helper's folder with its log and its
-// record of a pending shutdown, the migration's state). The rules for a program's path (CheckWindowsACL) are
-// made for Windows' own folders and leave out something that matters here; the decision is in this file so it
-// is tested on every platform, the Windows calls are in safeexe_windows.go.
+// Folders and files of Fairy's own that a LocalSystem program writes in or reads (the helper's folder with its
+// log and its record of a pending shutdown, the migration's state). The rules for a program's path
+// (CheckWindowsACL) are made for Windows' own folders and leave out two things that matter here; the decisions
+// are in this file so they are tested on every platform, the Windows calls are in safeexe_windows.go.
 
 // CREATOR OWNER and CREATOR GROUP stand, in an entry that passes on, for whoever creates the new object.
 const (
@@ -41,4 +41,23 @@ func CheckOwnFolderACL(path, owner string, nullDACL bool, aces []ACE) error {
 		}
 	}
 	return nil
+}
+
+// OwnFileProblem says why a file of Fairy's own in such a folder cannot be trusted ("" = it can): it must be a
+// plain file with one name, owned by Administrators, SYSTEM or TrustedInstaller, that nobody else may change.
+// The folder being safe today does not make a file in it safe: one put there before the folder was locked
+// keeps its own owner and permissions.
+func OwnFileProblem(path string, dir, link bool, names uint32, owner string, nullDACL bool, aces []ACE) string {
+	switch {
+	case link:
+		return path + " is a link (a junction or symbolic link), not a plain file"
+	case dir:
+		return path + " is a folder where a file belongs"
+	case names > 1:
+		return path + " has more than one name (a hard link)"
+	}
+	if err := CheckWindowsACL(path, ObjFile, owner, nullDACL, aces); err != nil {
+		return err.Error()
+	}
+	return ""
 }

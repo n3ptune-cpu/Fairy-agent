@@ -110,10 +110,13 @@ type PowerStore interface {
 
 // PowerFile is a PowerStore in one small JSON file, replaced in one step. Check, when set, must accept the
 // file's folder before every read and write (Windows: only administrators and SYSTEM may change it; the
-// helper is LocalSystem and writes nowhere else).
+// helper is LocalSystem and writes nowhere else). CheckFile, when set, must accept the file itself before it
+// is read: a folder that is safe today can still hold a file that was put there before it was locked, and
+// that file keeps its own owner and permissions. Such a file is not a record of Fairy's.
 type PowerFile struct {
-	Path  string
-	Check func(dir string) error
+	Path      string
+	Check     func(dir string) error
+	CheckFile func(path string) error
 }
 
 const powerFileMax = 4 << 10
@@ -138,6 +141,11 @@ func (f PowerFile) Load() (*PowerRecord, error) {
 	}
 	if !st.Mode().IsRegular() {
 		return nil, fmt.Errorf("%s is not a regular file", f.Path)
+	}
+	if f.CheckFile != nil {
+		if err := f.CheckFile(f.Path); err != nil {
+			return nil, err
+		}
 	}
 	fh, err := os.Open(f.Path)
 	if err != nil {

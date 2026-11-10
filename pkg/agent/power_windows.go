@@ -38,9 +38,11 @@ const powerRecordFile = "power-pending.json"
 // on when this service restarts, and Cancel must still be able to abort them (and only them). Sleep is a
 // timer in this process and ends with it, so it is remembered in memory only. The folder is checked before
 // every read and write (collect.TrustedFolder); when it is not safe, nothing is stored and a restart forgets
-// the action, as before.
+// the action, as before. The file itself is checked too before it is read (collect.TrustedFile): one that
+// someone else owns or can change was not written by this service, and it is not believed (nothing is shown
+// as pending and Cancel aborts nothing because of it).
 func systemPowerAt(dir string) PowerExec {
-	store := PowerFile{Path: filepath.Join(dir, powerRecordFile), Check: collect.TrustedFolder}
+	store := PowerFile{Path: filepath.Join(dir, powerRecordFile), Check: collect.TrustedFolder, CheckFile: collect.TrustedFile}
 	return RememberPower(&systemPower{}, store, func(action string) bool { return action != "sleep" }, windowsUptime)
 }
 

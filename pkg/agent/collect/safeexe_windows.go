@@ -112,6 +112,41 @@ func FindIpmitool() (string, error) {
 	return "", fmt.Errorf("ipmitool not found in %s: install it there or set its full path", filepath.Join(pf, "ipmitool"))
 }
 
+// TrustedFile checks one file of Fairy's own in a folder that passed TrustedFolder: a plain file with one name
+// that only Administrators, SYSTEM or TrustedInstaller own and can change (OwnFileProblem). The file is opened
+// itself (FILE_FLAG_OPEN_REPARSE_POINT: a link is opened as the link, not followed), and its kind, its number
+// of names and its security are all read from that one handle.
+func TrustedFile(path string) error {
+	p, err := windows.UTF16PtrFromString(path)
+	if err != nil {
+		return err
+	}
+	h, err := windows.CreateFile(p, windows.READ_CONTROL|windows.FILE_READ_ATTRIBUTES,
+		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE, nil, windows.OPEN_EXISTING,
+		windows.FILE_FLAG_BACKUP_SEMANTICS|windows.FILE_FLAG_OPEN_REPARSE_POINT, 0)
+	if err != nil {
+		return &os.PathError{Op: "open", Path: path, Err: err}
+	}
+	defer windows.CloseHandle(h)
+	var info windows.ByHandleFileInformation
+	if err := windows.GetFileInformationByHandle(h, &info); err != nil {
+		return &os.PathError{Op: "stat", Path: path, Err: err}
+	}
+	sd, err := windows.GetSecurityInfo(h, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION)
+	if err != nil {
+		return fmt.Errorf("%s: cannot read its permissions: %w", path, err)
+	}
+	owner, null, aces, err := ownerAndACL(path, sd)
+	if err != nil {
+		return err
+	}
+	if why := OwnFileProblem(path, info.FileAttributes&windows.FILE_ATTRIBUTE_DIRECTORY != 0,
+		info.FileAttributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0, info.NumberOfLinks, owner, null, aces); why != "" {
+		return errors.New(why)
+	}
+	return nil
+}
+
 // TrustedFolder checks that dir is a plain local folder (no junction) that only Administrators, SYSTEM or
 // TrustedInstaller can change, with every folder above it: a folder a LocalSystem process may write files in
 // (the helper's log) without another account planting a link there first. For dir itself an entry that only

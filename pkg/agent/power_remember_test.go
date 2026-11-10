@@ -519,3 +519,69 @@ func TestPowerDoesNotShowACancelledActionAgain(t *testing.T) {
 		t.Fatal("an action whose time has passed is shown")
 	}
 }
+
+// N9 (review of the Windows side): helper\power-pending.json was believed when its folder passed the check.
+// A file put there before the folder was locked (on a PC prepared before an install up to 0.5.3 that got only
+// the new program) keeps its own owner and permissions, and whoever planted it can still write it: the panel
+// showed a pending shutdown that is not Fairy's, and Cancel aborted a shutdown Fairy did not start. The file
+// itself is checked now before it is read.
+func TestPlantedPowerRecordIsNotBelieved(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "power-pending.json")
+	planted := `{"action":"shutdown","at":1800000600,"delay_s":600,"by":"panel","up":10800}`
+	if err := os.WriteFile(path, []byte(planted), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var folders, files []string
+	theirs := errors.New(`C:\ProgramData\fairy-agent\helper\power-pending.json is owned by S-1-5-21-1-2-3-1001, not by Administrators / SYSTEM`)
+	store := PowerFile{Path: path,
+		Check: func(d string) error { folders = append(folders, d); return nil }, // the folder is fine today
+		CheckFile: func(p string) error {
+			files = append(files, p)
+			if b, _ := os.ReadFile(p); string(b) == planted { // stands for: someone else owns it
+				return theirs
+			}
+			return nil
+		}}
+	// without the file check this is a valid record of a shutdown in ten minutes
+	if r, err := (PowerFile{Path: path}).Load(); err != nil || r == nil || r.Action != "shutdown" {
+		t.Fatal("fixture:", r, err)
+	}
+	if r, err := store.Load(); r != nil || !errors.Is(err, theirs) {
+		t.Fatalf("the planted record was believed: %+v %v", r, err)
+	}
+	if len(files) != 1 || files[0] != path || len(folders) != 1 {
+		t.Fatalf("asked about files %v, folders %v", files, folders)
+	}
+	win, c := &fakeOS{}, newClock()
+	c.now = time.Unix(1_800_000_060, 0) // inside the planted record's ten minutes
+	r := start(win, store, c)
+	if p, ok := r.PendingAction(); ok {
+		t.Fatalf("the panel is shown a shutdown that is not Fairy's: %+v", p)
+	}
+	if err := r.Cancel(); err != nil || win.cancels != 0 {
+		t.Fatalf("Cancel asked Windows to abort %d times because of a planted file (%v)", win.cancels, err)
+	}
+	if b, _ := os.ReadFile(path); string(b) != planted {
+		t.Fatal("the planted file was changed by reading it")
+	}
+	// Fairy's own next action replaces the file (a new file, written by this service), and that one is believed
+	if err := r.ScheduleBy("reboot", 5*time.Minute, "panel"); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(path); string(b) == planted || !strings.Contains(string(b), `"reboot"`) {
+		t.Fatalf("the record was not replaced: %s", b)
+	}
+	r2 := start(win, store, c)
+	if p, ok := r2.PendingAction(); !ok || p.Action != "reboot" {
+		t.Fatalf("Fairy's own record is not believed after a restart: %+v %v", p, ok)
+	}
+	if err := r2.Cancel(); err != nil || win.cancels != 1 {
+		t.Fatal(err, win.cancels)
+	}
+	// no file, no question
+	files = nil
+	if rec, err := store.Load(); rec != nil || err != nil || len(files) != 0 {
+		t.Fatal(rec, err, files)
+	}
+}
