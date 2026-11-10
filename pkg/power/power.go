@@ -75,10 +75,11 @@ type Reading struct {
 	Timestamp      time.Time `json:"timestamp"`
 }
 
-// NewReading builds a Reading for a source.
+// NewReading builds a Reading for a source. Values that are not possible numbers (devices.Finite) are left out
+// (nil), whatever source they come from, so a Reading can always be written as JSON.
 func NewReading(b Base, r devices.Reading) Reading {
-	pr := Reading{SourceID: b.ID, Name: b.DisplayName(), Watts: r.Watts, Voltage: r.Voltage,
-		Current: r.Current, EnergyKWhTotal: r.EnergyKWh, Timestamp: time.Now().UTC()}
+	pr := Reading{SourceID: b.ID, Name: b.DisplayName(), Watts: devices.Num(r.Watts), Voltage: devices.Num(r.Voltage),
+		Current: devices.Num(r.Current), EnergyKWhTotal: devices.Num(r.EnergyKWh), Timestamp: time.Now().UTC()}
 	if b.System != "" {
 		system := b.System
 		pr.SystemID = &system

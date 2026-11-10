@@ -29,16 +29,22 @@ func ParseTasmotaStatus8(d map[string]any) (Reading, error) {
 		return Reading{}, Errf("tasmota: no ENERGY block (not a metering device?)")
 	}
 	num := func(v any) *float64 { // multi-channel devices return lists
-		if l, ok := v.([]any); ok {
-			s := 0.0
-			for _, x := range l {
-				if p := f64(x); p != nil {
-					s += *p
-				}
-			}
-			return &s
+		l, ok := v.([]any)
+		if !ok {
+			return f64(v)
 		}
-		return f64(v)
+		s := 0.0
+		for _, x := range l {
+			p := f64(x)
+			if p == nil {
+				if isNumber(x) { // an impossible number on one channel: the total is unknown, not "the rest"
+					return nil
+				}
+				continue
+			}
+			s += *p
+		}
+		return Num(&s) // checked again: possible numbers can add up to an impossible one
 	}
 	return Reading{num(e["Power"]), num(e["Voltage"]), num(e["Current"]), num(e["Total"])}, nil
 }
@@ -95,8 +101,7 @@ func ParseTuyaDPS(dps map[string]any, mapping map[string]DpsField) Reading {
 		if scale == 0 {
 			scale = 1
 		}
-		v := round(*raw*scale, 3)
-		return &v
+		return numRound(*raw*scale, 3) // nil when the scaled value is impossible (or the scale is not a number)
 	}
 	return Reading{get("power"), get("voltage"), get("current"), get("energy_kwh_total")}
 }

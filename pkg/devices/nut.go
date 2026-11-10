@@ -191,10 +191,12 @@ func NUTReadAll(ctx context.Context, host string, port int, username, password s
 	return out, nil
 }
 
+// numVar is the first of these variables that holds a number, nil when none does. upsd sends text, and
+// strconv reads "NaN", "Inf" and "Infinity" as numbers: those and numbers beyond MaxMagnitude count as missing.
 func numVar(v map[string]string, keys ...string) *float64 {
 	for _, k := range keys {
 		if s, ok := v[k]; ok {
-			if f, err := strconv.ParseFloat(strings.TrimSpace(s), 64); err == nil {
+			if f, err := strconv.ParseFloat(strings.TrimSpace(s), 64); err == nil && Finite(f) {
 				return &f
 			}
 		}
@@ -212,14 +214,22 @@ func strVar(v map[string]string, keys ...string) *string {
 }
 
 // NUTWatts returns (watts, input volts, output amps); watts are estimated from load% x nominal when realpower is
-// missing.
+// missing (never from a negative load or nominal power, and nil when the product is not a possible number).
 func NUTWatts(v map[string]string) (watts, volts, amps *float64) {
 	watts = numVar(v, "ups.realpower")
 	if watts == nil {
-		if load, nom := numVar(v, "ups.load"), numVar(v, "ups.realpower.nominal"); load != nil && nom != nil && *nom != 0 {
-			w := round(*load**nom/100, 1)
-			watts = &w
-		}
+		watts = nutEstimate(notNegative(numVar(v, "ups.load")), notNegative(numVar(v, "ups.realpower.nominal")))
 	}
 	return watts, numVar(v, "input.voltage"), numVar(v, "output.current")
+}
+
+// notNegative returns p when it is a possible number that is not below zero.
+func notNegative(p *float64) *float64 { return NumIn(p, 0, MaxMagnitude) }
+
+// nutEstimate is load % x nominal watts, to 0.1 W; nil when either is missing or nominal is 0.
+func nutEstimate(load, nominal *float64) *float64 {
+	if load == nil || nominal == nil || *nominal == 0 {
+		return nil
+	}
+	return numRound(*load**nominal/100, 1)
 }

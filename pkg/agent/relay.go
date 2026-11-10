@@ -132,18 +132,20 @@ func (r *Relay) PollSource(ctx context.Context, s relaySource, timeout time.Dura
 				hasW = true
 			}
 		}
-		if hasW {
+		// Checked after the sum as well: each reading can be a possible number and the total not. A total that
+		// is not one stays unknown (null), because one such number would make the whole /metrics answer fail.
+		if hasW && devices.Finite(w) {
 			row["watts"] = w
 		}
 		first := readings[0]
-		if first.Voltage != nil {
-			row["voltage"] = *first.Voltage
+		if v := devices.Num(first.Voltage); v != nil {
+			row["voltage"] = *v
 		}
-		if first.Current != nil && len(readings) == 1 {
-			row["current"] = *first.Current
+		if c := devices.Num(first.Current); c != nil && len(readings) == 1 {
+			row["current"] = *c
 		}
-		if first.EnergyKWhTotal != nil && len(readings) == 1 {
-			row["energy_kwh_total"] = *first.EnergyKWhTotal
+		if e := devices.Num(first.EnergyKWhTotal); e != nil && len(readings) == 1 {
+			row["energy_kwh_total"] = *e
 		}
 	}
 	r.mu.Lock()
