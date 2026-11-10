@@ -13,6 +13,7 @@ import (
 	"math/big"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -190,7 +191,7 @@ func TestJoinProxmoxStoresTheGrant(t *testing.T) {
 	if err != nil || st.Proxmox == nil || st.Proxmox.TokenSecret != fakeSecret {
 		t.Fatalf("%+v %v", st, err)
 	}
-	if fi, _ := os.Stat(filepath.Join(state, "pairing.json")); fi.Mode().Perm() != 0o600 {
-		t.Fatal(fi.Mode())
+	if fi, _ := os.Stat(filepath.Join(state, "pairing.json")); runtime.GOOS != "windows" && fi.Mode().Perm() != 0o600 {
+		t.Fatal(fi.Mode()) // Windows: the state folder's permissions (TestStateFileTakesTheFoldersPermissions)
 	}
 }

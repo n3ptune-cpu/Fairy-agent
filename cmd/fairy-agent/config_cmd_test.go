@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -66,7 +67,7 @@ func TestConfigCommand(t *testing.T) {
 	if code, _, _ := run(t, "set", "a"); code != 2 {
 		t.Fatal(code)
 	}
-	if st, _ := os.Stat(p); st.Mode().Perm() != 0o640 {
+	if st, _ := os.Stat(p); runtime.GOOS != "windows" && st.Mode().Perm() != 0o640 { // Windows: the folder's permissions
 		t.Fatal(st.Mode())
 	}
 	// a config that is already broken in another way can still be fixed (with a note)

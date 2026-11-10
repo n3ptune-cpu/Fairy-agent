@@ -15,6 +15,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -390,7 +391,10 @@ func TestExpiredJoinCodeIsWipedFromTheState(t *testing.T) {
 		if d := s.Describe(r.now); !strings.Contains(d, "expired unused") || !strings.Contains(d, "make a new code in the panel") {
 			t.Fatalf("%s: pair-status would say %q", name, d)
 		}
-		if fi, _ := os.Stat(r.path); fi.Mode().Perm() != 0o600 {
+		// only the agent's account reads it. On Windows a file has no mode: it has what its folder passes on,
+		// which for the state folder is the agent's account, administrators and SYSTEM
+		// (cmd/fairy-agent: TestWindowsFilesTakeTheFoldersPermissions, and the real PCs of datadir_realpc_test.go)
+		if fi, _ := os.Stat(r.path); runtime.GOOS != "windows" && fi.Mode().Perm() != 0o600 {
 			t.Fatalf("%s: mode %v", name, fi.Mode())
 		}
 		// once is enough: the file is not written again

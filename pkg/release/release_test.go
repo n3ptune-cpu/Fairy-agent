@@ -382,7 +382,9 @@ func TestInstallerSwapsAndKeepsOld(t *testing.T) {
 		if b, _ := os.ReadFile(target + ".old"); string(b) != "old" {
 			t.Fatal(rs, "old not kept:", string(b))
 		}
-		if st, _ := os.Stat(target); st.Mode().Perm() != 0o755 {
+		// the new program can be run by everyone and changed by its owner only. (Unix: Windows has no such
+		// bits; there the program folder's permissions decide, which collect.TrustedExecutable checks.)
+		if st, _ := os.Stat(target); runtime.GOOS != "windows" && st.Mode().Perm() != 0o755 {
 			t.Fatal(rs, st.Mode())
 		}
 		if f.starts != 1 {
