@@ -645,9 +645,10 @@ func TestApplyStagedRefusesVersionsItCannotCompare(t *testing.T) {
 	}
 }
 
-// L23, the agent's half: it does not download a release it cannot compare (the installer would refuse it).
+// L23, the agent's half: it does not download a release whose version it cannot compare (the installer would
+// refuse it).
 func TestUpdaterRefusesVersionsItCannotCompare(t *testing.T) {
-	for _, c := range []struct{ current, published string }{{"20-abcdef0", "v0.4.2"}, {"20-abcdef0", "1000000000-abcdef0"}, {"dev", "42-bbbbbbb"}} {
+	for _, c := range []struct{ current, published string }{{"20-abcdef0", "v0.4.2"}, {"20-abcdef0", "1000000000-abcdef0"}, {"dev", "v0.4.2"}} {
 		for _, force := range []bool{false, true} {
 			r := newUpdRig(t, c.current, nil)
 			r.gh.Publish("build-42", "fairy-agent", c.published, map[string][]byte{testAsset: []byte("new")}, nil)
@@ -664,6 +665,26 @@ func TestUpdaterRefusesVersionsItCannotCompare(t *testing.T) {
 			if _, err := os.Stat(filepath.Join(r.stage, testAsset)); err == nil {
 				t.Fatalf("%v force=%v: the release was downloaded", c, force)
 			}
+		}
+	}
+}
+
+// An agent whose own version has no build number (a local build; the panel's contract test runs one named
+// "contract") still stages a proper release and starts the installer: the agent is not the side that decides.
+// The installer then refuses (TestApplyStagedRefusesVersionsItCannotCompare).
+func TestUpdaterWithoutABuildNumberLeavesItToTheInstaller(t *testing.T) {
+	for _, current := range []string{"dev", "contract", "v0.6.0"} {
+		r := newUpdRig(t, current, nil)
+		r.gh.Publish("build-42", "fairy-agent", "42-bbbbbbb", map[string][]byte{testAsset: []byte("new")}, nil)
+		if st, _ := post(t, r.srv.URL, ctlTok, map[string]any{}); st != 202 {
+			t.Fatal(st)
+		}
+		r.wait(t)
+		if r.applied.Load() != 1 {
+			t.Fatalf("%s: the installer was not started", current)
+		}
+		if b, _ := os.ReadFile(filepath.Join(r.stage, testAsset)); string(b) != "new" {
+			t.Fatalf("%s: not staged: %q", current, b)
 		}
 	}
 }

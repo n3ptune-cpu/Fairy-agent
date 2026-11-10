@@ -300,10 +300,16 @@ func (u *Updater) run(who string, done chan struct{}) {
 	case cmp < 0:
 		u.fail(fmt.Sprintf("the latest release %s is older than this agent (%s); not downgrading", ch.Version, u.o.Version), ch.Version)
 		return
-	case !known:
-		// The installer refuses it anyway (applyStaged): say so here, before anything is downloaded.
+	case !known && release.NoBuildNumber(ch.Version) != "":
+		// A release in another version format: the installer refuses it (applyStaged), so say so here, before
+		// anything is downloaded.
 		u.fail(release.NotComparable(u.o.Version, ch.Version).Error()+"; not installing (by hand, as root / Administrator: fairy-agent update --force)", ch.Version)
 		return
+	case !known:
+		// This agent's own version has no build number (a local build). The agent is the less privileged side
+		// and not the one that decides: it stages the release and the installer, whose word counts, refuses.
+		slog.Warn("self-update: this agent's version has no build number (a local build?); the installer will refuse to replace it",
+			"current", u.o.Version, "release", ch.Version)
 	}
 	// The installer would refuse (applyStaged): say so before anything is downloaded.
 	if left := cooldownLeft(u.o.ResultPath, u.now()); left > 0 {
