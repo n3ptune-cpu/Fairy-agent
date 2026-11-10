@@ -998,7 +998,7 @@ fairy-agent`; Windows `Stop-Service fairy-agent`, rename `fairy-agent.exe.old` b
 | Board fans and voltages | yes (hwmon chips) | only through the BMC (Supermicro, `ipmi:`) |
 | CPU watts | yes (RAPL, see the table above) | only with [Core Temp](#core-temp-optional-windows) |
 | Battery (laptops) | charge %, state, AC, draw in watts, time left, health | charge %, state, AC, Windows' own time-left estimate (no watts) |
-| Processes | all, with command lines (passwords blanked) | all names; details for programs it may open; the program's path instead of its command line; per-program dedicated GPU memory for every card (Windows' "GPU Process Memory" counter, like Task Manager) |
+| Processes | all; command lines only with `processes.cmdline: true` (a filter blanks the secrets it recognises: best effort) | all names; details for programs it may open; the program's path instead of its command line; per-program dedicated GPU memory for every card (Windows' "GPU Process Memory" counter, like Task Manager) |
 
 **Not possible on Windows without a driver**, and therefore never done: CPU core temperatures, CPU package
 watts, motherboard sensor chips (fans, voltages), and other programs' command-line arguments. Tools that show
@@ -1066,9 +1066,10 @@ The file is `C:\ProgramData\fairy-agent\config.yaml` (Windows) or `/etc/fairy-ag
 | Setting | Default | Meaning |
 | --- | --- | --- |
 | `listen` | the Tailscale address, port 9101 | where the panel connects; `0.0.0.0` is refused unless `allow_all_interfaces: true` |
+| `only_from_panel` | false | `true`: connections are accepted only from the panel that added this machine (Add host) and from this machine itself. Your own `curl` from another machine then gets no answer, and a new panel address needs a new Add host / Re-pair. An agent with no panel on record (never added with Add host, or its last join code expired) then refuses every other machine, until the Add host / Re-pair command has run on it; the log says so once a minute |
 | `token_file`, `control_token_file` | `token`, `control-token` next to config.yaml | the tokens (at least 24 characters, different from each other). `FAIRY_AGENT_TOKEN` / `FAIRY_AGENT_CONTROL_TOKEN` in the environment win. Never on the command line. |
 | `hide_host_details` | false | no hostname, no hardware model, just "Windows" / "Linux" |
-| `processes.enabled` / `cmdline` / `never_open` | true / true / none | the Processes tab |
+| `processes.enabled` / `cmdline` / `never_open` | true / true / none | the Processes tab. `cmdline` sends command lines (Linux) or program paths (Windows). A config file without the line means `true`. Since 0.6.0 a new Linux install writes `cmdline: false`; an existing `config.yaml` keeps what it says |
 | `gpu.nvidia_smi` | auto | `off` or a full local path (only administrators / root may be able to change the file and its folders) |
 | `gpu.amdgpu` | auto | Linux: AMD GPUs through the amdgpu driver's sysfs files; `off` to switch off |
 | `gpu.windows` | auto | Windows: AMD / Intel / other GPUs from Windows' GPU counters; `off` to switch off |
@@ -1143,9 +1144,19 @@ are lists of devices: edit those in the file.
 ## Security in short
 
 * Listens only on the Tailscale address (or the address you set), never on every network by default.
-* Every request needs a token, except `POST /pair`: it answers only while a one-time join code from the panel's
-  Add host is waiting (15 minutes, the code stored only as a hash), only to the panel's address, 5 times a minute
-  at most, hands out the tokens once and is closed for good after that (or after 10 wrong codes).
+* Every request needs a token, with two exceptions that give nothing away:
+  * `POST /pair` answers only while a one-time join code from the panel's Add host is waiting (15 minutes; the
+    code itself is never stored), only to the panel's address and only to a JSON request. It hands out the
+    tokens once and is closed for good after that, or after 10 wrong codes. The panel's address has its own
+    budget of 5 requests a minute. Requests from other addresses are refused, are counted separately (5 a
+    minute each, 20 a minute together) and cannot use up the panel's budget or the 10 tries. With pairing v2
+    the panel must prove it has the code, and the answer is encrypted
+    (see [Add a host](#add-a-host-from-the-panel-one-command)).
+  * `GET /health?c=<random value>` is what the update installer asks after a swap. The answer is a proof that
+    only someone who already has this machine's read token can check. It contains neither the token nor the
+    version.
+* The join code is never an argument of a program: the install scripts and `fairy-agent join` take it from
+  standard input or from the environment, and never print it.
 * Tokens are compared in a way that does not leak their length or content through
   timing. Reading uses one token, changing anything needs the second, separate one. Repeated wrong tokens
   block that address for a minute.
@@ -1153,9 +1164,15 @@ are lists of devices: edit those in the file.
 * Self-update installs only releases signed with the owner's key (checked twice: by the agent and by the
   installer, which never trusts the downloaded copy), only files fetched over HTTPS from GitHub, never an older
   version, and only when an admin asks for it.
-* Command lines are cleaned of passwords and tokens before they leave the machine (and again by the panel).
+* Command lines (Linux) are sent only with `processes.cmdline: true`, which new installs switch off. When
+  they are sent, a filter blanks the passwords and tokens it recognises before they leave the machine (and
+  again in the panel). The filter is best effort: it cannot know every way a program takes a secret.
 * The BMC relay reaches private addresses only, passes the BMC password to ipmitool only through its
   environment, pins the Redfish certificate and never logs passwords.
+* At most 64 connections are open at a time, at most 8 from one address, and 16 of the 64 are kept for the
+  panel's address and for this machine itself, so a flood from another device cannot lock the panel out or
+  exhaust the agent's memory. A request's header must arrive within 2 seconds and fit in 4096 bytes. With
+  `only_from_panel: true` nobody but the panel and this machine gets a connection at all.
 * Time limits on every connection; requests are small and bounded. What a UPS server (NUT) sends is bounded too
   (4 KiB per line, 1 MiB per poll, 64 UPSes), so a broken or hostile upsd cannot exhaust memory.
 * The log cannot fill the disk: the log file is rotated at 5 MB (one old file kept), and the same message is
@@ -1166,7 +1183,13 @@ are lists of devices: edit those in the file.
   `C:\Program Files` and only administrators / SYSTEM can change it (self-update goes through the separate
   LocalSystem updater service, which checks the signature itself). The install scripts check the program's
   SHA-256 against the signed SHA256SUMS before running it as Administrator. Helper programs (ipmitool,
-  nvidia-smi) are only run from places only administrators can change. Linux: own user, no root, no capabilities, systemd sandbox.
+  nvidia-smi) are only run from places only administrators can change. Since 0.6.0 the installer, the
+  helper and the updater service first check that the data folder can be changed by administrators and SYSTEM
+  only, and refuse it otherwise (see
+  [Running the installer again](#running-the-installer-again-060-what-is-kept-what-is-moved-aside)).
+* Linux: own user, no root, no capabilities, systemd sandbox (check that it is still on:
+  [Check your Linux agents](#check-your-linux-agents-are-the-sandbox-lines-still-on)). One polkit rule per
+  feature. With fan control, a fixed fan speed never outlives the agent.
 
 ## Not yet tested on a real Windows PC
 
