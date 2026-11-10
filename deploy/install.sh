@@ -1,9 +1,19 @@
 #!/bin/sh
 # Fairy agent installer for Linux (systemd), the machine side of the panel's "Add host".
 #
-#   curl -fsSL https://github.com/n3ptune-cpu/Fairy-agent/releases/latest/download/install.sh | sudo sh -s -- \
-#     --join CODE --panel 100.x.y.z [--power-control] [--self-update] [--wol] [--ups] [--ups-name NAME] [--ipmi]
-#     [--proxmox]
+# Use the command from the panel's Add host (or Re-pair) dialog. It names one checked release, refuses to run
+# this script unless its SHA-256 is the one the panel verified, and passes the release's fingerprint and the
+# one-time join code. There is no "latest" one-liner any more: a line that pipes a download into a shell
+# cannot be checked by anybody.
+#
+#   install.sh --sums-sha256 HASH --panel 100.x.y.z --join CODE
+#              [--power-control] [--self-update] [--wol] [--ups] [--ups-name NAME] [--ipmi] [--proxmox]
+#
+# --sums-sha256 HASH (or FAIRY_SUMS_SHA256 in the environment): the SHA-256 of the release's SHA256SUMS, as the
+# panel verified it with its own built-in release key. The script refuses a SHA256SUMS with any other hash
+# before it trusts a line of it. Without it the script does not run, unless --unverified is given: then a
+# first install rests on the downloaded program checking its own download, and the script says "NOT
+# independently verified".
 #
 # It downloads the release (binary, SHA256SUMS + signature, the systemd units and rules), checks every file
 # against SHA256SUMS and the signature with fairy-agent's built-in release key, then installs exactly what
@@ -15,11 +25,6 @@
 # one-time join code; the panel picks the tokens up by itself within a few seconds. With --proxmox (a standalone
 # Proxmox VE node), join also makes the panel a read-only API token (user fairy@pve, role PVEAuditor, token
 # fairy@pve!panel-<node>) that the panel picks up once with the agent's tokens; nothing to copy.
-#
-# The panel can vouch for the release: FAIRY_SUMS_SHA256=<sha256 of SHA256SUMS> in the environment (or
-# --sums-sha256 <hash>) makes the script refuse a SHA256SUMS with any other hash before it trusts a line of it.
-# The panel checks the release's signature with its own built-in key and puts the hash into the Add host
-# command, so even a first install does not have to trust the downloaded binary's own key.
 #
 # Never older: when the installed fairy-agent is a newer build than this installer's release (a panel that
 # pins an older release), the program and its unit files are kept and only settings and pairing are done.
@@ -40,6 +45,7 @@ say() { printf '%s\n' "fairy: $*"; }
 die() { printf '%s\n' "fairy: ERROR: $*" >&2; exit 1; }
 
 CODE="" PANEL="" UPSNAME=""
+UNVERIFIED=0
 SUMS_PIN="${FAIRY_SUMS_SHA256:-}"
 POWER=0 UPDATE=0 WOL=0 UPS=0 IPMI=0 PVE=0
 while [ $# -gt 0 ]; do
@@ -55,25 +61,29 @@ while [ $# -gt 0 ]; do
     --ipmi) IPMI=1 ;;
     --proxmox) PVE=1 ;;
     --sums-sha256) [ $# -ge 2 ] || die "--sums-sha256 needs the SHA-256 of SHA256SUMS"; SUMS_PIN="$2"; shift ;;
-    -h|--help) sed -n '2,29p' "$0" 2>/dev/null || true; exit 0 ;;
+    --unverified) UNVERIFIED=1 ;;
+    -h|--help) sed -n '2,34p' "$0" 2>/dev/null || true; exit 0 ;;
     *) die "unknown option (copy the whole command from the panel's Add host dialog)" ;;
   esac
   shift
 done
 
 [ -n "$CODE" ] && [ -n "$PANEL" ] ||
-  die "usage: install.sh --join CODE --panel PANEL_TAILSCALE_IP [options]"
+  die "usage: install.sh --sums-sha256 HASH --panel PANEL_TAILSCALE_IP --join CODE [options] (use the command from the panel's Add host dialog)"
 case "$PANEL" in *[!0-9.]*) die "--panel must be the panel's Tailscale IPv4 address, e.g. 100.64.0.10" ;; esac
 case "$UPSNAME" in *[!A-Za-z0-9_.-]*) die "--ups-name: letters, digits, _ . - only (the name in upsc -l)" ;; esac
 
+# The release's fingerprint from the panel. Without it nothing vouches for a first download but itself.
 if [ -n "$SUMS_PIN" ]; then
   SUMS_PIN="$(printf '%s' "$SUMS_PIN" | tr 'A-F' 'a-f')"
   case "$SUMS_PIN" in
     *[!0-9a-f]*) die "FAIRY_SUMS_SHA256 / --sums-sha256 must be 64 hex digits (the SHA-256 of SHA256SUMS)" ;;
   esac
   [ "${#SUMS_PIN}" -eq 64 ] || die "FAIRY_SUMS_SHA256 / --sums-sha256 must be 64 hex digits (the SHA-256 of SHA256SUMS)"
+elif [ "$UNVERIFIED" -eq 0 ]; then
+  die "no release fingerprint (--sums-sha256). Use the command from the panel's Add host dialog: it carries the fingerprint of the release the panel checked. To install without it, at your own risk, add --unverified"
 fi
-[ "$(id -u)" -eq 0 ] || die "run it as root (… | sudo sh -s -- …)"
+[ "$(id -u)" -eq 0 ] || die "run it as root (the panel's command uses sudo)"
 command -v systemctl >/dev/null 2>&1 || die "this installer needs systemd"
 command -v curl >/dev/null 2>&1 || die "curl is missing"
 command -v sha256sum >/dev/null 2>&1 || die "sha256sum is missing (coreutils)"
@@ -114,19 +124,30 @@ done
 chmod 0755 "$TMP/$ASSET"
 
 # 2. the signature of SHA256SUMS, with the release key built into fairy-agent: the installed binary's when it
-#    can (a re-run), else the new one's (a first install trusts GitHub's HTTPS, as any first download does)
+#    can (a re-run), else the new one's
 rc=2
+by=""
 if [ -x "$BIN" ]; then
   "$BIN" verify-release "$TMP" >/dev/null 2>&1 && rc=0 || rc=$?
   [ "$rc" -eq 1 ] && die "the release signature does not match the installed fairy-agent's release key"
+  by="the installed fairy-agent's release key"
 fi
 if [ "$rc" -ne 0 ]; then
   "$TMP/$ASSET" verify-release "$TMP" >/dev/null 2>&1 && rc=0 || rc=$?
+  by="the downloaded fairy-agent's own release key"
 fi
 NEWVER="$(awk 'NR == 1 { print $2 }' "$TMP/VERSION")"
 case "$rc" in
-  0) say "release $NEWVER verified (SHA256SUMS signature and hashes)" ;;
-  3) say "WARNING: this build has no release key, the signature was not checked (hashes only)" ;;
+  0) if [ -n "$SUMS_PIN" ]; then
+       say "release $NEWVER verified (the panel's fingerprint, SHA256SUMS signature and hashes)"
+     elif [ "$by" = "the installed fairy-agent's release key" ]; then
+       say "release $NEWVER verified with $by (no fingerprint from the panel: --unverified)"
+     else
+       say "WARNING: release $NEWVER is NOT independently verified: no fingerprint from the panel (--unverified), and"
+       say "WARNING: its signature was checked only with $by, which came with the same download"
+     fi ;;
+  3) [ -n "$SUMS_PIN" ] || die "this build has no release key and no fingerprint from the panel was given: nothing vouches for it"
+     say "WARNING: this build has no release key, the signature was not checked (the panel's fingerprint and hashes only)" ;;
   *) die "the release signature check failed" ;;
 esac
 
