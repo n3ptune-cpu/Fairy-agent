@@ -633,7 +633,7 @@ func ApplyUpdate(ctx context.Context, cfg *Config, version, releaseKey string) e
 				return err
 			}
 			// want is a newer release or, after a rollback, this very version: both know /health
-			return CheckRunning(ctx, cfg, want)
+			return healthAfterStart(CheckRunning(ctx, cfg, want))
 		}})
 	if !res.OK {
 		return errors.New(res.Message)
@@ -688,7 +688,7 @@ func NewUpdateCLI(ctx context.Context, cfg *Config, version, releaseKey string) 
 					if cfg == nil {
 						return nil
 					}
-					return checkRunningFrom(ctx, cfg, version, v)
+					return healthAfterStart(checkRunningFrom(ctx, cfg, version, v))
 				}
 			}
 			// after a rollback this binary's own version runs again
@@ -713,6 +713,15 @@ func NewUpdateCLI(ctx context.Context, cfg *Config, version, releaseKey string) 
 		}
 	}
 	return cli, nil
+}
+
+// healthAfterStart words a failed check of the agent's port for a service that the service manager reports as
+// running: the two are different things, and the report of a failed update says which of them was seen.
+func healthAfterStart(err error) error {
+	if err == nil {
+		return nil
+	}
+	return fmt.Errorf("the service is running, but its check on the agent's port did not pass: %w", err)
 }
 
 // StartUpdaterService starts the installer (Windows: the fairy-agent-update service; the helper calls this

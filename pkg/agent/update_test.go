@@ -258,6 +258,7 @@ type applyRig struct {
 	starts   int
 	running  string // the "running" binary's content
 	unhealty bool
+	portShut bool              // nothing gets an answer on the agent's port, whatever runs (review N2)
 	versions map[string]string // binary content -> the version it reports
 	checked  []string          // the versions the health check was asked for, in order
 	restage  func()            // stage the latest published release again, as the agent does
@@ -323,6 +324,9 @@ func (ar *applyRig) apply(key ed25519.PublicKey) UpdateResult {
 		Key: key, CurrentVersion: current, Installer: in, Now: ar.now,
 		Healthy: func(_ context.Context, want string) error {
 			ar.checked = append(ar.checked, want)
+			if ar.portShut {
+				return healthAfterStart(errors.New("agent not answering on 127.0.0.1:9101"))
+			}
 			// what the real check does (CheckRunning): the running agent must report the version asked for
 			if ar.unhealty && ar.running != "installed 41" {
 				return errors.New("agent not answering")
@@ -410,6 +414,36 @@ func TestApplyStagedReverifiesAndRollsBack(t *testing.T) {
 	_ = os.RemoveAll(ar.stage)
 	if res := ar.apply(nil); res.OK || !strings.Contains(res.Message, "nothing staged") {
 		t.Fatalf("%+v", res)
+	}
+}
+
+// Review N2. When something keeps the health check from its answer on the agent's port (then: a local user who
+// held every slot of this machine), the new version is rolled back, and the check after the rollback fails in
+// the same way although the previous version runs. That was reported as "rolling back FAILED too". The report
+// now says what was done and what was seen.
+func TestApplyStagedReportsARollbackItCouldNotConfirm(t *testing.T) {
+	ar := newApplyRig(t, "42-bbbbbbb", []byte("new 42"))
+	ar.portShut = true
+	res := ar.apply(nil)
+	if res.OK {
+		t.Fatalf("%+v", res)
+	}
+	if b, _ := os.ReadFile(ar.target); string(b) != "installed 41" || ar.running != "installed 41" || ar.starts != 2 {
+		t.Fatalf("not rolled back: %q running %q starts %d", b, ar.running, ar.starts)
+	}
+	for _, want := range []string{"the previous version was put back and started again", "its health check did not pass",
+		"the service is running, but its check on the agent's port did not pass", "agent not answering on 127.0.0.1:9101"} {
+		if !strings.Contains(res.Message, want) {
+			t.Fatalf("the report does not say %q: %s", want, res.Message)
+		}
+	}
+	for _, wrong := range []string{"FAILED", "rolled back to the previous version"} {
+		if strings.Contains(res.Message, wrong) {
+			t.Fatalf("the report says %q: %s", wrong, res.Message)
+		}
+	}
+	if r := readResult(ar.result); r == nil || r.OK || r.Message != res.Message {
+		t.Fatalf("result file: %+v", r)
 	}
 }
 

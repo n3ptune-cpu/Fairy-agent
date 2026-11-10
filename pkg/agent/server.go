@@ -1058,5 +1058,11 @@ func (a *Agent) update(w http.ResponseWriter, r *http.Request) {
 func (a *Agent) Server() *http.Server {
 	return &http.Server{Handler: a.Handler(), ReadHeaderTimeout: 2 * time.Second, ReadTimeout: 10 * time.Second,
 		WriteTimeout: 45 * time.Second, IdleTimeout: 90 * time.Second, MaxHeaderBytes: 4096,
+		// LimitConns' connections learn when they are idle (kept open after an answer, for a next request)
+		ConnState: func(c net.Conn, s http.ConnState) {
+			if lc, ok := c.(interface{ ConnState(http.ConnState) }); ok {
+				lc.ConnState(s)
+			}
+		},
 		ErrorLog: slog.NewLogLogger(slog.Default().Handler(), slog.LevelDebug)}
 }

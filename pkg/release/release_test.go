@@ -470,15 +470,44 @@ func TestInstallerChecksThePreviousVersionAfterARollback(t *testing.T) {
 			t.Fatalf("renameSwap=%v, one check: %v", rs, err)
 		}
 
-		// a previous version that does not come back either is still reported as a failed rollback
+		// A previous version that was put back and started but does not pass its check is not a clean rollback,
+		// and it is not "rolling back FAILED too" either (review N2: that was said whenever something kept the
+		// check from its answer, for example a full port, although the previous version was running). The
+		// report says what is known: put back, started, check not passed, and why.
 		target, newPath = setupTarget(t)
 		in = &release.Installer{Target: target, RenameSwap: rs, HealthTimeout: 100 * time.Millisecond, Interval: 10 * time.Millisecond,
 			Start: func(context.Context) error { return nil }, Stop: func(context.Context) error { return nil },
 			Healthy:         func(context.Context) error { return errors.New("agent not answering") },
 			HealthyPrevious: func(context.Context) error { return errors.New("agent not answering") }}
-		if err := in.Install(context.Background(), newPath); !errors.As(err, &rb) || rb.RollbackErr == nil ||
-			!strings.Contains(err.Error(), "the previous version is not healthy either") {
-			t.Fatalf("renameSwap=%v, dead previous version: %v", rs, err)
+		err = in.Install(context.Background(), newPath)
+		if !errors.As(err, &rb) || rb.RollbackErr == nil || !rb.Restored {
+			t.Fatalf("renameSwap=%v, previous version not confirmed: %v", rs, err)
+		}
+		if msg := err.Error(); strings.Contains(msg, "FAILED") || strings.Contains(msg, "rolled back to the previous version") ||
+			!strings.Contains(msg, "the previous version was put back and started again, but its health check did not pass") ||
+			!strings.Contains(msg, "agent not answering") {
+			t.Fatalf("renameSwap=%v, previous version not confirmed: %s", rs, msg)
+		}
+		if running() != "old" {
+			t.Fatalf("renameSwap=%v: the previous binary is not back in place", rs)
+		}
+
+		// "rolling back FAILED too" is for a rollback that did fail: the previous version could not be started
+		target, newPath = setupTarget(t)
+		starts := 0
+		in = &release.Installer{Target: target, RenameSwap: rs, HealthTimeout: 100 * time.Millisecond, Interval: 10 * time.Millisecond,
+			Start: func(context.Context) error {
+				if starts++; starts > 1 {
+					return errors.New("unit failed")
+				}
+				return nil
+			},
+			Stop:    func(context.Context) error { return nil },
+			Healthy: func(context.Context) error { return errors.New("agent not answering") }}
+		err = in.Install(context.Background(), newPath)
+		if !errors.As(err, &rb) || rb.RollbackErr == nil || rb.Restored || !strings.Contains(err.Error(), "rolling back FAILED too") ||
+			!strings.Contains(err.Error(), "starting the previous version") {
+			t.Fatalf("renameSwap=%v, previous version does not start: %v", rs, err)
 		}
 	}
 }

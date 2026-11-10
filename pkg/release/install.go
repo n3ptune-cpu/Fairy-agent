@@ -42,14 +42,22 @@ type Installer struct {
 // RolledBackError says the new binary did not come up and the previous one was put back.
 type RolledBackError struct {
 	Cause       error
-	RollbackErr error // nil when the previous version is running again
+	RollbackErr error // nil when the previous version is running again and passed its health check
+	// Restored: the previous binary is back in place and its service was started without an error. With a
+	// RollbackErr next to it, only the health check afterwards did not pass. That is not "rolling back
+	// failed": the machine most likely runs the previous version, and something else kept the check from its
+	// answer (for the agent: its port, see the message).
+	Restored bool
 }
 
 func (e *RolledBackError) Error() string {
-	if e.RollbackErr != nil {
-		return fmt.Sprintf("%v; rolling back FAILED too: %v", e.Cause, e.RollbackErr)
+	switch {
+	case e.RollbackErr == nil:
+		return fmt.Sprintf("%v; rolled back to the previous version", e.Cause)
+	case e.Restored:
+		return fmt.Sprintf("%v; the previous version was put back and started again, but %v", e.Cause, e.RollbackErr)
 	}
-	return fmt.Sprintf("%v; rolled back to the previous version", e.Cause)
+	return fmt.Sprintf("%v; rolling back FAILED too: %v", e.Cause, e.RollbackErr)
 }
 
 func (e *RolledBackError) Unwrap() error { return e.Cause }
@@ -161,7 +169,7 @@ func (in *Installer) rollback(ctx context.Context, cause error) error {
 		check = in.Healthy
 	}
 	if err := in.waitFor(ctx, check); err != nil {
-		return &RolledBackError{Cause: cause, RollbackErr: fmt.Errorf("the previous version is not healthy either: %w", err)}
+		return &RolledBackError{Cause: cause, Restored: true, RollbackErr: fmt.Errorf("its health check did not pass: %w", err)}
 	}
 	in.logf("previous version restored and healthy")
 	return &RolledBackError{Cause: cause}

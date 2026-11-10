@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"net/http"
 	"net/netip"
 	"slices"
 	"strconv"
@@ -192,6 +193,9 @@ const (
 	MaxWaitingConns = 128
 	// ConnWait is how long such a connection waits: less than the panel's limit for a poll (4 s).
 	ConnWait = 3 * time.Second
+	// LocalReservedConns of ReservedConns are for this machine alone: whatever the panel and everybody else
+	// have open, the update's health check finds a slot.
+	LocalReservedConns = 4
 )
 
 // ConnLimits configures LimitConns. Zero numbers mean the defaults above.
@@ -199,9 +203,11 @@ type ConnLimits struct {
 	Total     int
 	PerSender int
 	Reserved  int
-	PerPanel  int           // MaxConnsPanel
-	Waiting   int           // MaxWaitingConns (this machine: a quarter of it); negative: nobody waits
-	Wait      time.Duration // ConnWait
+	// LocalReserved of Reserved are kept for this machine alone (LocalReservedConns; negative: none).
+	LocalReserved int
+	PerPanel      int           // MaxConnsPanel
+	Waiting       int           // MaxWaitingConns (this machine: a quarter of it); negative: nobody waits
+	Wait          time.Duration // ConnWait
 	// Panel returns the paired panel's address ("" while there is none). See PairedPanel.
 	Panel func() string
 	// PanelOnly refuses every sender but the panel's address and this machine itself. While Panel returns no
@@ -251,12 +257,16 @@ func LimitConns(ln net.Listener, o ConnLimits) *LimitListener {
 	o.PerSender = min(o.PerSender, o.Total)
 	o.PerPanel = min(max(o.PerPanel, o.PerSender), o.Total)
 	o.Reserved = min(o.Reserved, o.Total)
+	if o.LocalReserved == 0 {
+		o.LocalReserved = LocalReservedConns
+	}
+	o.LocalReserved = min(max(o.LocalReserved, 0), o.Reserved)
 	if o.Local == nil {
 		o.Local = func(remote, local netip.Addr) bool {
 			return remote.IsLoopback() || (local.IsValid() && remote == local)
 		}
 	}
-	return &LimitListener{Listener: ln, o: o, open: map[string]int{}, ready: make(chan net.Conn, o.Total),
+	return &LimitListener{Listener: ln, o: o, open: map[string]int{}, conns: map[*limitedConn]struct{}{}, ready: make(chan net.Conn, o.Total),
 		errs: make(chan error), done: make(chan struct{})}
 }
 
@@ -272,13 +282,15 @@ type LimitListener struct {
 
 	mu      sync.Mutex
 	closed  bool
-	open    map[string]int // open connections per sender key
-	trusted int            // open connections of the panel and this machine
-	others  int            // open connections of everybody else
-	waiting []*waitingConn // the panel's and this machine's connections that wait for a slot, oldest first
+	open    map[string]int            // open connections per sender key
+	conns   map[*limitedConn]struct{} // the open connections themselves
+	trusted int                       // open connections of the panel and this machine
+	others  int                       // open connections of everybody else
+	waiting []*waitingConn            // the panel's and this machine's connections that wait for a slot, oldest first
 	peak    int
 	refused uint64
 	waited  uint64
+	evicted uint64
 	logAt   time.Time
 	logged  uint64
 }
@@ -298,6 +310,7 @@ type ConnStats struct {
 	Peak    int    // the most that were ever open at once
 	Refused uint64 // connections closed because a cap was reached
 	Waited  uint64 // connections that got their slot after waiting for it
+	Evicted uint64 // idle connections closed to make room for a new one of the same sender
 }
 
 // Stats returns the listener's counters.
@@ -305,7 +318,7 @@ func (l *LimitListener) Stats() ConnStats {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	return ConnStats{Open: l.trusted + l.others, Trusted: l.trusted, Waiting: len(l.waiting), Peak: l.peak,
-		Refused: l.refused, Waited: l.waited}
+		Refused: l.refused, Waited: l.waited, Evicted: l.evicted}
 }
 
 // Accept returns the next connection that is within the caps. The others are closed, or kept waiting, by the
@@ -378,8 +391,7 @@ func (l *LimitListener) Close() error {
 // arrive counts a new connection in and passes it to Accept, keeps it waiting, or closes it.
 func (l *LimitListener) arrive(c net.Conn) {
 	key, trusted := l.sender(c)
-	lc := &limitedConn{Conn: c, sender: key}
-	lc.release = sync.OnceFunc(func() { l.release(key, trusted) })
+	lc := &limitedConn{Conn: c, l: l, sender: key, trusted: trusted}
 	why := l.panelOnly(trusted)
 	l.mu.Lock()
 	if l.closed {
@@ -390,11 +402,25 @@ func (l *LimitListener) arrive(c net.Conn) {
 	if why == "" {
 		why = l.check(key, trusted)
 	}
+	var idle *limitedConn
+	if why != "" {
+		// An idle connection is one whose request was answered and that was kept open for a next one. Closing
+		// it is always allowed, and a sender whose slots are all taken by such connections is not locked out:
+		// the oldest of them makes room.
+		if idle = l.idleConn(key, why); idle != nil {
+			l.uncount(idle)
+			l.evicted++
+			why = l.check(key, trusted)
+		}
+	}
 	switch {
 	case why == "":
-		l.count(key, trusted)
+		l.countConn(lc)
 		l.ready <- lc // never blocks: at most Total connections are counted in
 		l.mu.Unlock()
+		if idle != nil {
+			_ = idle.Conn.Close()
+		}
 		return
 	case trusted && l.waitingOf(key) < l.room(key):
 		// The panel's own next connection, or the update's health check: a reset would be a failed poll, a
@@ -404,11 +430,37 @@ func (l *LimitListener) arrive(c net.Conn) {
 		w.timer = time.AfterFunc(l.o.Wait, func() { l.giveUp(w) })
 		l.waiting = append(l.waiting, w)
 		l.mu.Unlock()
+		if idle != nil {
+			_ = idle.Conn.Close()
+		}
 		return
 	}
 	l.refused++
 	l.mu.Unlock()
+	if idle != nil {
+		_ = idle.Conn.Close()
+	}
 	l.refuse(c, key, why)
+}
+
+// idleConn picks the connection that is closed to make room for a new one of sender key that check refused
+// with why: this machine's own oldest idle connection, when this machine has all of its slots in use. (Eight
+// idle connections of a local user used to keep the update's health check out for as long as they were held:
+// review N2.) nil: there is none. Caller holds l.mu.
+func (l *LimitListener) idleConn(key, why string) *limitedConn {
+	if key != localKey || why != tooManyOfSender {
+		return nil
+	}
+	var oldest *limitedConn
+	for c := range l.conns {
+		if c.sender != key || c.idleSince.IsZero() {
+			continue
+		}
+		if oldest == nil || c.idleSince.Before(oldest.idleSince) {
+			oldest = c
+		}
+	}
+	return oldest
 }
 
 // room is how many connections of a trusted sender may wait at once.
@@ -505,15 +557,19 @@ func (l *LimitListener) capOf(key string, trusted bool) int {
 	return l.o.PerSender
 }
 
+const tooManyOfSender = "too many open connections from this sender"
+
 // check says which cap a new connection of this sender would break ("" when none). Caller holds l.mu.
 func (l *LimitListener) check(key string, trusted bool) string {
 	switch {
 	case l.open[key] >= l.capOf(key, trusted):
-		return "too many open connections from this sender"
+		return tooManyOfSender
 	case l.trusted+l.others >= l.o.Total:
 		return "too many open connections"
 	case !trusted && l.others >= l.o.Total-l.o.Reserved:
 		return "too many open connections (the rest is kept for the panel)"
+	case key != localKey && l.trusted+l.others-l.open[localKey] >= l.o.Total-l.o.LocalReserved:
+		return "too many open connections (the rest is kept for this machine)"
 	}
 	return ""
 }
@@ -527,6 +583,22 @@ func (l *LimitListener) count(key string, trusted bool) {
 		l.others++
 	}
 	l.peak = max(l.peak, l.trusted+l.others)
+}
+
+// countConn counts a connection in and keeps it for idleConn. Caller holds l.mu.
+func (l *LimitListener) countConn(c *limitedConn) {
+	l.count(c.sender, c.trusted)
+	l.conns[c] = struct{}{}
+}
+
+// uncount takes a connection out of the counts, once. Caller holds l.mu.
+func (l *LimitListener) uncount(c *limitedConn) bool {
+	if _, ok := l.conns[c]; !ok {
+		return false
+	}
+	delete(l.conns, c)
+	l.forget(c.sender, c.trusted)
+	return true
 }
 
 // admit counts a connection in, or says why not (the rules alone: nobody waits here).
@@ -545,10 +617,8 @@ func (l *LimitListener) admit(key string, trusted bool) (refusal string) {
 	return ""
 }
 
-// release gives a connection's slot back and hands it to the connections that wait for one, oldest first.
-func (l *LimitListener) release(key string, trusted bool) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
+// forget is the opposite of count. Caller holds l.mu.
+func (l *LimitListener) forget(key string, trusted bool) {
 	if l.open[key]--; l.open[key] <= 0 {
 		delete(l.open, key)
 	}
@@ -557,6 +627,28 @@ func (l *LimitListener) release(key string, trusted bool) {
 	} else {
 		l.others--
 	}
+}
+
+// release gives a slot back and hands it to the connections that wait for one, oldest first.
+func (l *LimitListener) release(key string, trusted bool) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.forget(key, trusted)
+	l.serveWaiting()
+}
+
+// connClosed is release for a connection that was closed (it is not counted any more if it was closed to make
+// room).
+func (l *LimitListener) connClosed(c *limitedConn) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.uncount(c) {
+		l.serveWaiting()
+	}
+}
+
+// serveWaiting gives free slots to the connections that wait, oldest first. Caller holds l.mu.
+func (l *LimitListener) serveWaiting() {
 	if l.closed || len(l.waiting) == 0 {
 		return
 	}
@@ -567,7 +659,7 @@ func (l *LimitListener) release(key string, trusted bool) {
 			continue
 		}
 		w.timer.Stop()
-		l.count(w.c.sender, true)
+		l.countConn(w.c)
 		l.waited++
 		l.ready <- w.c
 	}
@@ -602,14 +694,28 @@ func (l *LimitListener) refuse(c net.Conn, key, why string) {
 // limitedConn gives its slot back when it is closed (once).
 type limitedConn struct {
 	net.Conn
+	l       *LimitListener
 	sender  string // the key it is counted under
-	release func()
+	trusted bool
+	// idleSince is when its last request was answered, zero while a request is being read or served (l.mu).
+	idleSince time.Time
 }
 
 func (c *limitedConn) Close() error {
 	err := c.Conn.Close()
-	c.release()
+	c.l.connClosed(c)
 	return err
+}
+
+// ConnState is told by the HTTP server (Agent.Server) what the connection is doing.
+func (c *limitedConn) ConnState(s http.ConnState) {
+	c.l.mu.Lock()
+	if s == http.StateIdle {
+		c.idleSince = time.Now()
+	} else {
+		c.idleSince = time.Time{}
+	}
+	c.l.mu.Unlock()
 }
 
 // CloseWrite lets the HTTP server half-close the connection as it does on a plain TCP connection.

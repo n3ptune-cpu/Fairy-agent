@@ -526,6 +526,24 @@ func TestConnFloodWithPanelBurst(t *testing.T) {
 	}()
 	done := make(chan struct{})
 	go func() { wg.Wait(); close(done) }()
+	// meanwhile this machine asks, as the update's health check does: answered every time
+	asked := make(chan int, 1)
+	go func() {
+		n := 0
+		for {
+			select {
+			case <-done:
+				asked <- n
+				return
+			default:
+			}
+			if st, err := metricsFrom(floodLocal, addr); err != nil || st != 200 {
+				t.Errorf("/metrics from this machine during the flood: HTTP %d, %v (stats %+v)", st, err, ln.Stats())
+			}
+			n++
+			time.Sleep(5 * time.Millisecond)
+		}
+	}()
 	peakWaiting := 0
 	tick := time.NewTicker(2 * time.Millisecond)
 	defer tick.Stop()
@@ -550,7 +568,8 @@ func TestConnFloodWithPanelBurst(t *testing.T) {
 	runtime.ReadMemStats(&after)
 	grown := int64(after.HeapAlloc) - int64(before.HeapAlloc)
 	t.Logf("flood of %d connections from %d senders plus %d from the panel's address: refused %d, peak open %d, peak waiting %d, "+
-		"waited and served %d; heap %+d KiB", conns, senders, panelConns, s.Refused, s.Peak, peakWaiting, s.Waited, grown/1024)
+		"waited and served %d; this machine was answered %d times; heap %+d KiB", conns, senders, panelConns, s.Refused, s.Peak,
+		peakWaiting, s.Waited, <-asked, grown/1024)
 	if peakWaiting == 0 {
 		t.Error("no connection of the panel's address ever waited: the test did not reach the waiting room")
 	}
