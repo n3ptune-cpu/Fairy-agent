@@ -536,7 +536,7 @@ In `/etc/fairy/fairy.env`, each agent with self-update needs its control token (
 power control):
 
 ```sh
-AGENT_CONTROL_TOKEN_AGENT_1=paste-the-agent's-control-token
+AGENT_CONTROL_TOKEN_AGENT_1=paste-the-control-token-here
 ```
 
 In `/etc/fairy/config.yaml`, add to each such agent entry:
