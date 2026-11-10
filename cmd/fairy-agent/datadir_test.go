@@ -163,17 +163,29 @@ func TestFolderSpec(t *testing.T) {
 	if !read.matches(dirObj(t, sddlDataDir)) || !write.matches(dirObj(t, sddlAgentDir)) {
 		t.Fatal("the folders of an installed PC do not match: they would be rewritten on every run")
 	}
+	// a folder SYSTEM owns (update\stage on real PCs: the agent made it while it ran as LocalSystem) is left
+	// as it is; "only the owner differs" is for every other owner
+	sysOwned := dirObj(t, strings.Replace(sddlAgentDir, "O:BA", "O:SY", 1))
+	if !write.matches(sysOwned) || write.ownerOnly(sysOwned) || !read.matches(dirObj(t, strings.Replace(sddlDataDir, "O:BA", "O:SY", 1))) {
+		t.Fatal("a folder owned by SYSTEM is not taken as it is: its owner would be set on every real PC")
+	}
+	for name, owner := range map[string]string{"TrustedInstaller": tTI, "the agent's account": tSvc, "LocalService": "LS", "a user": tUser} {
+		o := dirObj(t, strings.Replace(sddlAgentDir, "O:BA", "O:"+owner, 1))
+		if write.matches(o) || !write.ownerOnly(o) {
+			t.Errorf("owner %s: matches %v, ownerOnly %v", name, write.matches(o), write.ownerOnly(o))
+		}
+	}
 	for name, s := range map[string]string{
-		"the other mask":       sddlAgentDir,
-		"inherits from above":  strings.Replace(sddlDataDir, "D:PAI", "D:AI", 1),
-		"owner SYSTEM":         strings.Replace(sddlDataDir, "O:BA", "O:SY", 1),
-		"owner a user":         sddlUserOwnedReset,
-		"one entry more":       sddlDataDir + "(A;;FR;;;BU)",
-		"one entry less":       "O:BAD:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)",
-		"not passed on":        strings.Replace(sddlDataDir, "(A;OICI;0x1200a9", "(A;;0x1200a9", 1),
-		"another service":      strings.Replace(sddlDataDir, tSvc, "S-1-5-80-1-2-3-4-5", 1),
-		"the same entry twice": "O:BAD:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;SY)(A;OICI;0x1200a9;;;" + tSvc + ")",
-		"no permissions":       "O:BAD:NO_ACCESS_CONTROL",
+		"the other mask":         sddlAgentDir,
+		"inherits from above":    strings.Replace(sddlDataDir, "D:PAI", "D:AI", 1),
+		"owner TrustedInstaller": strings.Replace(sddlDataDir, "O:BA", "O:"+tTI, 1),
+		"owner a user":           sddlUserOwnedReset,
+		"one entry more":         sddlDataDir + "(A;;FR;;;BU)",
+		"one entry less":         "O:BAD:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)",
+		"not passed on":          strings.Replace(sddlDataDir, "(A;OICI;0x1200a9", "(A;;0x1200a9", 1),
+		"another service":        strings.Replace(sddlDataDir, tSvc, "S-1-5-80-1-2-3-4-5", 1),
+		"the same entry twice":   "O:BAD:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;SY)(A;OICI;0x1200a9;;;" + tSvc + ")",
+		"no permissions":         "O:BAD:NO_ACCESS_CONTROL",
 	} {
 		if read.matches(dirObj(t, s)) {
 			t.Errorf("%s: matches", name)
@@ -351,7 +363,7 @@ func TestReinstallOnAHealthyPCChangesNothing(t *testing.T) {
 	// what earlier versions and other accounts of Fairy's own left behind does not unpair the PC either
 	p.put(t, "logs/agent.log.1", sddlLocalServiceFile, "from 0.4\n")                              // kept
 	p.put(t, "update/result.json", sddlLocalServiceFile, "{}")                                    // the old in-service updater's: moved aside
-	p.fs.sddl[filepath.Join(p.dir, "state")] = strings.Replace(sddlAgentDir, "O:BA", "O:SY", 1)   // made by a LocalSystem agent
+	p.fs.sddl[filepath.Join(p.dir, "state")] = strings.Replace(sddlAgentDir, "O:BA", "O:SY", 1)   // made by a LocalSystem agent: left as it is
 	p.fs.sddl[filepath.Join(p.dir, "logs")] = strings.Replace(sddlAgentDir, "O:BA", "O:"+tSvc, 1) // owned by the agent's account
 	rep, out, err := p.run(t)
 	if err != nil {
@@ -363,9 +375,10 @@ func TestReinstallOnAHealthyPCChangesNothing(t *testing.T) {
 	if got := p.fs.did("move"); len(got) != 1 || !strings.HasSuffix(got[0], "result.json") {
 		t.Fatalf("moved aside: %v", got)
 	}
-	// the two folders of the agent's own got Administrators as their owner, on the folder itself: nothing in
-	// them was touched, and no permissions were set (Windows would pass those on into them)
-	if got := p.fs.did("setowner"); len(got) != 2 || len(p.fs.did("secure")) != 0 {
+	// the folder the agent's account owned got Administrators as its owner, on the folder itself: nothing in
+	// it was touched, and no permissions were set (Windows would pass those on into it). The one SYSTEM owns
+	// was not written to at all.
+	if got := p.fs.did("setowner"); len(got) != 1 || !strings.HasSuffix(got[0], "logs") || len(p.fs.did("secure")) != 0 {
 		t.Fatalf("owner set on %v, permissions on %v", got, p.fs.did("secure"))
 	}
 	if p.read(t, "state/pairing.json") != before["state/pairing.json"] || p.read(t, "logs/agent.log") != before["logs/agent.log"] {
@@ -808,9 +821,8 @@ func TestEnsureFolder(t *testing.T) {
 	// the folder itself. No permissions are set (Windows would pass them on to what is inside), and nothing
 	// inside is touched.
 	for name, s := range map[string]string{
-		"owned by the agent's account":         strings.Replace(sddlAgentDir, "O:BA", "O:"+tSvc, 1),
-		"owned by LocalService (before 0.5)":   strings.Replace(sddlAgentDir, "O:BA", "O:LS", 1),
-		"owner SYSTEM (made by the old agent)": strings.Replace(sddlAgentDir, "O:BA", "O:SY", 1),
+		"owned by the agent's account":       strings.Replace(sddlAgentDir, "O:BA", "O:"+tSvc, 1),
+		"owned by LocalService (before 0.5)": strings.Replace(sddlAgentDir, "O:BA", "O:LS", 1),
 	} {
 		p.fs.calls, p.fs.sddl[state] = nil, s
 		if err := f.ensure(state, write); err != nil || strings.Join(p.fs.calls, ",") != "setowner "+state {
@@ -820,6 +832,13 @@ func TestEnsureFolder(t *testing.T) {
 			t.Errorf("%s: not corrected: %+v", name, o)
 		}
 	}
+	// owned by SYSTEM (made by the agent while it ran as LocalSystem, as update\stage is on real PCs): as good
+	// as Administrators, nothing is written
+	p.fs.calls, p.fs.sddl[state] = nil, strings.Replace(sddlAgentDir, "O:BA", "O:SY", 1)
+	if err := f.ensure(state, write); err != nil || len(p.fs.calls) != 0 {
+		t.Errorf("owner SYSTEM: %v %v", err, p.fs.calls)
+	}
+	p.fs.sddl[state] = sddlAgentDir
 	// One of the agent's own folders whose permissions differ: they are not set in place (rule 1). install /
 	// setup-self-update replace such a folder as a whole; everyone else is told to run that.
 	for name, s := range map[string]string{

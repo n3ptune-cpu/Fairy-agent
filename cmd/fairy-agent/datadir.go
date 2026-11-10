@@ -53,6 +53,7 @@ import (
 
 const (
 	sidAdmins       = "S-1-5-32-544"
+	sidSystem       = "S-1-5-18"
 	sidLocalService = "S-1-5-19" // the agent's account before 0.5: files it made in the agent's folders remain
 
 	dataFolderName = "fairy-agent"
@@ -244,6 +245,13 @@ func zoneOf(rel string) (agentZone, zoneRoot bool) {
 // folderSpec is the security of one of Fairy's own folders: owner Administrators; administrators and SYSTEM
 // full control; the agent's account read (or, in its own folders, modify); nothing taken from the folder
 // above; passed on to everything inside.
+//
+// A folder that SYSTEM owns is taken as it is too (specOwner). Real PCs have one: update\stage was made by
+// the agent itself while it still ran as LocalSystem, so it belongs to SYSTEM and not to Administrators.
+// Nothing is gained by changing that: SYSTEM is the account the helper and the updater run as, the folder's
+// own entries give it full control, and all an owner can do beyond its entries is change the permissions,
+// which that full control includes. Setting the owner there was a write (and a "repaired:" line) on every
+// such PC for no gain in safety. A folder owned by anyone else is still corrected or replaced.
 type folderSpec struct {
 	agentSID string
 	write    bool
@@ -268,7 +276,7 @@ func (s folderSpec) sddl() string {
 // aces is the same list as sddl's, for comparing with what a folder has.
 func (s folderSpec) aces() []collect.ACE {
 	const oici = 0x3
-	l := []collect.ACE{{Kind: collect.ACEAllow, Flags: oici, SID: "S-1-5-18", Mask: rtFileAll},
+	l := []collect.ACE{{Kind: collect.ACEAllow, Flags: oici, SID: sidSystem, Mask: rtFileAll},
 		{Kind: collect.ACEAllow, Flags: oici, SID: sidAdmins, Mask: rtFileAll}}
 	if s.agentSID != "" {
 		l = append(l, collect.ACE{Kind: collect.ACEAllow, Flags: oici, SID: s.agentSID, Mask: s.agentMask()})
@@ -276,10 +284,14 @@ func (s folderSpec) aces() []collect.ACE {
 	return l
 }
 
-// matches reports whether a folder already has exactly this security (then nothing is written).
+// specOwner: the owners with which one of Fairy's own folders is left as it is (see folderSpec).
+func specOwner(sid string) bool { return sid == sidAdmins || sid == sidSystem }
+
+// matches reports whether a folder already has this security (then nothing is written): exactly these
+// entries, nothing taken from the folder above, and Administrators or SYSTEM as its owner.
 func (s folderSpec) matches(o secObj) bool {
 	want := s.aces()
-	if !o.Dir || o.Reparse || o.NullDACL || !o.Protected || o.Owner != sidAdmins || len(o.ACEs) != len(want) {
+	if !o.Dir || o.Reparse || o.NullDACL || !o.Protected || !specOwner(o.Owner) || len(o.ACEs) != len(want) {
 		return false
 	}
 	used := make([]bool, len(o.ACEs))
@@ -298,7 +310,7 @@ next:
 
 // ownerOnly reports whether a folder differs from the spec in its owner alone.
 func (s folderSpec) ownerOnly(o secObj) bool {
-	if o.Owner == sidAdmins {
+	if specOwner(o.Owner) {
 		return false
 	}
 	o.Owner = sidAdmins
