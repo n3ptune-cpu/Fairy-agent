@@ -154,10 +154,16 @@ func (c *NutConfig) read(ctx context.Context, timeout time.Duration) ([]map[stri
 	return out, nil
 }
 
-// RowMap converts a typed row to the generic shape agents send.
+// RowMap converts a typed row to the generic shape agents send. A row that cannot be written as JSON (a value
+// that is not a number; devices.UPSFromVars never builds one) becomes a failed row with the UPS's name, so it
+// shows as an error instead of silently dropping out of the answer.
 func RowMap(r devices.UPSRow) map[string]any {
-	b, _ := json.Marshal(r)
 	var m map[string]any
-	_ = json.Unmarshal(b, &m)
+	if b, err := json.Marshal(r); err == nil {
+		_ = json.Unmarshal(b, &m)
+	}
+	if m == nil {
+		m = map[string]any{"name": r.Name, "ok": false, "error": "ups reports impossible values", "flags": []any{}}
+	}
 	return m
 }

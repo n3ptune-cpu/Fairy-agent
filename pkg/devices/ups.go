@@ -64,23 +64,32 @@ type UPSRow struct {
 	Error           *string  `json:"error"`
 }
 
+// MaxUPSRuntimeS is the longest battery run time taken from a UPS (about 31 years, and it fits an int on every
+// platform); anything longer is not a reading.
+const MaxUPSRuntimeS = 1_000_000_000
+
 // UPSFromVars normalises a NUT variable set. CyberPower/usbhid-ups often has no ups.realpower: watts are then
 // estimated as ups.load % x ups.realpower.nominal (WattsEstimated).
+//
+// A value upsd reports that cannot be a reading is left out (nil, shown as unknown) and the rest of the row
+// stays: "NaN", "Inf" or a number beyond devices.MaxMagnitude anywhere, a battery charge outside 0-100, a
+// negative load or nominal power, a run time below 0 or above MaxUPSRuntimeS. The row can therefore always be
+// written as JSON, and the UPS's state (on battery, low battery) still reaches the panel.
 func UPSFromVars(name string, v map[string]string, description string) UPSRow {
 	raw := v["ups.status"]
 	state, flags := ParseUPSStatus(raw)
-	load, nominal := numVar(v, "ups.load"), numVar(v, "ups.realpower.nominal")
+	load, nominal := notNegative(numVar(v, "ups.load")), notNegative(numVar(v, "ups.realpower.nominal"))
 	watts, est := numVar(v, "ups.realpower"), false
-	if watts == nil && load != nil && nominal != nil && *nominal != 0 {
-		w := round(*load**nominal/100, 1)
-		watts, est = &w, true
+	if watts == nil {
+		watts = nutEstimate(load, nominal)
+		est = watts != nil
 	}
 	var runtime *int
-	if r := numVar(v, "battery.runtime"); r != nil {
+	if r := NumIn(numVar(v, "battery.runtime"), 0, MaxUPSRuntimeS); r != nil {
 		x := int(*r)
 		runtime = &x
 	}
-	row := UPSRow{Name: name, State: state, Flags: flags, BatteryCharge: numVar(v, "battery.charge"),
+	row := UPSRow{Name: name, State: state, Flags: flags, BatteryCharge: NumIn(numVar(v, "battery.charge"), 0, 100),
 		BatteryRuntimeS: runtime, BatteryVoltage: numVar(v, "battery.voltage"), LoadPercent: load, Watts: watts,
 		WattsEstimated: est, NominalW: nominal, InputVoltage: numVar(v, "input.voltage"),
 		OutputVoltage: numVar(v, "output.voltage"), InputFrequency: numVar(v, "input.frequency", "output.frequency"),

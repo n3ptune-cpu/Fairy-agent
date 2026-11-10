@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"maps"
 	"sync"
@@ -172,6 +173,17 @@ func (r *Relay) PollUPS(ctx context.Context, u *ups.Source) {
 	if err != nil {
 		msg := devices.Describe(err)
 		rows = []map[string]any{{"name": "upsd", "ok": false, "error": msg, "flags": []string{}}}
+	}
+	// A row that cannot be written as JSON would fail the whole /metrics answer, and an empty one would make
+	// its UPS silently drop out of it: both become a failed row the panel shows.
+	for i, row := range rows {
+		if _, err := json.Marshal(row); err != nil || len(row) == 0 {
+			name, _ := row["name"].(string)
+			if name == "" {
+				name = "upsd"
+			}
+			rows[i] = map[string]any{"name": name, "ok": false, "error": "ups reports impossible values", "flags": []string{}}
+		}
 	}
 	r.mu.Lock()
 	r.upsRows[u.ID] = rows

@@ -1,18 +1,23 @@
 package agent
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"math"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/n3ptune-cpu/Fairy-agent/pkg/agent/agenttest"
 	"github.com/n3ptune-cpu/Fairy-agent/pkg/devices"
 	"github.com/n3ptune-cpu/Fairy-agent/pkg/power"
+	"github.com/n3ptune-cpu/Fairy-agent/pkg/ups"
 )
 
 // fakePlug answers every request with this JSON body (a Tasmota or Shelly on the agent's network).
@@ -129,5 +134,111 @@ func TestRelaySumIsChecked(t *testing.T) {
 		if len(c.watts) == 1 && c.want == nil && (ps[0]["voltage"] != nil || ps[0]["current"] != nil || ps[0]["energy_kwh_total"] != nil) {
 			t.Errorf("%s: other impossible values kept: %v", name, ps[0])
 		}
+	}
+}
+
+// fakeUpsd is a upsd whose UPS "cp" reports these variables.
+func fakeUpsd(t *testing.T, vars map[string]string) int {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ln.Close() })
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				defer c.Close()
+				r := bufio.NewReader(c)
+				for {
+					line, err := r.ReadString('\n')
+					if err != nil {
+						return
+					}
+					switch line = strings.TrimSpace(line); {
+					case line == "LIST UPS":
+						fmt.Fprint(c, "BEGIN LIST UPS\nUPS cp \"CyberPower\"\nEND LIST UPS\n")
+					case strings.HasPrefix(line, "LIST VAR "):
+						name := strings.TrimPrefix(line, "LIST VAR ")
+						fmt.Fprintf(c, "BEGIN LIST VAR %s\n", name)
+						for k, v := range vars {
+							fmt.Fprintf(c, "VAR %s %s \"%s\"\n", name, k, v)
+						}
+						fmt.Fprintf(c, "END LIST VAR %s\n", name)
+					default:
+						return
+					}
+				}
+			}()
+		}
+	}()
+	return ln.Addr().(*net.TCPAddr).Port
+}
+
+// Audit 3, L11 (agent side): a UPS whose server sends `VAR cp ups.realpower "NaN"` became an empty entry in
+// the agent's /metrics (the panel then silently skipped it and kept showing "online, charge 100"). Now its row
+// arrives with the live state, and the impossible values are unknown. The same UPS as a `type: nut` power source
+// reports no watts instead of failing the answer.
+func TestMetricsKeepsUPSWithImpossibleValues(t *testing.T) {
+	port := fakeUpsd(t, map[string]string{"ups.status": "OB LB", "battery.charge": "9", "battery.runtime": "-5",
+		"ups.realpower": "NaN", "ups.load": "NaN", "input.voltage": "Inf"})
+	relay, err := NewRelay(
+		[]map[string]any{{"id": "ups-power", "type": "nut", "host": "127.0.0.1", "port": port, "ups": "cp"}},
+		[]map[string]any{{"id": "rack", "host": "127.0.0.1", "port": port}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	relay.PollOnce(context.Background())
+	st, body := agentWithRelay(t, relay)("/metrics")
+	var m map[string]any
+	if st != 200 || json.Unmarshal(body, &m) != nil {
+		t.Fatalf("/metrics: status %d, body %.200s", st, body)
+	}
+	us, _ := m["ups"].([]any)
+	if len(us) != 1 {
+		t.Fatalf("ups rows: %v", m["ups"])
+	}
+	row, _ := us[0].(map[string]any)
+	if row["name"] != "cp" || row["ok"] != true || row["state"] != "low_battery" || row["battery_charge"] != 9.0 ||
+		row["watts"] != nil || row["load_percent"] != nil || row["battery_runtime_s"] != nil || row["input_voltage"] != nil {
+		t.Errorf("ups row: %v", row)
+	}
+	ps, _ := m["power_sources"].([]any)
+	if len(ps) != 1 {
+		t.Fatalf("power_sources: %v", m["power_sources"])
+	}
+	if p := ps[0].(map[string]any); p["ok"] != false || p["watts"] != nil || !strings.Contains(fmt.Sprint(p["error"]), "ups.realpower") {
+		t.Errorf("nut power source without a usable number is an error row: %v", p)
+	}
+}
+
+// A UPS source of another kind (ups.Extra) that hands over a row which cannot be written, or an empty one: the
+// relay turns it into a failed row with the UPS's name, and the good row next to it stays.
+func TestRelayUPSRowsCanAlwaysBeWritten(t *testing.T) {
+	src := &ups.Source{ID: "x", Read: func(context.Context, time.Duration) ([]map[string]any, error) {
+		return []map[string]any{
+			{"name": "a", "ok": true, "state": "online", "watts": math.NaN()},
+			nil,
+			{"name": "b", "ok": true, "state": "online", "nested": map[string]any{"v": math.Inf(1)}},
+			{"name": "c", "ok": true, "state": "online", "watts": 225.0},
+		}, nil
+	}}
+	r := &Relay{upsRows: map[string][]map[string]any{}, upses: []*ups.Source{src}}
+	r.PollUPS(context.Background(), src)
+	_, us := r.Rows()
+	if _, err := json.Marshal(us); err != nil || len(us) != 4 {
+		t.Fatal(us, err)
+	}
+	for i, name := range []string{"a", "upsd", "b"} {
+		if us[i]["name"] != name || us[i]["ok"] != false || us[i]["error"] != "ups reports impossible values" {
+			t.Errorf("row %d: %v", i, us[i])
+		}
+	}
+	if us[3]["name"] != "c" || us[3]["ok"] != true || us[3]["watts"] != 225.0 {
+		t.Errorf("good row: %v", us[3])
 	}
 }
