@@ -1,13 +1,18 @@
 #Requires -RunAsAdministrator
 <#
 .SYNOPSIS
-  Fairy agent installer for Windows, the machine side of the panel's "Add host". One line in an
-  Administrator PowerShell (the panel shows it with the code filled in):
+  Fairy agent installer for Windows, the machine side of the panel's "Add host".
 
-  iwr https://github.com/n3ptune-cpu/Fairy-agent/releases/latest/download/install.ps1 -OutFile $env:TEMP\fairy-install.ps1; powershell -ExecutionPolicy Bypass -File $env:TEMP\fairy-install.ps1 -Join CODE -PanelAddress 100.x.y.z [-PowerControl] [-SelfUpdate] [-Wol] [-Ups] [-UpsName NAME] [-CoreTemp] [-Ipmi]
+  Use the one line from the panel's Add host (or Re-pair) dialog, in an Administrator PowerShell. It names one
+  checked release, refuses to run this script unless its SHA-256 is the one the panel verified, and passes
+  the release's fingerprint (-SumsSha256). There is no "latest" one-liner any more: nobody can check a line
+  that downloads whatever is newest and runs it.
+
+  install.ps1 -ReleaseUrl URL -SumsSha256 HASH -Join CODE -PanelAddress 100.x.y.z
+              [-PowerControl] [-SelfUpdate] [-Wol] [-Ups] [-UpsName NAME] [-CoreTemp] [-Ipmi]
 
 .DESCRIPTION
-  1. downloads the latest release: fairy-agent-windows-amd64.exe, SHA256SUMS (+ signature), VERSION and
+  1. downloads the release: fairy-agent-windows-amd64.exe, SHA256SUMS (+ signature), VERSION and
      install-fairy-agent.ps1, and checks each file's SHA-256 against SHA256SUMS and SHA256SUMS' signature with
      the release key built into the downloaded fairy-agent. An already installed fairy-agent.exe is never run
      before it has been replaced by the checked one (fairy-agent 0.4.2 and older let the service's own account
@@ -21,7 +26,9 @@
 
   -SumsSha256 <sha256 of SHA256SUMS>: the panel checks the release's signature with its own built-in key and
   passes this hash; the script then refuses a SHA256SUMS with any other hash before trusting a line of it (so
-  even a first install does not rest on the downloaded program's own key).
+  even a first install does not rest on the downloaded program's own key). Without it the script does not
+  run, unless -Unverified is given: then the downloaded program checks its own download, and the script says
+  "NOT independently verified".
 
   Safe to run again (e.g. with a new code from the panel's Re-pair): settings are kept, the tokens are
   replaced by new ones (the panel gets them by pairing). No driver,
@@ -38,6 +45,7 @@ param(
     [switch]$CoreTemp,
     [switch]$Ipmi,
     [string]$SumsSha256 = '',
+    [switch]$Unverified,
     [string]$ReleaseUrl = 'https://github.com/n3ptune-cpu/Fairy-agent/releases/latest/download'
 )
 $ErrorActionPreference = 'Stop'
@@ -46,6 +54,10 @@ $ProgressPreference = 'SilentlyContinue'
 
 if ($PanelAddress -notmatch '^\d{1,3}(\.\d{1,3}){3}$') { throw "-PanelAddress must be the panel's Tailscale IPv4 address, e.g. 100.88.109.47" }
 if ($SumsSha256 -and $SumsSha256 -notmatch '^[0-9a-fA-F]{64}$') { throw '-SumsSha256 must be 64 hex digits (the SHA-256 of SHA256SUMS)' }
+# The release's fingerprint from the panel. Without it nothing vouches for the download but the download itself.
+if (-not $SumsSha256 -and -not $Unverified) {
+    throw "no release fingerprint (-SumsSha256). Use the line from the panel's Add host dialog: it carries the fingerprint of the release the panel checked. To install without it, at your own risk, add -Unverified."
+}
 
 # Runs a native program without letting Windows PowerShell 5.1 turn its stderr into a terminating error.
 function Invoke-Quiet([string]$cmd, [string[]]$cmdArgs) {
@@ -57,7 +69,7 @@ function Invoke-Quiet([string]$cmd, [string[]]$cmdArgs) {
 $dir = Join-Path $env:TEMP ('fairy-install-' + [guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Force -Path $dir | Out-Null
 try {
-    Write-Host "fairy: downloading the latest release from $ReleaseUrl"
+    Write-Host "fairy: downloading the release from $ReleaseUrl"
     $files = 'fairy-agent-windows-amd64.exe', 'SHA256SUMS', 'SHA256SUMS.sig', 'VERSION', 'install-fairy-agent.ps1'
     foreach ($f in $files) { Invoke-WebRequest -UseBasicParsing -Uri "$ReleaseUrl/$f" -OutFile (Join-Path $dir $f) }
 
@@ -88,8 +100,14 @@ try {
     $new = Join-Path $dir 'fairy-agent-windows-amd64.exe'
     Unblock-File $new
     $rc = (Invoke-Quiet $new @('verify-release', $dir)).Code
-    if ($rc -eq 0) { Write-Host ("fairy: release " + (Get-Content (Join-Path $dir 'VERSION')) + " verified (signature and hashes)") }
-    elseif ($rc -eq 3) { Write-Warning 'this build has no release key: the signature was not checked (hashes only)' }
+    $relName = "" + (Get-Content -LiteralPath (Join-Path $dir 'VERSION') -TotalCount 1)
+    if ($rc -eq 0 -and $SumsSha256) { Write-Host "fairy: release $relName verified (the panel's fingerprint, signature and hashes)" }
+    elseif ($rc -eq 0) {
+        Write-Warning "release $relName is NOT independently verified: no fingerprint from the panel (-Unverified)."
+        Write-Warning 'Its signature was checked only with the key built into the downloaded program, which came with the same download.'
+    }
+    elseif ($rc -eq 3 -and $SumsSha256) { Write-Warning "this build has no release key: the signature was not checked (the panel's fingerprint and hashes only)" }
+    elseif ($rc -eq 3) { throw 'this build has no release key and no fingerprint from the panel was given: nothing vouches for it' }
     else { throw 'the release signature check failed' }
 
     # Tailscale must be up without anyone signed in, or the panel cannot reach this PC after a reboot or a
