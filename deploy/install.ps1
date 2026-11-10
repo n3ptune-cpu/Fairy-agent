@@ -197,8 +197,18 @@ try {
     for ($i = 0; $i -lt 60; $i++) {
         if ((Invoke-Quiet $exe @('pair-status')).Code -eq 0) { Write-Host 'fairy: paired with the panel. The host appears there within a few seconds. Done.'; return }
         if ((Get-Service fairy-agent).Status -ne 'Running') {
-            Get-Content (Join-Path $env:ProgramData 'fairy-agent\logs\agent.log') -Tail 15 -ErrorAction SilentlyContinue
-            throw 'fairy-agent is not running (see above)'
+            # The log folder is written by the agent's own account: a link there would put lines of another
+            # file on the administrator's screen. Shown only when folder and file are no links.
+            $logDir = Join-Path $env:ProgramData 'fairy-agent\logs'
+            $log = Join-Path $logDir 'agent.log'
+            $plain = $true
+            foreach ($p in @($logDir, $log)) {
+                $it = Get-Item -LiteralPath $p -Force -ErrorAction SilentlyContinue
+                if (-not $it -or ($it.Attributes -band [IO.FileAttributes]::ReparsePoint)) { $plain = $false }
+            }
+            if ($plain) { Get-Content -LiteralPath $log -Tail 15 -ErrorAction SilentlyContinue }
+            else { Write-Host 'fairy: the agent log is missing or is a link: not shown' }
+            throw 'fairy-agent is not running (see above; log: C:\ProgramData\fairy-agent\logs\agent.log)'
         }
         Start-Sleep -Seconds 2
     }

@@ -170,8 +170,23 @@ if ($helperSvc -and $helperSvc.Status -ne 'Stopped') { Stop-Service -Name 'fairy
 if ($svc) {
     # fairy-agent 0.4.2 and older let the service's own account change this folder (for self-update). Take that
     # back BEFORE copying, so nothing can swap the program between the copy and the check below.
-    & (Join-Path $sys 'icacls.exe') $dir /remove:g 'NT SERVICE\fairy-agent' /T /C /Q | Out-Null
-    if ($LASTEXITCODE -ne 0) { throw "could not remove the service's write access to $dir (icacls exit code $LASTEXITCODE)" }
+    # Never through a link: that account could have put a junction into the folder, and icacls /T would walk
+    # into it and change permissions wherever it points, as Administrator. So: no /T, /L (a link itself, never
+    # what it points to), and the files of this one flat folder one by one. A link or a sub-folder is not
+    # expected here; it is reported and left alone.
+    $icacls = Join-Path $sys 'icacls.exe'
+    $targets = @($dir)
+    foreach ($item in @(Get-ChildItem -LiteralPath $dir -Force)) {
+        if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -or $item.PSIsContainer) {
+            Write-Warning "unexpected link or folder in ${dir}: $($item.Name) (left as it is, not followed)"
+            continue
+        }
+        $targets += $item.FullName
+    }
+    foreach ($t in $targets) {
+        & $icacls $t /remove:g 'NT SERVICE\fairy-agent' /L /C /Q | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw "could not remove the service's write access to $t (icacls exit code $LASTEXITCODE)" }
+    }
 }
 if (-not $keep) {
     # a new file, so it is owned by Administrators (0.4.2's in-service updater left one owned by the service account)
