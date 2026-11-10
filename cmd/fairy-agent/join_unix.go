@@ -32,7 +32,7 @@ func secureNew(path string) error {
 }
 
 // agentIDs is the fairy-agent user's uid and gid (ok=false when it does not exist, e.g. in tests).
-func agentIDs() (int, int, bool) {
+var agentIDs = func() (int, int, bool) {
 	if runtime.GOOS != "linux" || os.Geteuid() != 0 {
 		return 0, 0, false
 	}
@@ -45,12 +45,21 @@ func agentIDs() (int, int, bool) {
 	return uid, gid, err1 == nil && err2 == nil
 }
 
-// prepareStateDir makes the agent's state folder (systemd's StateDirectory, 0700 fairy-agent) if needed.
+// prepareStateDir makes the agent's state folder (systemd's StateDirectory, 0700 fairy-agent) if needed. The
+// folder is opened without following a link and its owner is set on that descriptor, never by name.
 func prepareStateDir(dir string) error {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
-	st, err := os.Lstat(dir)
+	d, err := os.OpenFile(dir, os.O_RDONLY|syscall.O_DIRECTORY|syscall.O_NOFOLLOW, 0)
+	if err != nil {
+		if errors.Is(err, syscall.ELOOP) || errors.Is(err, syscall.ENOTDIR) || errors.Is(err, syscall.EMLINK) {
+			return errors.New("not a folder (a link is not accepted)")
+		}
+		return err
+	}
+	defer d.Close()
+	st, err := d.Stat()
 	if err != nil {
 		return err
 	}
@@ -58,15 +67,7 @@ func prepareStateDir(dir string) error {
 		return errors.New("not a folder")
 	}
 	if uid, gid, ok := agentIDs(); ok {
-		return os.Chown(dir, uid, gid)
-	}
-	return nil
-}
-
-// handOver makes the pairing state the agent's own: it closes it after pairing.
-func handOver(path string) error {
-	if uid, gid, ok := agentIDs(); ok {
-		return os.Chown(path, uid, gid)
+		return d.Chown(uid, gid)
 	}
 	return nil
 }

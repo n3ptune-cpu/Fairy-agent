@@ -193,11 +193,15 @@ func join(o joinOpts, out io.Writer) error {
 			st.Proxmox = g
 		}
 	}
+	// The state folder belongs to the agent's account and this runs as root: the file gets its owner while it
+	// is still open under its temporary name (fchown); nothing in that folder is changed by name afterwards.
 	path := filepath.Join(o.stateDir, "pairing.json")
-	if err := enroll.WriteState(path, st); err != nil {
-		return err
+	if uid, gid, ok := agentIDs(); ok {
+		err = enroll.WriteStateOwned(path, st, uid, gid)
+	} else {
+		err = enroll.WriteState(path, st)
 	}
-	if err := handOver(path); err != nil {
+	if err != nil {
 		return err
 	}
 	fmt.Fprintf(out, "join code stored: the panel (%s) can pair until %s\n", o.panel, time.Unix(st.ExpiresAt, 0).Format("15:04"))

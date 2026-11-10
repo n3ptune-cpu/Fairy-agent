@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -186,14 +187,31 @@ func (s State) Describe(now time.Time) string {
 	return fmt.Sprintf("waiting for the panel (%s) until %s", s.Panel, time.Unix(s.ExpiresAt, 0).Format(time.RFC3339))
 }
 
-// ReadState reads a pairing state file. A missing file is os.ErrNotExist.
+// maxStateSize is the largest pairing state file ReadState accepts.
+const maxStateSize = 64 << 10
+
+// ReadState reads a pairing state file. A missing file is os.ErrNotExist. The file must be a regular file:
+// a symbolic link under that name is not followed (the folder belongs to the agent's account, the reader may
+// be root).
 func ReadState(path string) (State, error) {
 	var s State
-	b, err := os.ReadFile(path)
+	f, err := os.OpenFile(path, os.O_RDONLY|openStateFlags, 0)
 	if err != nil {
 		return s, err
 	}
-	if len(b) > 64<<10 {
+	defer f.Close()
+	fi, err := f.Stat()
+	if err != nil {
+		return s, err
+	}
+	if !fi.Mode().IsRegular() {
+		return s, errors.New(path + ": not a regular file")
+	}
+	b, err := io.ReadAll(io.LimitReader(f, maxStateSize+1))
+	if err != nil {
+		return s, err
+	}
+	if len(b) > maxStateSize {
 		return s, errors.New(path + ": too large")
 	}
 	if err := json.Unmarshal(b, &s); err != nil {
@@ -202,17 +220,33 @@ func ReadState(path string) (State, error) {
 	return s, nil
 }
 
-// WriteState replaces a pairing state file in one step (0600).
+// WriteState replaces a pairing state file in one step (0600, owned by the caller).
 func WriteState(path string, s State) error {
+	return writeState(path, s, nil)
+}
+
+// WriteStateOwned is WriteState for a caller that is not the file's future owner: `fairy-agent join` runs as
+// root and the state belongs to the agent's account, in a folder that account owns. The owner is set on the
+// new file while it is still open (fchown on the descriptor), before it gets its name; nothing is changed by
+// name afterwards, so a link put under that name by the folder's owner is never followed.
+func WriteStateOwned(path string, s State, uid, gid int) error {
+	return writeState(path, s, func(f *os.File) error { return f.Chown(uid, gid) })
+}
+
+// beforeRename is a test hook: called with the temporary file's name after it is written and owned, before it
+// is renamed to its final name.
+var beforeRename func(tmp string)
+
+func writeState(path string, s State, own func(*os.File) error) error {
 	b, err := json.MarshalIndent(s, "", "  ")
 	if err != nil {
 		return err
 	}
-	tmp, err := os.CreateTemp(filepath.Dir(path), ".pairing-*.tmp")
+	tmp, err := createStateTemp(filepath.Dir(path))
 	if err != nil {
 		return err
 	}
-	defer os.Remove(tmp.Name())
+	defer os.Remove(tmp.Name()) // unlink never follows a link
 	if _, err := tmp.Write(append(b, '\n')); err != nil {
 		tmp.Close()
 		return err
@@ -221,6 +255,12 @@ func WriteState(path string, s State) error {
 		tmp.Close()
 		return err
 	}
+	if own != nil {
+		if err := own(tmp); err != nil {
+			tmp.Close()
+			return err
+		}
+	}
 	if err := tmp.Sync(); err != nil {
 		tmp.Close()
 		return err
@@ -228,5 +268,25 @@ func WriteState(path string, s State) error {
 	if err := tmp.Close(); err != nil {
 		return err
 	}
-	return os.Rename(tmp.Name(), path)
+	if beforeRename != nil {
+		beforeRename(tmp.Name())
+	}
+	return os.Rename(tmp.Name(), path) // rename replaces a link under the final name, it does not follow it
+}
+
+// createStateTemp makes a new, empty 0600 file with a random name in dir. O_EXCL: the name did not exist, so
+// the descriptor is a file this process made, whatever else is in the folder.
+func createStateTemp(dir string) (*os.File, error) {
+	for i := 0; ; i++ {
+		var r [8]byte
+		if _, err := rand.Read(r[:]); err != nil {
+			return nil, err
+		}
+		name := filepath.Join(dir, ".pairing-"+hex.EncodeToString(r[:])+".tmp")
+		f, err := os.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_EXCL|createStateFlags, 0o600)
+		if errors.Is(err, os.ErrExist) && i < 100 {
+			continue
+		}
+		return f, err
+	}
 }

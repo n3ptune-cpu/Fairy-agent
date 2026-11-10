@@ -26,5 +26,5 @@ func prepareStateDir(dir string) error {
 	return applyACL(dir, "D:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1301bf;;;"+sid.String()+")")
 }
 
-// handOver: the file inherits the state folder's permissions.
-func handOver(string) error { return nil }
+// agentIDs: there is no owner to set, the pairing state inherits the state folder's permissions.
+func agentIDs() (int, int, bool) { return 0, 0, false }
