@@ -50,6 +50,10 @@ ipmi:
   sensor_interval_s: 10
 
 # Supermicro fan control (panel: fan_control: {vendor: supermicro, control_token_env: ...}). Needs ipmi.
+# A fixed speed set from the panel does not outlive its watchdog: on Linux the fans go back to auto_mode when
+# the agent stops, restarts or is updated (set the speed again afterwards); on Windows when the helper stops.
+# A speed below 100 % is refused while the CPU is at or above max_temp_c, for 5 minutes after the watchdog
+# acted, and while no temperature is known (see AGENT.md, "Fan control").
 fan_control:
   enabled: false
   min_duty: 30                 # never lower than 30 %
