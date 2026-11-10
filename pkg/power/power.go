@@ -40,7 +40,7 @@ func (b Base) validate() error {
 	if b.System != "" && !configutil.ValidID(b.System) {
 		return fmt.Errorf("power source %s: invalid system id", b.ID)
 	}
-	if b.Interval != nil && (*b.Interval < 1 || *b.Interval > 300) {
+	if b.Interval != nil && !(*b.Interval >= 1 && *b.Interval <= 300) { // "not inside": .nan fails too
 		return fmt.Errorf("power source %s: interval must be 1-300 s", b.ID)
 	}
 	return nil

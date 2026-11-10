@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"log/slog"
+	"math"
 	"strings"
 	"sync"
 	"time"
@@ -132,6 +133,12 @@ func (b *BMC) FanList() []collect.Fan {
 
 // MaxCPUTemp returns the hottest CPU temperature among the BMC's and the OS's sensors (any temperature when
 // none is labelled as the CPU's). ok is false when there is no reading at all.
+//
+// A reading that is not a number (NaN) is no reading: a comparison with NaN is never true, so a NaN in first
+// place used to stay "the hottest" and the fan watchdog never acted. -Inf is skipped as well; +Inf stays what
+// it always was, hotter than every limit (the watchdog fails safe on it). When the sensors labelled as the
+// CPU's exist but none of them has a usable reading, ok is false (the watchdog then counts it as "no
+// temperature" and fails safe after three misses) instead of falling back to some other, cooler sensor.
 func MaxCPUTemp(bmc []ipmi.Reading, local []collect.Temp) (float64, string, bool) {
 	type cand struct {
 		name string
@@ -163,6 +170,9 @@ func MaxCPUTemp(bmc []ipmi.Reading, local []collect.Temp) (float64, string, bool
 	best, name, ok := 0.0, "", false
 	for _, c := range cs {
 		if anyCPU && !c.cpu {
+			continue
+		}
+		if math.IsNaN(c.v) || math.IsInf(c.v, -1) {
 			continue
 		}
 		if !ok || c.v > best {

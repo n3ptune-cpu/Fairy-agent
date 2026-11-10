@@ -69,7 +69,11 @@ func interval(s power.Source) time.Duration {
 	if p := s.Info().Interval; p != nil {
 		iv = *p
 	}
-	return time.Duration(max(iv, s.FloorInterval()) * float64(time.Second))
+	iv = max(iv, s.FloorInterval())
+	if !(iv >= 1 && iv <= 300) { // never a NaN or zero pause between polls (power.Build refuses such an interval)
+		iv = min(max(s.DefaultInterval(), 1), 300)
+	}
+	return time.Duration(iv * float64(time.Second))
 }
 
 // Run polls every device in its own loop until ctx ends.

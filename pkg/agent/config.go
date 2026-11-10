@@ -304,7 +304,9 @@ func (c *Config) Validate() error {
 		add("gpu.amd_adl must be auto or off")
 	}
 	c.BMCRelay.validate(func(s string) { add("%s", s) })
-	if c.GPU.IntervalS < 1 || c.GPU.IntervalS > 60 {
+	// Number ranges are written as "not inside the range": a comparison with NaN is never true, so
+	// "below the minimum or above the maximum" would let `.nan` through.
+	if !(c.GPU.IntervalS >= 1 && c.GPU.IntervalS <= 60) {
 		add("gpu.interval_s must be 1-60")
 	}
 	if c.IPMI.Ipmitool != "" && collect.ExecPathProblem(c.IPMI.Ipmitool, runtime.GOOS == "windows") != "" {
@@ -333,7 +335,7 @@ func (c *Config) Validate() error {
 			add("ipmi.host needs username and password_env (the name of an env var holding the BMC password)")
 		}
 	}
-	if c.IPMI.SensorIntervalS < 2 || c.IPMI.SensorIntervalS > 300 {
+	if !(c.IPMI.SensorIntervalS >= 2 && c.IPMI.SensorIntervalS <= 300) {
 		add("ipmi.sensor_interval_s must be 2-300")
 	}
 	if c.Sensors.CoreTemp && runtime.GOOS != "windows" {
@@ -347,10 +349,10 @@ func (c *Config) Validate() error {
 			add("fan_control.vendor must be supermicro")
 		}
 	}
-	if c.FanControl.MinDuty < 30 || c.FanControl.MinDuty > 100 {
+	if !(c.FanControl.MinDuty >= 30 && c.FanControl.MinDuty <= 100) {
 		add("fan_control.min_duty must be 30-100 (fans are never set below 30 %%)")
 	}
-	if c.FanControl.MaxTempC < 50 || c.FanControl.MaxTempC > 95 {
+	if !(c.FanControl.MaxTempC >= 50 && c.FanControl.MaxTempC <= 95) { // .nan here would switch the fan watchdog off
 		add("fan_control.max_temp_c must be 50-95")
 	}
 	switch c.FanControl.AutoMode {
@@ -358,7 +360,7 @@ func (c *Config) Validate() error {
 	default:
 		add("fan_control.auto_mode must be standard, optimal or heavyio")
 	}
-	if c.PowerControl.MinDelayS < 10 || c.PowerControl.MinDelayS > 3600 {
+	if !(c.PowerControl.MinDelayS >= 10 && c.PowerControl.MinDelayS <= 3600) {
 		add("power_control.min_delay_s must be 10-3600")
 	}
 	for _, m := range c.WOL.AllowedMACs {
@@ -372,7 +374,7 @@ func (c *Config) Validate() error {
 	if c.SelfUpdate.Enabled && runtime.GOOS != "linux" && runtime.GOOS != "windows" {
 		add("self_update is only available on Linux and Windows")
 	}
-	if c.ControlRatePerMin < 1 || c.ControlRatePerMin > 60 {
+	if !(c.ControlRatePerMin >= 1 && c.ControlRatePerMin <= 60) {
 		add("control_rate_per_min must be 1-60")
 	}
 	for _, n := range c.Processes.NeverOpen {

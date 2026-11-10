@@ -98,6 +98,9 @@ func buildTuya(decode configDecoder) (Source, error) {
 			f.Scale = 1
 			c.DPS[k] = f
 		}
+		if !devices.Finite(f.Scale) { // .nan / .inf: every reading of that data point would be unknown
+			return nil, fmt.Errorf("power source %s: dps %s: scale must be a number", c.ID, k)
+		}
 	}
 	return &tuyaSource{c: c}, nil
 }
