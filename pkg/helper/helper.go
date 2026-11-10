@@ -229,6 +229,8 @@ func (s *Server) dispatch(ctx context.Context, r proto.Request) proto.Response {
 			return proto.Fail(proto.CodeUnavailable, "Core Temp is not running (or its global shared memory is off)")
 		case errors.Is(err, collect.ErrCoreTempDenied):
 			return proto.Fail(proto.CodeDenied, "Core Temp's shared memory refused the helper")
+		case errors.Is(err, collect.ErrCoreTempUntrusted): // the whole reason: it names the object, its owner and the fix
+			return proto.Fail(proto.CodeFailed, "Core Temp: "+err.Error())
 		case err != nil:
 			return proto.Fail(proto.CodeFailed, "Core Temp: "+short(err))
 		}

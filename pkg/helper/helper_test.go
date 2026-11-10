@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
@@ -356,6 +357,15 @@ func TestCoreTempRead(t *testing.T) {
 	}
 	err = collect.ErrCoreTempDenied
 	if resp := srv.Handle(context.Background(), "c", []byte(`{"v":1,"verb":"coretemp_read"}`)); resp.Code != proto.CodeDenied {
+		t.Fatal(resp)
+	}
+	// L32: a session name that is not an administrator's is refused with the whole reason (object, owner, fix),
+	// and no block is handed out
+	err = fmt.Errorf(`%w: "Session\1\CoreTempMappingObjectEx" belongs to S-1-5-21-1111111111-2222222222-3333333333-1001, `+
+		`not to Administrators or SYSTEM; not used. Switch on Core Temp's "Enable global shared memory (SNMP)"`, collect.ErrCoreTempUntrusted)
+	resp = srv.Handle(context.Background(), "c", []byte(`{"v":1,"verb":"coretemp_read"}`))
+	if resp.Code != proto.CodeFailed || resp.Data != nil || !strings.Contains(resp.Error, "S-1-5-21-1111111111-2222222222-3333333333-1001") ||
+		!strings.Contains(resp.Error, "global shared memory") {
 		t.Fatal(resp)
 	}
 }
