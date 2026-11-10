@@ -34,6 +34,9 @@ import (
 // act on config.yaml (adminDataDirTrusted).
 var dataDirTrusted = func(cfgPath string) error { return trustedDataDir(cfgPath) }
 
+// updateDirTrusted is the check before apply-update reads or opens anything: the data folder and update\.
+var updateDirTrusted = func(cfgPath string) error { return trustedDataDir(cfgPath, "update") }
+
 // tokensInConfigDir: join writes token files only into the config folder.
 var tokensInConfigDir = true
 

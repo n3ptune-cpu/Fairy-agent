@@ -439,6 +439,17 @@ func adminDataDirTrusted(cfgPath string) error {
 	return dataDirTrusted(cfgPath)
 }
 
+// adminUpdateDirTrusted is adminDataDirTrusted for `apply-update` typed by an administrator: the same check the
+// updater service makes before it opens anything (updateDirTrusted: the data folder, config.yaml, the token
+// files and update\, where the installer writes its log and result). Before this, the typed command read
+// config.yaml and opened update\installer.log first and was refused afterwards.
+func adminUpdateDirTrusted(cfgPath string) error {
+	if !isAdmin() {
+		return nil
+	}
+	return updateDirTrusted(cfgPath)
+}
+
 // checkDataDir is the read-only check a privileged program makes before it acts on config.yaml: the folders
 // above, the folder itself, config.yaml and the token files it names in that folder, and alsoDirs (folders
 // below the data folder the caller is about to write, which must exist). Nothing is changed. Someone else

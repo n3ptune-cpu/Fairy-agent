@@ -9,6 +9,9 @@ package main
 // (adminDataDirTrusted); tests replace it.
 var dataDirTrusted = func(string) error { return nil }
 
+// updateDirTrusted is the Windows check before apply-update reads or opens anything; tests replace it.
+var updateDirTrusted = func(string) error { return nil }
+
 // tokensInConfigDir: join writes token files only into the config folder (Windows). Elsewhere config.yaml may
 // name them anywhere, as before.
 var tokensInConfigDir = false

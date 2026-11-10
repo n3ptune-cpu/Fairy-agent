@@ -272,6 +272,13 @@ func runForeground(cfgPath string) int {
 
 // applyUpdate installs the staged release: verify again, swap, restart, health-check, roll back on failure.
 func applyUpdate(cfgPath string) int {
+	// Windows, typed by an administrator: nothing is read (config.yaml) or opened (update\installer.log) in a
+	// data folder someone else could have prepared. The updater service makes this check itself before it
+	// comes here through applyUpdateCtx.
+	if err := adminUpdateDirTrusted(cfgPath); err != nil {
+		fmt.Fprintln(os.Stderr, "fairy-agent apply-update:", err)
+		return 1
+	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	return applyUpdateCtx(ctx, cfgPath)

@@ -132,7 +132,7 @@ func (h updaterHandler) Execute(_ []string, req <-chan svc.ChangeRequest, status
 	// (which names the token file it would read and the address it would send the token to) or opens its log
 	// in update\, the data folder must be one only administrators and SYSTEM can change. If it is not, nothing
 	// is opened or written there: the reason goes to the Windows Event Log and the service stops.
-	if err := trustedDataDir(h.cfgPath, "update"); err != nil {
+	if err := updateDirTrusted(h.cfgPath); err != nil {
 		if el, e := eventlog.Open(serviceName); e == nil {
 			_ = el.Error(1, "fairy-agent-update did nothing: "+err.Error())
 			el.Close()

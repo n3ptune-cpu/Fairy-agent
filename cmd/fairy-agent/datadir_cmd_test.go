@@ -233,3 +233,52 @@ func TestTypedCommandsDoNotCheckWithoutAdminRights(t *testing.T) {
 		t.Fatal(string(b), *asked)
 	}
 }
+
+// H1a (the part the review found open): `fairy-agent apply-update` typed by an administrator read config.yaml
+// and opened update\installer.log before the data folder was checked. Now the check comes first, and it is the
+// updater service's check (the folder and update\): a refused run reads nothing and creates no log file.
+func TestApplyUpdateByHandChecksBeforeItOpensAnything(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "config.yaml")
+	logFile := filepath.Join(dir, "update", "installer.log")
+	// what a planted config.yaml would have made the old order do: create a log file where it says
+	planted := "log_file: " + logFile + "\nthis is not a key the agent knows: 1\n"
+	if err := os.WriteFile(p, []byte(planted), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Dir(logFile), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	old := updateDirTrusted
+	t.Cleanup(func() { updateDirTrusted = old })
+	var asked []string
+	updateDirTrusted = func(cfgPath string) error {
+		asked = append(asked, cfgPath)
+		return errors.New("the data folder cannot be trusted: " + cfgPath + " is owned by " + tUser + repairHint)
+	}
+	if !isAdmin() {
+		// without administrator rights nothing is checked (as for the other typed commands)
+		if err := adminUpdateDirTrusted(p); err != nil || len(asked) != 0 {
+			t.Fatal(err, asked)
+		}
+		return
+	}
+	code := 0
+	msg := stderrOf(t, func() { code = applyUpdate(p) })
+	if code != 1 || !strings.HasPrefix(msg, "fairy-agent apply-update: the data folder cannot be trusted") || !strings.Contains(msg, "setup-self-update") {
+		t.Fatalf("exit %d, stderr %q", code, msg)
+	}
+	if len(asked) != 1 || asked[0] != p {
+		t.Fatalf("the check was asked about %q, want once about %q", asked, p)
+	}
+	// config.yaml was not read: its parse error (with words of the file) is not in the output
+	if strings.Contains(msg, "not a key") || strings.Contains(msg, "field") {
+		t.Fatalf("config.yaml was read before the check: %q", msg)
+	}
+	if _, err := os.Lstat(logFile); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("the installer log was opened before the check: %v", err)
+	}
+	if ents, _ := os.ReadDir(filepath.Dir(logFile)); len(ents) != 0 {
+		t.Fatalf("something was written into update\\: %v", ents)
+	}
+}
