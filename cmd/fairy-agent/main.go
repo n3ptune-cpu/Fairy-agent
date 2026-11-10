@@ -5,7 +5,7 @@
 //	fairy-agent uninstall                  Windows: remove the service (config and tokens stay)
 //	fairy-agent check-config [--config path]
 //	fairy-agent config get|set|show ...      read or change one setting of config.yaml (set: root / Administrator)
-//	fairy-agent join --code CODE --panel IP [...]  the machine side of the panel's Add host (the installer runs it)
+//	fairy-agent join (--code-stdin | --code CODE) --panel IP [--pair-v2] [...]  the machine side of the panel's Add host (the installer runs it)
 //	fairy-agent pair-status                is the panel paired yet (0 yes, 3 waiting, 1 no code / expired)
 //	fairy-agent verify-release DIR         check a downloaded release's signature and hashes (the installer)
 //	fairy-agent gen-token                  print a new random token (for the token files)
@@ -62,9 +62,16 @@ const usage = `fairy-agent: reports this machine's metrics to the Fairy panel (s
                                             or reads one line from stdin, never from the command line
   fairy-agent bmc-relay add --id ID --host IP --username USER --password-env NAME [--cipher-suite N] ...
                                             add a BMC power-on relay target (see AGENT.md)
-  fairy-agent join --code CODE --panel IP [--power-control] [--self-update] [--wol] [--ups] [--ups-name NAME]
-                   [--coretemp] [--ipmi] [--proxmox]  the machine side of the panel's "Add host" (install.sh / install.ps1
-                                            run it): tokens, the chosen features, the one-time join code
+  fairy-agent join (--code-stdin | --code CODE) --panel IP [--pair-v2] [--power-control] [--self-update] [--wol]
+                   [--ups] [--ups-name NAME] [--coretemp] [--ipmi] [--proxmox]
+                                            the machine side of the panel's "Add host" (install.sh / install.ps1
+                                            run it): tokens, the chosen features, the one-time join code.
+                                            --code-stdin reads the code from the first line of standard input;
+                                            without it and --code, the code is taken from the environment
+                                            variable FAIRY_JOIN_CODE. A code given with --code can be read by
+                                            every local user while join runs.
+                                            --pair-v2: the agent answers the panel encrypted, and only a panel
+                                            that proves it has this code (the panel's command says when)
   fairy-agent pair-status                   has the panel paired yet (exit 0 yes, 3 still waiting, 1 no)
   fairy-agent verify-release DIR            check SHA256SUMS' signature and the files in DIR (installers)
   fairy-agent gen-token                     print a new random token
