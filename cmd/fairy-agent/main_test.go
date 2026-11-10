@@ -56,9 +56,28 @@ func TestFansAutoCommand(t *testing.T) {
 	if code := fansAuto(write("fan_control: {enabled: true, min_duty: 5}\n"), &out, &errb); code != 1 || !strings.Contains(errb.String(), "min_duty") {
 		t.Fatal(code, errb.String())
 	}
-	errb.Reset()
-	if code := fansAuto(write("ipmi: {enabled: true, ipmitool: /nonexistent/ipmitool}\nfan_control: {enabled: true}\n"), &out, &errb); code != 1 ||
-		!strings.Contains(errb.String(), "could not hand the fans back") {
+	if out.Len() != 0 {
+		t.Fatal("stdout on failure:", out.String())
+	}
+}
+
+// Fan control is on and the BMC cannot be reached: exit 1 with the reason, never a false "done".
+//
+// Not on Windows. There the agent reaches the BMC through Windows' own IPMI driver, asked by a powershell.exe
+// that it starts from System32 (config.yaml's ipmitool path is not used), so this test would start a program
+// outside its temporary folder and ask the hardware of the PC it runs on. The same end ("could not hand the
+// fans back", with a BMC that does not answer) is tested on every system with a fake BMC in pkg/agent
+// (TestFansAuto*).
+func TestFansAutoCommandWithoutABMC(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("would start powershell.exe to ask this PC's IPMI driver; covered with a fake BMC in pkg/agent")
+	}
+	p := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(p, []byte("ipmi: {enabled: true, ipmitool: /nonexistent/ipmitool}\nfan_control: {enabled: true}\n"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	var out, errb bytes.Buffer
+	if code := fansAuto(p, &out, &errb); code != 1 || !strings.Contains(errb.String(), "could not hand the fans back") {
 		t.Fatal(code, errb.String())
 	}
 	if out.Len() != 0 {
