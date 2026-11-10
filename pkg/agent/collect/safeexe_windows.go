@@ -27,25 +27,7 @@ func TrustedExecutable(path string) error {
 	if !st.Mode().IsRegular() || isReparse(st) {
 		return fmt.Errorf("%s is not a plain file (a link or a folder?)", path)
 	}
-	kind := ObjFile
-	for p := path; ; {
-		parent := filepath.Dir(p)
-		if parent == p && kind == ObjAncestor {
-			kind = ObjRoot // C:\ (the program's own folder keeps the stricter ObjParent check even if it is C:\)
-		}
-		if err := checkACL(p, kind); err != nil {
-			return err
-		}
-		if parent == p {
-			return nil
-		}
-		p = parent
-		if kind == ObjFile {
-			kind = ObjParent
-		} else {
-			kind = ObjAncestor
-		}
-	}
+	return walkUp(path, ObjFile, filepath.Dir, checkACL)
 }
 
 func isReparse(st os.FileInfo) bool {
@@ -62,14 +44,8 @@ func checkACL(p string, kind int) error {
 	if err != nil {
 		return err
 	}
-	if kind == objOwnFolder {
-		return CheckOwnFolderACL(p, owner, null, aces)
-	}
-	return CheckWindowsACL(p, kind, owner, null, aces)
+	return checkObject(p, kind, owner, null, aces)
 }
-
-// objOwnFolder: a folder of Fairy's own that LocalSystem writes files in (CheckOwnFolderACL).
-const objOwnFolder = -1
 
 // ownerAndACL reads the owner and the entries out of a security descriptor (null: it has no DACL at all).
 func ownerAndACL(p string, sd *windows.SECURITY_DESCRIPTOR) (owner string, null bool, aces []ACE, err error) {
@@ -164,18 +140,5 @@ func TrustedFolder(dir string) error {
 	if !st.IsDir() || isReparse(st) {
 		return fmt.Errorf("%s is not a plain folder", dir)
 	}
-	kind := objOwnFolder
-	for p := dir; ; {
-		parent := filepath.Dir(p)
-		if parent == p && kind == ObjAncestor {
-			kind = ObjRoot
-		}
-		if err := checkACL(p, kind); err != nil {
-			return err
-		}
-		if parent == p {
-			return nil
-		}
-		p, kind = parent, ObjAncestor
-	}
+	return walkUp(dir, objOwnFolder, filepath.Dir, checkACL)
 }

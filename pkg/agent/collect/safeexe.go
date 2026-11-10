@@ -172,6 +172,46 @@ func CheckWindowsACL(path string, kind int, owner string, nullDACL bool, aces []
 	return nil
 }
 
+// objOwnFolder: a folder of Fairy's own that LocalSystem writes files in (CheckOwnFolderACL). It is the first
+// object of TrustedFolder's walk, as ObjFile is the first of TrustedExecutable's.
+const objOwnFolder = -1
+
+// walkUp is the walk of TrustedExecutable (first: ObjFile) and TrustedFolder (first: objOwnFolder): check is
+// called for path and then for every folder above it, up to the drive, each with what it is for the path. The
+// folder that holds a program is ObjParent, everything further up ObjAncestor, and the drive's root ObjRoot
+// when it is further up than that (a program directly in C:\ keeps the stricter ObjParent check for C:\).
+// parentOf is filepath.Dir on Windows; the drive's root is the path that is its own parent. The walk is here,
+// without a Windows call in it, so that it is tested with real permission lists on every platform.
+func walkUp(path string, first int, parentOf func(string) string, check func(p string, kind int) error) error {
+	kind := first
+	for p := path; ; {
+		parent := parentOf(p)
+		if parent == p && kind == ObjAncestor {
+			kind = ObjRoot
+		}
+		if err := check(p, kind); err != nil {
+			return err
+		}
+		if parent == p {
+			return nil
+		}
+		p = parent
+		if kind == ObjFile {
+			kind = ObjParent
+		} else {
+			kind = ObjAncestor
+		}
+	}
+}
+
+// checkObject is the decision for one object of such a walk.
+func checkObject(p string, kind int, owner string, nullDACL bool, aces []ACE) error {
+	if kind == objOwnFolder {
+		return CheckOwnFolderACL(p, owner, nullDACL, aces)
+	}
+	return CheckWindowsACL(p, kind, owner, nullDACL, aces)
+}
+
 // ParseDACL reads the entries of a binary ACL (the ACL header and the ACEs after it, as Windows stores a DACL).
 func ParseDACL(b []byte) ([]ACE, error) {
 	if len(b) < 8 {
