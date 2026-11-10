@@ -17,14 +17,19 @@ import (
 var lanTransport = &http.Transport{Proxy: nil, MaxIdleConnsPerHost: 2, IdleConnTimeout: 90 * time.Second,
 	DialContext: (&net.Dialer{Timeout: 5 * time.Second}).DialContext}
 
-// LANClient never uses an HTTP proxy (devices live on the local network / tailnet).
+// noRedirect makes a client hand back a 3xx answer instead of following it. A device, a BMC or a Proxmox API
+// that answers with a redirect could otherwise send Fairy to any address and scheme it can reach, and to the
+// same host name over plain http with the credentials still attached.
+func noRedirect(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+
+// LANClient never uses an HTTP proxy (devices live on the local network / tailnet) and never follows redirects.
 func LANClient(timeout time.Duration) *http.Client {
-	return &http.Client{Timeout: timeout, Transport: lanTransport,
-		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	return &http.Client{Timeout: timeout, Transport: lanTransport, CheckRedirect: noRedirect}
 }
 
 // TLSClient for BMCs: optional custom CA / verification off (owner's choice in config). It has its own
 // transport: build it once per device, not per request, so connections (and BMC sessions) are reused.
+// Like every client of this package it never follows redirects.
 func TLSClient(timeout time.Duration, cfg *tls.Config) *http.Client {
 	return ClientWith(timeout, TLSTransport(cfg))
 }
@@ -36,9 +41,10 @@ func TLSTransport(cfg *tls.Config) *http.Transport {
 	return tr
 }
 
-// ClientWith is a client with this timeout on a shared transport.
+// ClientWith is a client with this timeout on a shared transport. It never follows redirects: a BMC that sends
+// http to https must be configured with its https address.
 func ClientWith(timeout time.Duration, tr http.RoundTripper) *http.Client {
-	return &http.Client{Timeout: timeout, Transport: tr}
+	return &http.Client{Timeout: timeout, Transport: tr, CheckRedirect: noRedirect}
 }
 
 func describeHTTP(err error) error {
@@ -56,7 +62,8 @@ func describeHTTP(err error) error {
 	return Errf("connection failed")
 }
 
-// GetJSON fetches a JSON object. auth: "" | "basic" | "digest".
+// GetJSON fetches a JSON object. auth: "" | "basic" | "digest". Any answer that is not 2xx is an error
+// ("http <code>"), a redirect included.
 func GetJSON(ctx context.Context, c *http.Client, rawURL, auth, user, pass string) (map[string]any, error) {
 	do := func(hdr string) (*http.Response, error) {
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
@@ -89,7 +96,7 @@ func GetJSON(ctx context.Context, c *http.Client, rawURL, auth, user, pass strin
 		}
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode >= 400 {
+	if resp.StatusCode >= 300 { // 3xx too: redirects are not followed, and their body is not a reading
 		return nil, &HTTPStatusError{Code: resp.StatusCode}
 	}
 	var out map[string]any
