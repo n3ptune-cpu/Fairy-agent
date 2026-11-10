@@ -2,8 +2,8 @@ package main
 
 // Test doubles for datadir.go: a reader for SDDL (the form in which Windows prints permissions, e.g.
 // (Get-Acl path).Sddl), so the fixtures are real permission lists copied from Windows, and a dataFS over a
-// temporary folder whose owners and permissions are kept in a table. There is no Windows here; the Win32 side
-// (datadir_windows.go) is only compiled and vetted.
+// temporary folder whose owners and permissions are kept in a table. These tests are the same on every system;
+// the Win32 side (datadir_windows.go) has its own, in datadir_windows_test.go.
 
 import (
 	"errors"
@@ -14,6 +14,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/n3ptune-cpu/Fairy-agent/internal/linktest"
 	"github.com/n3ptune-cpu/Fairy-agent/pkg/agent/collect"
 )
 
@@ -188,8 +189,8 @@ const defaultDirSDDL = "O:BAD:AI(A;OICIID;FA;;;SY)(A;OICIID;FA;;;BA)(A;OICIID;0x
 
 // fakeFS is a dataFS over a real temporary folder. What exists, listing, renaming and removing are the real
 // file system's; owner and permissions come from the table sddl (path -> SDDL), with the "everything
-// inherited from a healthy data folder" lists for paths that are not in it. A symbolic link stands for any
-// link (junction, symbolic link).
+// inherited from a healthy data folder" lists for paths that are not in it. A link is a real one: a symbolic
+// link, or on Windows a junction, which an ordinary user can make (mklink).
 //
 // It also watches the two rules of datadir.go on every call that changes something, and fails the test when
 // one is broken (guard): nothing is changed by a name that leads through one of the agent's own folders, and
@@ -209,6 +210,13 @@ type fakeFS struct {
 	dataDir string
 	// agentIsSelf: the test plays the agent's own self-migration (folders.agentIsSelf)
 	agentIsSelf bool
+}
+
+// mklink puts a link to the folder target at link, as someone without rights could: a symbolic link, or on
+// Windows a junction.
+func mklink(target, link string) error {
+	_, err := linktest.Dir(target, link)
+	return err
 }
 
 func newFakeFS(t testing.TB) *fakeFS {
@@ -241,7 +249,7 @@ func (f *fakeFS) Stat(path string) (secObj, error) {
 		}
 	}
 	o := parseSDDL(f.t, s)
-	o.Dir, o.Reparse, o.Links = st.IsDir(), st.Mode()&os.ModeSymlink != 0, 1
+	o.Dir, o.Reparse, o.Links = st.IsDir(), linktest.IsLink(st), 1
 	if n, ok := f.links[path]; ok {
 		o.Links = n
 	}
@@ -278,7 +286,7 @@ func (f *fakeFS) Secure(path, sddl string) error {
 	if err != nil {
 		return err
 	}
-	if st.Mode()&os.ModeSymlink != 0 {
+	if linktest.IsLink(st) {
 		return fmt.Errorf("%s is a link", path)
 	}
 	f.guard("secure", path)
@@ -329,7 +337,7 @@ func (f *fakeFS) SetOwner(path string) error {
 	if err != nil {
 		return err
 	}
-	if st.Mode()&os.ModeSymlink != 0 {
+	if linktest.IsLink(st) {
 		return fmt.Errorf("%s is a link", path)
 	}
 	f.guard("setowner", path)
@@ -396,7 +404,7 @@ func (f *fakeFS) Remove(path string) error {
 	if err != nil {
 		return err
 	}
-	if st.Mode()&os.ModeSymlink == 0 {
+	if !linktest.IsLink(st) {
 		return fmt.Errorf("%s is not a link", path)
 	}
 	f.guard("remove", path)

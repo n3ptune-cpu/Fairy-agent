@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/n3ptune-cpu/Fairy-agent/internal/linktest"
 	"github.com/n3ptune-cpu/Fairy-agent/pkg/agent"
 	"github.com/n3ptune-cpu/Fairy-agent/pkg/agent/collect"
 )
@@ -481,8 +482,8 @@ func TestPlantedThingsInAKeptFolder(t *testing.T) {
 	for _, l := range []string{"logs/link", "update/installer.log", "state/deep-link"} {
 		lp := filepath.Join(p.dir, filepath.FromSlash(l))
 		_ = os.Remove(lp)
-		if err := os.Symlink(outside, lp); err != nil {
-			t.Skip("no symbolic links here:", err)
+		if err := mklink(outside, lp); err != nil {
+			t.Skip("no links here:", err)
 		}
 	}
 	hard := p.put(t, "migration/state.json", sddlDataFile, `{"phase":"switched"}`) // a second name of some file
@@ -706,7 +707,7 @@ func TestRepairStopsWithAClearMessage(t *testing.T) {
 	// a link where the data folder should be
 	p = newPC(t)
 	target := t.TempDir()
-	if err := os.Symlink(target, p.dir); err != nil {
+	if err := mklink(target, p.dir); err != nil {
 		t.Skip(err)
 	}
 	p.fs.sddl[p.dir] = sddlDataDir
@@ -729,6 +730,16 @@ func TestCheckDataDir(t *testing.T) {
 	if err := checkDataDir(p.fs, p.cfgPath, tSvc, "update", "helper"); err != nil || len(p.fs.calls) != 0 {
 		t.Fatal(err, p.fs.calls)
 	}
+	// the two cases with a link need a system that lets the test make one (a junction on Windows)
+	noLinks := mklink(p.root, filepath.Join(t.TempDir(), "probe"))
+	link := func(target, at string) {
+		if noLinks != nil {
+			return
+		}
+		if err := mklink(target, at); err != nil {
+			t.Fatal(err)
+		}
+	}
 	// nothing installed yet in a healthy folder (join right after install with a missing token) is fine too
 	_ = os.Remove(filepath.Join(p.dir, "control-token"))
 	if err := checkDataDir(p.fs, p.cfgPath, tSvc); err != nil {
@@ -747,7 +758,7 @@ func TestCheckDataDir(t *testing.T) {
 		{"config.yaml has a second name", func(p *pc) { p.fs.links[p.cfgPath] = 2 }, nil, "more than one name"},
 		{"config.yaml is a link", func(p *pc) {
 			_ = os.Remove(p.cfgPath)
-			_ = os.Symlink(filepath.Join(p.root, "elsewhere.yaml"), p.cfgPath)
+			link(p.root, p.cfgPath)
 		}, nil, "is a link"},
 		{"config.yaml is a folder", func(p *pc) { _ = os.Remove(p.cfgPath); _ = os.Mkdir(p.cfgPath, 0o755) }, nil, "folder where a file belongs"},
 		{"the token can be changed by a user", func(p *pc) { p.fs.sddl[filepath.Join(p.dir, "token")] = sddlPlantedFile }, nil, "token"},
@@ -756,12 +767,15 @@ func TestCheckDataDir(t *testing.T) {
 		{"update\\ is writable by the agent's account (0.4.2)", func(p *pc) { p.fs.sddl[filepath.Join(p.dir, "update")] = sddlAgentDir }, []string{"update"}, "agent's own account"},
 		{"update\\ is a link", func(p *pc) {
 			_ = os.RemoveAll(filepath.Join(p.dir, "update"))
-			_ = os.Symlink(p.root, filepath.Join(p.dir, "update"))
+			link(p.root, filepath.Join(p.dir, "update"))
 		}, []string{"update"}, "is a link"},
 		{"helper\\ belongs to a user", func(p *pc) { p.fs.sddl[filepath.Join(p.dir, "helper")] = sddlUserMadeDir }, []string{"helper"}, "owned by " + tUser},
 		{"C:\\ProgramData can be replaced", func(p *pc) { p.fs.sddl[p.pd] = sddlProgramData + "(A;;SD;;;BU)" }, nil, "ProgramData"},
 	}
 	for _, c := range cases {
+		if noLinks != nil && c.want == "is a link" {
+			continue
+		}
 		p := healthy()
 		c.make(p)
 		err := checkDataDir(p.fs, p.cfgPath, tSvc, c.also...)
@@ -791,6 +805,9 @@ func TestCheckDataDir(t *testing.T) {
 		if err := checkDataDir(p.fs, p.cfgPath, tSvc); err != nil {
 			t.Errorf("%s: refused: %v", name, err)
 		}
+	}
+	if noLinks != nil && !t.Failed() {
+		t.Skip("everything ran but the two cases with a link; no links here:", noLinks)
 	}
 }
 
@@ -867,7 +884,7 @@ func TestEnsureFolder(t *testing.T) {
 		t.Fatal(err, p.fs.calls)
 	}
 	_ = os.Remove(planted)
-	if err := os.Symlink(p.root, planted); err != nil {
+	if err := mklink(p.root, planted); err != nil {
 		t.Skip(err)
 	}
 	if err := f.ensure(helper, read); err == nil || !strings.Contains(err.Error(), "is a link") || len(p.fs.calls) != 0 {
@@ -908,7 +925,7 @@ func TestEnsureFolder(t *testing.T) {
 	_ = os.MkdirAll(target, 0o755)
 	p.fs.sddl[target] = sddlProgramFiles
 	_ = os.RemoveAll(state)
-	if err := os.Symlink(target, state); err != nil {
+	if err := mklink(target, state); err != nil {
 		t.Skip(err)
 	}
 	p.fs.calls, p.fs.sddl[state] = nil, sddlAgentDir // the link itself looks like the agent's folder
@@ -1070,9 +1087,21 @@ func TestRewriteFile(t *testing.T) {
 	if err := rewriteFile(big); err == nil {
 		t.Fatal("no size limit")
 	}
-	if err := os.Symlink(p, filepath.Join(dir, "link")); err == nil {
+	// a link is never rewritten: not a link to a folder (a junction on Windows), not a symbolic link to a file
+	elsewhere := t.TempDir()
+	if err := mklink(elsewhere, filepath.Join(dir, "link")); err == nil {
 		if err := rewriteFile(filepath.Join(dir, "link")); err == nil {
-			t.Fatal("a link was rewritten")
+			t.Fatal("a link to a folder was rewritten")
+		}
+		if ents, _ := os.ReadDir(elsewhere); len(ents) != 0 {
+			t.Fatalf("something was written through the link: %v", ents)
+		}
+	} else {
+		t.Log("not covered here, no links:", err)
+	}
+	if err := linktest.File(p, filepath.Join(dir, "file-link")); err == nil {
+		if err := rewriteFile(filepath.Join(dir, "file-link")); err == nil {
+			t.Fatal("a symbolic link to a file was rewritten")
 		}
 	}
 }

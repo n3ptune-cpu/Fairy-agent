@@ -19,6 +19,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/n3ptune-cpu/Fairy-agent/internal/linktest"
 )
 
 // watchedFS runs a hook before every look (Stat, List): the agent's account, acting between two calls.
@@ -170,8 +172,8 @@ func TestRepairWalkDoesNotFollowAFolderThatBecameALink(t *testing.T) {
 			if err := os.Remove(zz); err != nil {
 				t.Fatal(err)
 			}
-			if err := os.Symlink(pf, zz); err != nil {
-				t.Skip("no symbolic links here:", err)
+			if err := mklink(pf, zz); err != nil {
+				t.Skip("no links here:", err)
 			}
 		}
 	}
@@ -215,8 +217,8 @@ func TestRepairWalkDoesNotFollowAFolderThatBecameALink(t *testing.T) {
 // agent's folder itself, when it is empty) becomes a link to C:\Program Files or to the administrator's
 // folder, and the run goes on. Whatever n is, the rules hold.
 func TestJunctionSwappedInBetweenCheckAndUse(t *testing.T) {
-	if err := os.Symlink(t.TempDir(), filepath.Join(t.TempDir(), "l")); err != nil {
-		t.Skip("no symbolic links here:", err)
+	if err := mklink(t.TempDir(), filepath.Join(t.TempDir(), "l")); err != nil {
+		t.Skip("no links here:", err)
 	}
 	type scenario struct {
 		name string
@@ -278,7 +280,7 @@ func TestJunctionSwappedInBetweenCheckAndUse(t *testing.T) {
 					if err := os.Remove(cur); err != nil {
 						return // not there, or not empty (any more): the account cannot make it a junction now
 					}
-					if err := os.Symlink(target, cur); err != nil {
+					if err := mklink(target, cur); err != nil {
 						t.Fatal(err)
 					}
 					out.seenThrough(p, cur, target)
@@ -376,8 +378,8 @@ func TestFileReplacedByAFolder(t *testing.T) {
 						t.Fatal(err)
 					}
 					if asLink {
-						if err := os.Symlink(filepath.Dir(out.exe), victim); err != nil {
-							t.Skip("no symbolic links here:", err)
+						if err := mklink(filepath.Dir(out.exe), victim); err != nil {
+							t.Skip("no links here:", err)
 						}
 						out.seenThrough(p, victim, filepath.Dir(out.exe))
 						return
@@ -422,8 +424,8 @@ func TestDeepNestingInAnAgentFolder(t *testing.T) {
 	for d := bottom; d != filepath.Join(p.dir, "logs"); d = filepath.Dir(d) {
 		p.fs.sddl[d] = agentMadeDir
 	}
-	if err := os.Symlink(out.pf, filepath.Join(bottom, "link")); err != nil {
-		t.Skip("no symbolic links here:", err)
+	if err := mklink(out.pf, filepath.Join(bottom, "link")); err != nil {
+		t.Skip("no links here:", err)
 	}
 	rep, err := repairDataDir(p.fs, p.cfgPath, tSvc)
 	if err != nil || len(rep.Zones) != 1 || rep.Zones[0] != "logs" {
@@ -445,7 +447,7 @@ func TestDeepNestingInAnAgentFolder(t *testing.T) {
 	if rep, err := repairDataDir(p.fs, p.cfgPath, tSvc); err != nil || len(rep.Zones) != 0 || len(p.fs.calls) != 0 {
 		t.Fatalf("folders the agent's account made, nested %d deep, are not a fault: %v %v %v", repairMaxDepth-1, err, rep.Zones, p.fs.calls)
 	}
-	_ = os.Symlink(out.pf, filepath.Join(bottom, "link"))
+	_ = mklink(out.pf, filepath.Join(bottom, "link"))
 	rep, err = repairDataDir(p.fs, p.cfgPath, tSvc)
 	if err != nil || len(rep.Zones) != 1 || !strings.Contains(strings.Join(rep.Notes, "\n"), "is a link") {
 		t.Fatal(err, rep.Zones, rep.Notes)
@@ -513,8 +515,8 @@ func TestReplacedAgentFolderKeepsItsContentAside(t *testing.T) {
 	p.installed(t)
 	p.put(t, "logs/planted.txt", sddlPlantedFile, "by someone else")
 	p.put(t, "state/x/", agentMadeDir, "")
-	if err := os.Symlink(p.root, filepath.Join(p.dir, "state", "x", "j")); err != nil {
-		t.Skip("no symbolic links here:", err)
+	if err := mklink(p.root, filepath.Join(p.dir, "state", "x", "j")); err != nil {
+		t.Skip("no links here:", err)
 	}
 	tok, ctl, cfg := p.read(t, "token"), p.read(t, "control-token"), p.read(t, "config.yaml")
 	rep, out, err := p.run(t)
@@ -531,7 +533,7 @@ func TestReplacedAgentFolderKeepsItsContentAside(t *testing.T) {
 			t.Errorf("%s is not in the folder moved aside as it was: %q %v", path, b, err)
 		}
 	}
-	if st, err := os.Lstat(filepath.Join(asideAt, "state", "x", "j")); err != nil || st.Mode()&os.ModeSymlink == 0 {
+	if st, err := os.Lstat(filepath.Join(asideAt, "state", "x", "j")); err != nil || !linktest.IsLink(st) {
 		t.Errorf("the link was not left as it was in the folder moved aside: %v", err)
 	}
 	// the permissions of what was moved are not touched (nothing is passed on into what was prepared)
@@ -641,8 +643,8 @@ func TestEnsureNeverGoesInsideAnAgentFolder(t *testing.T) {
 	p.fs.sddl[filepath.Join(state, "a")] = agentMadeDir
 	links := []string{filepath.Join(state, "junction"), filepath.Join(state, "a", "b", "deep")}
 	for _, l := range links {
-		if err := os.Symlink(filepath.Dir(out.exe), l); err != nil {
-			t.Skip("no symbolic links here:", err)
+		if err := mklink(filepath.Dir(out.exe), l); err != nil {
+			t.Skip("no links here:", err)
 		}
 	}
 	looked := 0
@@ -674,7 +676,7 @@ func TestEnsureNeverGoesInsideAnAgentFolder(t *testing.T) {
 		t.Fatal(err, p.fs.calls, looked)
 	}
 	for _, l := range links {
-		if st, err := os.Lstat(l); err != nil || st.Mode()&os.ModeSymlink == 0 {
+		if st, err := os.Lstat(l); err != nil || !linktest.IsLink(st) {
 			t.Fatalf("%s was touched: %v", l, err)
 		}
 	}
