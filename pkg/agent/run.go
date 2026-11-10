@@ -283,7 +283,16 @@ func Run(ctx context.Context, cfg *Config, b Build) error {
 		return err
 	}
 	// at most MaxConns open connections, MaxConnsPerSender per sender, some kept for the panel and this machine
-	ln := LimitConns(tcp, ConnLimits{Panel: PairedPanel(pairPath)})
+	panel := PairedPanel(pairPath)
+	if cfg.OnlyFromPanel {
+		if p := panel(); p != "" {
+			slog.Info("only_from_panel: connections are accepted only from the panel and from this machine", "panel", p)
+		} else {
+			slog.Warn("only_from_panel is on, but this agent has no panel address on record (it was not paired with the " +
+				"panel's Add host): every sender is accepted until it is")
+		}
+	}
+	ln := LimitConns(tcp, ConnLimits{Panel: panel, PanelOnly: cfg.OnlyFromPanel})
 	var on []string
 	for name, ok := range map[string]bool{"processes": cfg.ProcessesEnabled(), "fan_control": d.Fan != nil,
 		"power_control": d.Power != nil, "wol_relay": d.WOL != nil, "ipmi": d.BMC != nil, "gpu": d.GPU != nil,

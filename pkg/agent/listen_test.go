@@ -150,6 +150,19 @@ func TestConnPanelOnly(t *testing.T) {
 	}
 }
 
+// The owner's opt-in is a config key, off by default.
+func TestOnlyFromPanelSetting(t *testing.T) {
+	if mustParse(t, "").OnlyFromPanel {
+		t.Fatal("only_from_panel must be off by default")
+	}
+	if !mustParse(t, "only_from_panel: true\n").OnlyFromPanel {
+		t.Fatal("only_from_panel: true was not read")
+	}
+	if _, err := Parse([]byte("only_from_panel: maybe\n"), "c.yaml"); err == nil {
+		t.Fatal("only_from_panel takes true or false")
+	}
+}
+
 func TestPairedPanel(t *testing.T) {
 	dir := t.TempDir()
 	now := time.Now().Unix()

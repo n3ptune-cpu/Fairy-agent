@@ -6,6 +6,11 @@
 # up to 3 minutes for Tailscale at boot and refuses to start without one. 0.0.0.0 needs allow_all_interfaces.
 # listen: 100.64.0.10:9101
 
+# Accept connections only from the panel that added this machine (Add host) and from this machine itself. Off by
+# default. With it on, your own `curl` from another machine gets no answer, and a new panel address needs a new
+# Add host / Re-pair. No effect on an agent that was never paired through Add host.
+# only_from_panel: true
+
 # The panel's token for this machine (its token_env value), one line, at least 24 characters. Default: the file
 # "token" next to this config. FAIRY_AGENT_TOKEN in the environment wins over the file.
 # token_file: /etc/fairy-agent/token
