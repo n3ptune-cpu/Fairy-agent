@@ -60,14 +60,38 @@ func Group(code string) string {
 	return strings.Join(parts, "-")
 }
 
-// Normalize removes dashes and spaces, upper-cases and checks a code.
+// CodeLen is the length of a normalised join code: CodeBytes in base32 without padding.
+const CodeLen = 32
+
+// Normalize removes dashes, spaces and tabs (and white space around the code), upper-cases and checks a code.
+// The result is always exactly CodeLen characters A-Z / 2-7: anything else in the input (a line break inside,
+// extra characters after the 32nd, letters outside ASCII that upper-case into A-Z) is refused, so two inputs
+// that are accepted for the same code always give the same proof and key.
 func Normalize(code string) (string, error) {
-	c := strings.ToUpper(strings.NewReplacer("-", "", " ", "", "\t", "").Replace(strings.TrimSpace(code)))
-	b, err := b32.DecodeString(c)
-	if err != nil || len(b) != CodeBytes {
-		return "", errors.New("not a Fairy join code (32 letters A-Z and digits 2-7, in groups of four)")
+	bad := errors.New("not a Fairy join code (32 letters A-Z and digits 2-7, in groups of four)")
+	c := make([]byte, 0, CodeLen)
+	for _, r := range strings.TrimSpace(code) {
+		switch {
+		case r == '-' || r == ' ' || r == '\t':
+			continue
+		case r >= 'a' && r <= 'z':
+			r -= 'a' - 'A'
+		case r >= 'A' && r <= 'Z', r >= '2' && r <= '7':
+		default:
+			return "", bad
+		}
+		if len(c) == CodeLen {
+			return "", bad
+		}
+		c = append(c, byte(r))
 	}
-	return c, nil
+	if len(c) != CodeLen {
+		return "", bad
+	}
+	if b, err := b32.DecodeString(string(c)); err != nil || len(b) != CodeBytes {
+		return "", bad
+	}
+	return string(c), nil
 }
 
 // Proof is what the panel sends to the agent for a code: hex SHA-256 over a fixed label and the code. Neither
