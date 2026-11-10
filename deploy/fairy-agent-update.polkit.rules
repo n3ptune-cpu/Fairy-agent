@@ -1,0 +1,16 @@
+// /etc/polkit-1/rules.d/49-fairy-agent-update.rules
+//
+// Installed only while self_update is switched on in /etc/fairy-agent/config.yaml (install.sh removes it when
+// the feature is off). It lets the fairy-agent user (and nobody else) do exactly one thing:
+// start the root installer unit fairy-agent-update.service (`systemctl start`), nothing else: no other unit,
+// no stop/restart/enable. The installer checks the release signature itself before installing.
+//
+// The power right is a file of its own (49-fairy-agent-power.rules): choosing one feature does not grant the
+// other. The combined file of older installers (49-fairy-agent.rules) is removed by install.sh.
+
+polkit.addRule(function (action, subject) {
+    if (subject.user === "fairy-agent" && action.id === "org.freedesktop.systemd1.manage-units" &&
+        action.lookup("unit") === "fairy-agent-update.service" && action.lookup("verb") === "start") {
+        return polkit.Result.YES;
+    }
+});

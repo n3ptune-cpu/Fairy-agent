@@ -6,7 +6,8 @@
 #   install -d -m 0750 -o root -g fairy-agent /etc/fairy-agent
 #   config.yaml 0640 root:fairy-agent; token (and control-token) 0640 root:fairy-agent
 #   systemctl daemon-reload && systemctl enable --now fairy-agent
-# Self-update (optional, self_update.enabled): also fairy-agent-update.service and the polkit rule.
+# Self-update (optional, self_update.enabled): also fairy-agent-update.service and its polkit rule
+#   (deploy/fairy-agent-update.polkit.rules); shutdown / reboot: deploy/fairy-agent-power.polkit.rules.
 [Unit]
 Description=Fairy agent (metrics for the Fairy panel)
 Documentation=file:///usr/local/share/doc/fairy-agent/AGENT.md

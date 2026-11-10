@@ -1,0 +1,22 @@
+// /etc/polkit-1/rules.d/49-fairy-agent-power.rules
+//
+// Installed only while power_control is switched on in /etc/fairy-agent/config.yaml (install.sh removes it when
+// the feature is off). It lets the fairy-agent user (and nobody else) do exactly one kind of thing:
+// power off, reboot or suspend (sleep) this machine through systemd-logind
+// (`systemctl poweroff|reboot|suspend`). No hibernate, no ignoring inhibitors.
+//
+// The self-update right is a file of its own (49-fairy-agent-update.rules): choosing one feature does not
+// grant the other. The combined file of older installers (49-fairy-agent.rules) is removed by install.sh.
+
+polkit.addRule(function (action, subject) {
+    if (subject.user === "fairy-agent" && [
+        "org.freedesktop.login1.power-off",
+        "org.freedesktop.login1.power-off-multiple-sessions",
+        "org.freedesktop.login1.reboot",
+        "org.freedesktop.login1.reboot-multiple-sessions",
+        "org.freedesktop.login1.suspend",
+        "org.freedesktop.login1.suspend-multiple-sessions"
+    ].indexOf(action.id) >= 0) {
+        return polkit.Result.YES;
+    }
+});

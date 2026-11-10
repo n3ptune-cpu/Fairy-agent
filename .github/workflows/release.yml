@@ -71,7 +71,7 @@ jobs:
           printf 'fairy-agent %s\n' "$version" > dist/VERSION
           # The "Add host" installers and the files they install, so .../releases/latest/download/<name> works
           # and every file is covered by the signed SHA256SUMS.
-          deploy="install.sh install.ps1 install-fairy-agent.ps1 fairy-agent.service fairy-agent-update.service fairy-agent.polkit.rules fairy-agent.tmpfiles.conf"
+          deploy="install.sh install.ps1 install-fairy-agent.ps1 fairy-agent.service fairy-agent-update.service fairy-agent-power.polkit.rules fairy-agent-update.polkit.rules fairy-agent.tmpfiles.conf"
           for f in $deploy; do cp "deploy/$f" "dist/$f"; done
           (cd dist && sha256sum fairy-agent-windows-amd64.exe fairy-agent-linux-amd64 fairy-agent-linux-arm64 VERSION $deploy > SHA256SUMS)
           cat dist/SHA256SUMS

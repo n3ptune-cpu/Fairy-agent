@@ -1,7 +1,7 @@
 # /etc/systemd/system/fairy-agent-update.service  (Linux; only for self_update, see AGENT.md "Updates")
 #
 # Installs the Fairy-agent release that the agent downloaded and staged in /var/lib/fairy-agent/update when an
-# admin pressed Update in the panel. Started by the agent (`systemctl start`, allowed by the polkit rule), never
+# admin pressed Update in the panel. Started by the agent (`systemctl start`, allowed by its polkit rule), never
 # enabled and never on a timer. As root it:
 #   - checks the staged SHA256SUMS signature again with the key built into the INSTALLED binary, then the
 #     binary's hash, on the copy it makes next to /usr/local/bin/fairy-agent (the stage itself is not trusted);

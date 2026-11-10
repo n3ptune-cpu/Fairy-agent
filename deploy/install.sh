@@ -1,15 +1,16 @@
 #!/bin/sh
-# Fairy agent installer for Linux (systemd), the machine side of the panel's "Add host":
+# Fairy agent installer for Linux (systemd), the machine side of the panel's "Add host".
 #
 #   curl -fsSL https://github.com/n3ptune-cpu/Fairy-agent/releases/latest/download/install.sh | sudo sh -s -- \
 #     --join CODE --panel 100.x.y.z [--power-control] [--self-update] [--wol] [--ups] [--ups-name NAME] [--ipmi]
 #     [--proxmox]
 #
-# It downloads the latest release (binary, SHA256SUMS + signature, the systemd units and rules), checks every
-# file against SHA256SUMS and the signature with fairy-agent's built-in release key, then installs exactly what
+# It downloads the release (binary, SHA256SUMS + signature, the systemd units and rules), checks every file
+# against SHA256SUMS and the signature with fairy-agent's built-in release key, then installs exactly what
 # AGENT.md describes: user fairy-agent, /usr/local/bin/fairy-agent, /etc/fairy-agent (config.yaml and tokens
-# 0640 root:fairy-agent), fairy-agent.service (+ fairy-agent-update.service and the polkit rule when needed,
-# the RAPL tmpfiles rule when the machine has RAPL), a firewall rule for the panel when ufw / firewalld is on.
+# 0640 root:fairy-agent), fairy-agent.service (+ fairy-agent-update.service when needed, one polkit rule per
+# feature that is on: shutdown / reboot, self-update; the RAPL tmpfiles rule when the machine has RAPL), a
+# firewall rule for the panel when ufw / firewalld is on.
 # `fairy-agent join` then writes the tokens and the chosen settings (no editor, nothing to copy) and stores the
 # one-time join code; the panel picks the tokens up by itself within a few seconds. With --proxmox (a standalone
 # Proxmox VE node), join also makes the panel a read-only API token (user fairy@pve, role PVEAuditor, token
@@ -21,8 +22,8 @@
 # command, so even a first install does not have to trust the downloaded binary's own key.
 #
 # Safe to run again (with a new code from the panel's "Re-pair"): settings are kept, the tokens are replaced
-# by new ones (the panel gets them by pairing), the binary and
-# units are brought up to date. Nothing secret is printed.
+# by new ones (the panel gets them by pairing), the binary and units are brought up to date. Nothing secret is
+# printed.
 set -eu
 
 REPO="${FAIRY_REPO:-n3ptune-cpu/Fairy-agent}"
@@ -30,6 +31,7 @@ BASE="${FAIRY_RELEASE_URL:-https://github.com/$REPO/releases/latest/download}"
 BIN=/usr/local/bin/fairy-agent
 ETC=/etc/fairy-agent
 UNITS=/etc/systemd/system
+RULES=/etc/polkit-1/rules.d
 
 say() { printf '%s\n' "fairy: $*"; }
 die() { printf '%s\n' "fairy: ERROR: $*" >&2; exit 1; }
@@ -50,13 +52,17 @@ while [ $# -gt 0 ]; do
     --ipmi) IPMI=1 ;;
     --proxmox) PVE=1 ;;
     --sums-sha256) [ $# -ge 2 ] || die "--sums-sha256 needs the SHA-256 of SHA256SUMS"; SUMS_PIN="$2"; shift ;;
-    -h|--help) sed -n '2,20p' "$0" 2>/dev/null || true; exit 0 ;;
-    *) die "unknown option $1 (copy the whole command from the panel's Add host dialog)" ;;
+    -h|--help) sed -n '2,26p' "$0" 2>/dev/null || true; exit 0 ;;
+    *) die "unknown option (copy the whole command from the panel's Add host dialog)" ;;
   esac
   shift
 done
-[ -n "$CODE" ] && [ -n "$PANEL" ] || die "usage: install.sh --join CODE --panel PANEL_TAILSCALE_IP [options]"
-case "$PANEL" in *[!0-9.]*) die "--panel must be the panel's Tailscale IPv4 address, e.g. 100.88.109.47" ;; esac
+
+[ -n "$CODE" ] && [ -n "$PANEL" ] ||
+  die "usage: install.sh --join CODE --panel PANEL_TAILSCALE_IP [options]"
+case "$PANEL" in *[!0-9.]*) die "--panel must be the panel's Tailscale IPv4 address, e.g. 100.64.0.10" ;; esac
+case "$UPSNAME" in *[!A-Za-z0-9_.-]*) die "--ups-name: letters, digits, _ . - only (the name in upsc -l)" ;; esac
+
 if [ -n "$SUMS_PIN" ]; then
   SUMS_PIN="$(printf '%s' "$SUMS_PIN" | tr 'A-F' 'a-f')"
   case "$SUMS_PIN" in
@@ -79,8 +85,10 @@ ASSET="fairy-agent-linux-$ARCH"
 TMP="$(mktemp -d /tmp/fairy-install.XXXXXX)"
 trap 'rm -rf "$TMP"' EXIT INT TERM
 
-say "downloading the latest release from $BASE"
-FILES="$ASSET SHA256SUMS SHA256SUMS.sig VERSION fairy-agent.service fairy-agent-update.service fairy-agent.polkit.rules fairy-agent.tmpfiles.conf"
+say "downloading the release from $BASE"
+POLKIT_POWER=fairy-agent-power.polkit.rules
+POLKIT_UPDATE=fairy-agent-update.polkit.rules
+FILES="$ASSET SHA256SUMS SHA256SUMS.sig VERSION fairy-agent.service fairy-agent-update.service $POLKIT_POWER $POLKIT_UPDATE fairy-agent.tmpfiles.conf"
 for f in $FILES; do
   curl -fsSL --proto '=https,file' --proto-redir '=https' --retry 3 -o "$TMP/$f" "$BASE/$f" || die "download of $f failed"
 done
@@ -112,8 +120,9 @@ fi
 if [ "$rc" -ne 0 ]; then
   "$TMP/$ASSET" verify-release "$TMP" >/dev/null 2>&1 && rc=0 || rc=$?
 fi
+NEWVER="$(awk 'NR == 1 { print $2 }' "$TMP/VERSION")"
 case "$rc" in
-  0) say "release $(cat "$TMP/VERSION") verified (SHA256SUMS signature and hashes)" ;;
+  0) say "release $NEWVER verified (SHA256SUMS signature and hashes)" ;;
   3) say "WARNING: this build has no release key, the signature was not checked (hashes only)" ;;
   *) die "the release signature check failed" ;;
 esac
@@ -130,26 +139,17 @@ command -v restorecon >/dev/null 2>&1 && restorecon "$BIN" || true
 install -d -m 0750 -o root -g fairy-agent "$ETC"
 install -d -m 0700 -o fairy-agent -g fairy-agent /var/lib/fairy-agent
 
-# 4. units and rules (an existing unit that differs is kept as .bak)
+# 4. units (an existing unit that differs is kept as .bak)
 put() { # put SRC DEST MODE
-  if [ -f "$2" ] && ! cmp -s "$1" "$2"; then cp -p "$2" "$2.bak"; say "kept your previous $2 as $2.bak"; fi
+  if [ -f "$2" ] && ! cmp -s "$1" "$2"; then
+    cp -p "$2" "$2.bak"
+    say "kept your previous $2 as $2.bak"
+  fi
   install -m "$3" "$1" "$2"
 }
 put "$TMP/fairy-agent.service" "$UNITS/fairy-agent.service" 0644
 if [ "$UPDATE" -eq 1 ] || [ -f "$UNITS/fairy-agent-update.service" ]; then
   put "$TMP/fairy-agent-update.service" "$UNITS/fairy-agent-update.service" 0644
-fi
-if [ "$POWER" -eq 1 ] || [ "$UPDATE" -eq 1 ]; then
-  if [ ! -d /etc/polkit-1/rules.d ]; then
-    if command -v apt-get >/dev/null 2>&1; then
-      say "installing polkitd (needed for shutdown / reboot and self-update)"
-      DEBIAN_FRONTEND=noninteractive apt-get install -y -q polkitd >/dev/null || apt-get install -y -q policykit-1 >/dev/null
-    elif command -v dnf >/dev/null 2>&1; then
-      dnf install -y -q polkit >/dev/null
-    fi
-  fi
-  [ -d /etc/polkit-1/rules.d ] || die "polkit is not installed (needed for shutdown / reboot and self-update)"
-  put "$TMP/fairy-agent.polkit.rules" /etc/polkit-1/rules.d/49-fairy-agent.rules 0644
 fi
 if ls /sys/class/powercap/intel-rapl:*/energy_uj >/dev/null 2>&1; then
   put "$TMP/fairy-agent.tmpfiles.conf" /etc/tmpfiles.d/fairy-agent.conf 0644
@@ -176,12 +176,58 @@ if [ "$UPS" -eq 1 ]; then
 fi
 "$BIN" join "$@"
 
+# 7. polkit: one rule file per feature, only for a feature that is on in config.yaml now (join only ever
+#    switches features on, so this is asked of the config, not of this run's options). A rule whose feature is
+#    off is removed, and so is the combined file of older installers, which granted both rights for either.
+feature_on() { # feature_on KEY FALLBACK: is KEY true in config.yaml (FALLBACK when the config cannot be asked)
+  v="$("$BIN" config get "$1" 2>/dev/null)" || v=""
+  case "$v" in
+    true) return 0 ;;
+    false) return 1 ;;
+  esac
+  [ "$2" -eq 1 ]
+}
+want_power=0
+want_update=0
+if feature_on power_control.enabled "$POWER"; then want_power=1; fi
+if feature_on self_update.enabled "$UPDATE"; then want_update=1; fi
+if [ "$want_power" -eq 1 ] || [ "$want_update" -eq 1 ]; then
+  if [ ! -d "$RULES" ]; then
+    if command -v apt-get >/dev/null 2>&1; then
+      say "installing polkitd (needed for shutdown / reboot and self-update)"
+      DEBIAN_FRONTEND=noninteractive apt-get install -y -q polkitd >/dev/null || apt-get install -y -q policykit-1 >/dev/null
+    elif command -v dnf >/dev/null 2>&1; then
+      dnf install -y -q polkit >/dev/null
+    fi
+  fi
+  [ -d "$RULES" ] || die "polkit is not installed (needed for shutdown / reboot and self-update)"
+fi
+polkit_rule() { # polkit_rule WANTED SRC DEST WHAT
+  if [ "$1" -eq 1 ]; then
+    if [ ! -f "$3" ] || ! cmp -s "$2" "$3"; then
+      install -m 0644 "$2" "$3"
+      say "polkit: the agent's user may $4 ($3)"
+    fi
+  elif [ -e "$3" ]; then
+    rm -f "$3"
+    say "polkit: removed $3 (the agent's user may no longer $4: that feature is off)"
+  fi
+}
+if [ -d "$RULES" ]; then
+  polkit_rule "$want_power" "$TMP/$POLKIT_POWER" "$RULES/49-fairy-agent-power.rules" "power off, reboot and suspend this machine"
+  polkit_rule "$want_update" "$TMP/$POLKIT_UPDATE" "$RULES/49-fairy-agent-update.rules" "start the self-update installer"
+  if [ -e "$RULES/49-fairy-agent.rules" ]; then
+    rm -f "$RULES/49-fairy-agent.rules"
+    say "polkit: removed the old combined rule $RULES/49-fairy-agent.rules (now one file per feature)"
+  fi
+fi
+
 systemctl daemon-reload
 systemctl enable -q fairy-agent
 systemctl restart fairy-agent
-say "fairy-agent $(awk '{ print $2 }' "$TMP/VERSION") started; waiting for the panel to pair (keep the Add host dialog open) ..."
+say "fairy-agent $NEWVER started; waiting for the panel to pair (keep the Add host dialog open) ..."
 
-# 7. wait (up to 2 minutes) until the panel has picked up the tokens
+# 8. wait (up to 2 minutes) until the panel has picked up the tokens
 i=0
 while [ $i -lt 60 ]; do
   if "$BIN" pair-status >/dev/null 2>&1; then

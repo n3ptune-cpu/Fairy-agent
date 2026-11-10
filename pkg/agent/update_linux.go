@@ -60,7 +60,7 @@ func runSystemctl(ctx context.Context, args ...string) error {
 // fairy-agent user. --no-block: the unit restarts this agent, so do not wait for it.
 func startInstaller(ctx context.Context, _ string) error {
 	if err := runSystemctl(ctx, "start", "--no-block", updateUnit); err != nil {
-		return fmt.Errorf("%w (are deploy/fairy-agent-update.service and the polkit rule installed?)", err)
+		return fmt.Errorf("%w (are deploy/fairy-agent-update.service and deploy/fairy-agent-update.polkit.rules installed?)", err)
 	}
 	return nil
 }

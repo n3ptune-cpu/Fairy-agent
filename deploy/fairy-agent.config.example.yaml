@@ -69,7 +69,8 @@ wol:
 # Self-update from the panel's Update button (panel: self_update: true). Off = the agent never updates itself.
 # On: an admin's Update makes the agent download the latest Fairy-agent release from GitHub, check its signature
 # (key built into this binary), install it, restart and roll back if the new version does not come up.
-# Linux also needs deploy/fairy-agent-update.service and the polkit rule; Windows: install-fairy-agent.ps1.
+# Linux also needs deploy/fairy-agent-update.service and deploy/fairy-agent-update.polkit.rules; Windows:
+# install-fairy-agent.ps1.
 self_update:
   enabled: false
   # repo: n3ptune-cpu/Fairy-agent   # only for a fork; its releases must be signed with the same key
