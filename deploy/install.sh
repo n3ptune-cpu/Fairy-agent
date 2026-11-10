@@ -6,8 +6,17 @@
 # one-time join code. There is no "latest" one-liner any more: a line that pipes a download into a shell
 # cannot be checked by anybody.
 #
-#   install.sh --sums-sha256 HASH --panel 100.x.y.z --join CODE
+#   install.sh --sums-sha256 HASH --panel 100.x.y.z --join-stdin [--pair-v2]
 #              [--power-control] [--self-update] [--wol] [--ups] [--ups-name NAME] [--ipmi] [--proxmox]
+#
+# The join code: --join-stdin reads it from the first line of standard input (what the panel's command does:
+# printf '%s' CODE | sudo ... sh install.sh --join-stdin ...), or it is taken from the environment variable
+# FAIRY_JOIN_CODE. Neither shows in the process list. --join CODE (older panels) still works; that form is
+# readable by other local users while the script runs. The code is never printed and is handed to
+# `fairy-agent join` on its standard input.
+#
+# --pair-v2 (the panel's command says so when the panel speaks it): the agent answers the panel encrypted, and
+# only a panel that proves it has this join code.
 #
 # --sums-sha256 HASH (or FAIRY_SUMS_SHA256 in the environment): the SHA-256 of the release's SHA256SUMS, as the
 # panel verified it with its own built-in release key. The script refuses a SHA256SUMS with any other hash
@@ -45,12 +54,14 @@ say() { printf '%s\n' "fairy: $*"; }
 die() { printf '%s\n' "fairy: ERROR: $*" >&2; exit 1; }
 
 CODE="" PANEL="" UPSNAME=""
-UNVERIFIED=0
+CODE_ARG=0 CODE_STDIN=0 PAIRV2=0 UNVERIFIED=0
 SUMS_PIN="${FAIRY_SUMS_SHA256:-}"
 POWER=0 UPDATE=0 WOL=0 UPS=0 IPMI=0 PVE=0
 while [ $# -gt 0 ]; do
   case "$1" in
-    --join) [ $# -ge 2 ] || die "--join needs the code"; CODE="$2"; shift ;;
+    --join) [ $# -ge 2 ] || die "--join needs the code"; CODE="$2"; CODE_ARG=1; shift ;;
+    --join-stdin) CODE_STDIN=1 ;;
+    --pair-v2) PAIRV2=1 ;;
     --panel) [ $# -ge 2 ] || die "--panel needs the panel's Tailscale address"; PANEL="$2"; shift ;;
     --power-control) POWER=1 ;;
     --self-update) UPDATE=1 ;;
@@ -62,14 +73,31 @@ while [ $# -gt 0 ]; do
     --proxmox) PVE=1 ;;
     --sums-sha256) [ $# -ge 2 ] || die "--sums-sha256 needs the SHA-256 of SHA256SUMS"; SUMS_PIN="$2"; shift ;;
     --unverified) UNVERIFIED=1 ;;
-    -h|--help) sed -n '2,34p' "$0" 2>/dev/null || true; exit 0 ;;
+    -h|--help) sed -n '2,43p' "$0" 2>/dev/null || true; exit 0 ;;
     *) die "unknown option (copy the whole command from the panel's Add host dialog)" ;;
   esac
   shift
 done
 
+# The join code: standard input, the environment, or (older panels) the command line. Never printed.
+if [ "$CODE_STDIN" -eq 1 ]; then
+  [ "$CODE_ARG" -eq 0 ] || die "--join and --join-stdin cannot be used together"
+  if [ -t 0 ]; then printf '%s' "fairy: paste the join code from the panel and press Enter: " >&2; fi
+  IFS= read -r CODE || [ -n "$CODE" ] || die "--join-stdin: no join code on standard input"
+elif [ "$CODE_ARG" -eq 0 ]; then
+  CODE="${FAIRY_JOIN_CODE:-}"
+fi
+unset FAIRY_JOIN_CODE # not for the programs this script starts
+if [ "$CODE_ARG" -eq 1 ]; then
+  say "note: the join code was given on the command line (--join), where other users of this machine can read it"
+  say "      while this runs. Newer panels pass it on standard input (--join-stdin)."
+fi
+CODE="$(printf '%s' "$CODE" | tr -d '\r')"
 [ -n "$CODE" ] && [ -n "$PANEL" ] ||
-  die "usage: install.sh --sums-sha256 HASH --panel PANEL_TAILSCALE_IP --join CODE [options] (use the command from the panel's Add host dialog)"
+  die "usage: install.sh --sums-sha256 HASH --panel PANEL_TAILSCALE_IP --join-stdin [options] (use the command from the panel's Add host dialog)"
+case "$CODE" in
+  *[!A-Za-z2-7\ -]*) die "that is not a Fairy join code (letters A-Z and digits 2-7, in groups of four)" ;;
+esac
 case "$PANEL" in *[!0-9.]*) die "--panel must be the panel's Tailscale IPv4 address, e.g. 100.64.0.10" ;; esac
 case "$UPSNAME" in *[!A-Za-z0-9_.-]*) die "--ups-name: letters, digits, _ . - only (the name in upsc -l)" ;; esac
 
@@ -217,8 +245,10 @@ elif command -v firewall-cmd >/dev/null 2>&1 && firewall-cmd --state >/dev/null 
   firewall-cmd -q --permanent --add-rich-rule="$rule" && firewall-cmd -q --reload && say "firewalld: allowed $PANEL to port 9101"
 fi
 
-# 7. tokens, settings and the join code (fairy-agent join prints no secret)
-set -- --code "$CODE" --panel "$PANEL"
+# 7. tokens, settings and the join code. The code goes to fairy-agent join on its standard input, never on a
+#    command line (which every local user can read while a program runs); join prints no secret.
+set -- --code-stdin --panel "$PANEL"
+[ "$PAIRV2" -eq 1 ] && set -- "$@" --pair-v2
 [ "$POWER" -eq 1 ] && set -- "$@" --power-control
 [ "$UPDATE" -eq 1 ] && set -- "$@" --self-update
 [ "$WOL" -eq 1 ] && set -- "$@" --wol
@@ -227,7 +257,10 @@ set -- --code "$CODE" --panel "$PANEL"
 if [ "$UPS" -eq 1 ]; then
   if [ -n "$UPSNAME" ]; then set -- "$@" --ups-name "$UPSNAME"; else set -- "$@" --ups; fi
 fi
-"$BIN" join "$@"
+"$BIN" join "$@" <<EOF
+$CODE
+EOF
+CODE=""
 
 # 8. polkit: one rule file per feature, only for a feature that is on in config.yaml now (join only ever
 #    switches features on, so this is asked of the config, not of this run's options). A rule whose feature is
