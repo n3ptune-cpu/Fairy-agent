@@ -50,6 +50,7 @@ type Fan struct {
 	events      []FanEvent
 	noTemp      int
 	actedAt     time.Time // when the watchdog last sent the fans to 100 % (zero: not since the start)
+	blindAt     time.Time // when the watchdog last acted without knowing the fan mode (zero: never)
 	closed      bool      // Shutdown was called: no more changes from the API
 	changed     bool      // SetMode or SetDuty changed the fans since this process started
 }
@@ -375,15 +376,25 @@ func (f *Fan) RunWatchdog(ctx context.Context) {
 	}
 }
 
+// fanBlindRetry is how long the watchdog waits before it acts again while it cannot read the fan mode: its
+// commands then go to a BMC that is busy or not answering, and one try in 30 s is enough of them.
+const fanBlindRetry = 30 * time.Second
+
 // WatchdogOnce is one watchdog check (exported for tests). Nothing happens in the BMC's automatic modes or when
 // both zones already run at 100 %.
+//
+// When the BMC does not say which mode the fans are in, a fixed duty may be in effect: the check goes on as
+// if the mode were "full" (handing the fans back treats that error the same way, see auto). It used to stop
+// there and forget its count of checks without a temperature, so a BMC that failed that one question now and
+// then kept the fans at a manual speed with no temperature known at all, and a check that could not read the
+// mode did nothing about a hot CPU (review N9).
 func (f *Fan) WatchdogOnce(ctx context.Context) {
 	ctx, cancel := ctxTimeout(ctx)
 	defer cancel()
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	mode, err := ipmi.GetFanMode(ctx, f.t)
-	if err != nil || mode != "full" {
+	mode, modeErr := ipmi.GetFanMode(ctx, f.t)
+	if modeErr == nil && mode != "full" {
 		f.noTemp = 0
 		return
 	}
@@ -393,9 +404,16 @@ func (f *Fan) WatchdogOnce(ctx context.Context) {
 			manual = true
 		}
 	}
-	if !manual {
+	if !manual { // both zones answer 100 %: nothing lower is in effect, whatever the mode
 		f.noTemp = 0
 		return
+	}
+	act := func(why string) {
+		if modeErr == nil {
+			f.failSafe(ctx, why)
+			return
+		}
+		f.failSafeBlind(ctx, why, modeErr)
 	}
 	var local []collect.Temp
 	if f.localTemps != nil {
@@ -406,14 +424,39 @@ func (f *Fan) WatchdogOnce(ctx context.Context) {
 	case !ok:
 		f.noTemp++
 		if f.noTemp >= 3 {
-			f.failSafe(ctx, "no temperature reading for 30 s while fans were set manually")
+			act("no temperature reading for 30 s while fans were set manually")
 		}
 	case !(temp < f.cfg.MaxTempC):
 		// written as "not below the limit": a reading or a limit that is not a number (NaN) compares false
 		// with everything, so `temp >= limit` would never act on it
-		f.failSafe(ctx, tooHot(name, temp, f.cfg.MaxTempC))
+		act(tooHot(name, temp, f.cfg.MaxTempC))
 	default:
 		f.noTemp = 0
+	}
+}
+
+// failSafeBlind is the watchdog's action while the fan mode cannot be read. It does what failSafe does, both
+// zones to 100 %: in "full" mode that is the watchdog's own safe state, in an automatic mode the BMC goes on
+// by its own curve, and in no mode can it make a fan slower. Only if the BMC does not take 100 % either are
+// the fans handed back to its automatic mode (as when the agent stops), so that the BMC's own control is in
+// charge and not a fixed duty that nothing can change. It never sets a duty below 100 %. Because nothing can
+// be read back from such a BMC, it acts at most once in fanBlindRetry. Caller holds f.mu.
+func (f *Fan) failSafeBlind(ctx context.Context, why string, modeErr error) {
+	now := f.now()
+	if !f.blindAt.IsZero() {
+		if since := now.Sub(f.blindAt); since >= 0 && since < fanBlindRetry {
+			return
+		}
+	}
+	f.blindAt = now
+	why += " (the BMC does not say which fan mode is set: " + safeErr(modeErr) + ")"
+	if f.failSafe(ctx, why) {
+		return
+	}
+	if mode, err := f.auto(ctx, "watchdog: the BMC did not take 100 %", true); err != nil {
+		slog.Error("fan watchdog could not hand the fans back to the BMC either", "reason", why, "error", safeErr(err))
+	} else {
+		slog.Warn("fan watchdog: fans handed back to the BMC", "mode", mode, "reason", why)
 	}
 }
 
@@ -425,8 +468,9 @@ func tooHot(name string, temp, limit float64) string {
 	return fmt.Sprintf("%s %v °C cannot be compared with the limit %v °C (not a number)", name, temp, limit)
 }
 
-// failSafe sets both zones to 100 % (mode stays "full"). Caller holds f.mu.
-func (f *Fan) failSafe(ctx context.Context, why string) {
+// failSafe sets both zones to 100 % (mode stays "full") and reports whether the BMC took it for zone 0. Caller
+// holds f.mu.
+func (f *Fan) failSafe(ctx context.Context, why string) bool {
 	f.noTemp = 0
 	f.actedAt = f.now()
 	firstErr := ipmi.SetDuty(ctx, f.t, 0, 100)
@@ -434,8 +478,9 @@ func (f *Fan) failSafe(ctx context.Context, why string) {
 	if firstErr != nil {
 		slog.Error("fan watchdog could not set 100 %", "reason", why, "error", safeErr(firstErr))
 		f.event("watchdog failed", why+": "+safeErr(firstErr))
-		return
+		return false
 	}
 	slog.Warn("fan watchdog: fans to 100 %", "reason", why)
 	f.event("watchdog: duty 100%", why)
+	return true
 }
