@@ -147,21 +147,26 @@ type Agent struct {
 	badAuth *limiter
 	never   map[string]bool
 
-	mu        sync.Mutex
-	lastLog   map[string]time.Time
-	cache     []byte
-	cacheAt   time.Time
-	cacheMu   sync.Mutex
-	procMu    sync.Mutex
-	sampleMu  sync.Mutex
-	lastTemps []collect.Temp
+	mu          sync.Mutex
+	lastLog     map[string]time.Time
+	cache       []byte
+	cacheAt     time.Time
+	cacheMu     sync.Mutex
+	procMu      sync.Mutex
+	sampleMu    sync.Mutex
+	lastTemps   []collect.Temp
+	lastTempsAt time.Time // when lastTemps was sampled (zero: never)
+	now         func() time.Time
+	sampling    chan struct{} // holds one token while LocalTemps takes its own sample
+	tempWait    time.Duration // how long LocalTemps waits for that sample
 }
 
 // New builds the agent. tokens come from Config.LoadTokens.
 func New(cfg *Config, tokens Tokens, d Deps) *Agent {
 	a := &Agent{cfg: cfg, d: d, readH: sha256.Sum256([]byte(tokens.Read)),
 		control: newLimiter(cfg.ControlRatePerMin, time.Minute), badAuth: newLimiter(20, time.Minute),
-		lastLog: map[string]time.Time{}, never: map[string]bool{}}
+		lastLog: map[string]time.Time{}, never: map[string]bool{}, now: time.Now, sampling: make(chan struct{}, 1),
+		tempWait: localTempWait}
 	if tokens.Control != "" {
 		a.ctlH, a.hasCtl = sha256.Sum256([]byte(tokens.Control)), true
 	}
@@ -171,11 +176,64 @@ func New(cfg *Config, tokens Tokens, d Deps) *Agent {
 	return a
 }
 
-// LocalTemps are the OS's own temperatures from the latest sample (for the fan watchdog).
+// LocalTempMaxAge is how old the OS's temperatures may be for the fan watchdog. The latest sample is normally
+// the panel's last /metrics poll; when the panel stops asking, that value must not count for ever.
+const LocalTempMaxAge = 30 * time.Second
+
+// localTempWait is how long LocalTemps waits for its own sample before it reports "no reading".
+const localTempWait = 5 * time.Second
+
+// LocalTemps are the OS's own temperatures for the fan watchdog: those of the latest sample when it is at most
+// LocalTempMaxAge old, otherwise those of a fresh sample taken now. It returns nil (no reading, which the
+// watchdog treats as a reason to go to 100 %) when the collector has none or does not answer in time; an old
+// value is never returned.
 func (a *Agent) LocalTemps() []collect.Temp {
+	if temps, at := a.LastLocalTemps(); !at.IsZero() {
+		if age := a.now().Sub(at); age >= 0 && age <= LocalTempMaxAge {
+			return temps
+		}
+	}
+	select {
+	case a.sampling <- struct{}{}:
+	default:
+		return nil // the previous sample has not come back yet
+	}
+	done := make(chan []collect.Temp, 1)
+	go func() {
+		defer func() { <-a.sampling }()
+		ctx, cancel := context.WithTimeout(context.Background(), a.tempWait)
+		defer cancel()
+		at := a.now()
+		s := a.d.Collector.Sample(ctx)
+		a.setLocalTemps(s.Temps, at)
+		done <- s.Temps
+	}()
+	t := time.NewTimer(a.tempWait)
+	defer t.Stop()
+	select {
+	case temps := <-done:
+		return temps
+	case <-t.C:
+		return nil
+	}
+}
+
+// LastLocalTemps are the OS's temperatures of the latest sample and when it was taken (zero time: no sample
+// yet), however old.
+func (a *Agent) LastLocalTemps() ([]collect.Temp, time.Time) {
 	a.sampleMu.Lock()
 	defer a.sampleMu.Unlock()
-	return a.lastTemps
+	return a.lastTemps, a.lastTempsAt
+}
+
+// setLocalTemps keeps a sample's temperatures with the time the sample was started; an older sample that comes
+// back late does not replace a newer one.
+func (a *Agent) setLocalTemps(t []collect.Temp, at time.Time) {
+	a.sampleMu.Lock()
+	if !at.Before(a.lastTempsAt) {
+		a.lastTemps, a.lastTempsAt = t, at
+	}
+	a.sampleMu.Unlock()
 }
 
 // safeErr is an error message that is safe to send: context errors become "timeout".
@@ -380,10 +438,9 @@ func decodeBody(r *http.Request, v any) error {
 // Metrics builds the /metrics payload.
 func (a *Agent) Metrics(ctx context.Context) map[string]any {
 	st := a.d.Collector.Static()
+	sampledAt := a.now()
 	s := a.d.Collector.Sample(ctx)
-	a.sampleMu.Lock()
-	a.lastTemps = s.Temps
-	a.sampleMu.Unlock()
+	a.setLocalTemps(s.Temps, sampledAt)
 
 	temps, fans, volts := orEmpty(s.Temps), orEmpty(s.Fans), orEmpty(s.Voltages)
 	if a.d.BMC != nil && a.cfg.IPMISensors() {
