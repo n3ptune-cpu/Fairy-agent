@@ -93,7 +93,7 @@ f=$(mktemp) && curl -fsSL --proto '=https' -o "$f" BASE/install.sh && echo "SH_H
 Windows:
 
 ```
-$u='BASE'; $b=(New-Object Net.WebClient).DownloadData("$u/install.ps1"); if ((([Security.Cryptography.SHA256]::Create().ComputeHash($b) | ForEach-Object { $_.ToString('x2') }) -join '') -ne 'PS1_HASH') { throw 'install.ps1 is not the release the panel checked: not run' }; $env:FAIRY_JOIN_CODE='CODE'; & ([scriptblock]::Create([Text.Encoding]::UTF8.GetString($b))) -ReleaseUrl $u -SumsSha256 SUMS -PanelAddress PANEL -PairV2 [options]
+$u='BASE'; $b=(New-Object Net.WebClient).DownloadData("$u/install.ps1"); if ((([Security.Cryptography.SHA256]::Create().ComputeHash($b) | ForEach-Object { $_.ToString('x2') }) -join '') -eq 'PS1_HASH') { $env:FAIRY_JOIN_CODE='CODE'; try { & ([scriptblock]::Create([Text.Encoding]::UTF8.GetString($b))) -ReleaseUrl $u -SumsSha256 SUMS -PanelAddress PANEL -PairV2 [options] } finally { Remove-Item Env:FAIRY_JOIN_CODE -ErrorAction SilentlyContinue } } else { throw 'install.ps1 is not the release the panel checked: not run' }
 ```
 
 | In the line | What the panel puts there |
