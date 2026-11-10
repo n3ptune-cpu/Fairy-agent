@@ -1120,17 +1120,42 @@ func TestJoinRefusesAnUntrustedOrOutwardConfig(t *testing.T) {
 	}
 }
 
+// fileItself is what os.SameFile compares, read from the opened file p. os.Stat is not enough for "is this
+// still the same file?": on Windows it keeps the path and looks the file's identity up only when os.SameFile
+// asks, which is after the file was replaced.
+func fileItself(t *testing.T, p string) os.FileInfo {
+	t.Helper()
+	f, err := os.Open(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	fi, err := f.Stat()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return fi
+}
+
 func TestRewriteFile(t *testing.T) {
 	dir := t.TempDir()
 	p := filepath.Join(dir, "config.yaml")
 	_ = os.WriteFile(p, []byte("a: 1\n"), 0o640)
-	before, _ := os.Stat(p)
+	// a second name of the old file: it shows what happened to the old file itself
+	oldName := filepath.Join(t.TempDir(), "the-old-file")
+	hardLink := os.Link(p, oldName)
+	before := fileItself(t, p)
 	if err := rewriteFile(p); err != nil {
 		t.Fatal(err)
 	}
-	after, _ := os.Stat(p)
-	if b, _ := os.ReadFile(p); string(b) != "a: 1\n" || os.SameFile(before, after) {
+	if b, _ := os.ReadFile(p); string(b) != "a: 1\n" || os.SameFile(before, fileItself(t, p)) {
 		t.Fatal("not a new file with the same content")
+	}
+	if hardLink == nil {
+		// the old file is still the old file under its other name, and config.yaml is no longer a name of it
+		if !os.SameFile(before, fileItself(t, oldName)) || os.SameFile(fileItself(t, oldName), fileItself(t, p)) {
+			t.Fatal("the old file was not left alone: the content was written in place")
+		}
 	}
 	if ents, _ := os.ReadDir(dir); len(ents) != 1 {
 		t.Fatal("temporary file left behind")
