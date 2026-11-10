@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -259,6 +260,9 @@ type applyRig struct {
 	unhealty bool
 	versions map[string]string // binary content -> the version it reports
 	checked  []string          // the versions the health check was asked for, in order
+	restage  func()            // stage the latest published release again, as the agent does
+	now      func() time.Time  // the installer's clock (nil: the real one)
+	current  string            // the installed version ("" = 41-aaaaaaa)
 }
 
 func newApplyRig(t *testing.T, publishVersion string, bin []byte) *applyRig {
@@ -276,17 +280,28 @@ func newApplyRig(t *testing.T, publishVersion string, bin []byte) *applyRig {
 	// installer's, which must stand on its own)
 	u := NewUpdater(UpdaterOptions{Version: "41-aaaaaaa", Key: ar.gh.Pub, Client: ar.gh.Client(), StageDir: ar.stage,
 		ResultPath: ar.result, Asset: testAsset, ResultWait: time.Millisecond, Apply: func(context.Context) error { return nil }})
-	ch, err := ar.gh.Client().Check(context.Background(), ar.gh.Pub, release.AgentProgram)
-	if err != nil {
-		t.Fatal(err)
+	ar.restage = func() {
+		t.Helper()
+		ch, err := ar.gh.Client().Check(context.Background(), ar.gh.Pub, release.AgentProgram)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := u.stage(context.Background(), ch, "test"); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := os.Stat(filepath.Join(ar.stage, testAsset)); err != nil {
+			t.Fatalf("not staged: %v", err)
+		}
 	}
-	if _, err := u.stage(context.Background(), ch, false, "test"); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := os.Stat(filepath.Join(ar.stage, testAsset)); err != nil {
-		t.Fatalf("not staged: %v", err)
-	}
+	ar.restage()
 	return ar
+}
+
+// publish makes a newer release the latest one and stages it.
+func (ar *applyRig) publish(tag, version string, bin []byte) {
+	ar.versions[string(bin)] = version
+	ar.gh.Publish(tag, "fairy-agent", version, map[string][]byte{testAsset: bin}, nil)
+	ar.restage()
 }
 
 func (ar *applyRig) apply(key ed25519.PublicKey) UpdateResult {
@@ -300,8 +315,12 @@ func (ar *applyRig) apply(key ed25519.PublicKey) UpdateResult {
 			ar.running = string(b)
 			return nil
 		}}
+	current := ar.current
+	if current == "" {
+		current = "41-aaaaaaa"
+	}
 	return ApplyStaged(context.Background(), ApplyOptions{StageDir: ar.stage, ResultPath: ar.result, Asset: testAsset,
-		Key: key, CurrentVersion: "41-aaaaaaa", Installer: in,
+		Key: key, CurrentVersion: current, Installer: in, Now: ar.now,
 		Healthy: func(_ context.Context, want string) error {
 			ar.checked = append(ar.checked, want)
 			// what the real check does (CheckRunning): the running agent must report the version asked for
@@ -395,8 +414,8 @@ func TestApplyStagedReverifiesAndRollsBack(t *testing.T) {
 }
 
 // The stage is written by the less privileged agent, so the installer never goes back to an older release, not
-// even with force (that would let a compromised agent bring back an old flaw). force still reinstalls the same
-// version.
+// even with force (that would let a compromised agent bring back an old flaw), and (L22) never puts the same
+// version in again either: that only restarts the service, as often as it is asked.
 func TestApplyStagedNeverDowngrades(t *testing.T) {
 	ar := newApplyRig(t, "42-bbbbbbb", []byte("new 42"))
 	var req stageRequest
@@ -416,8 +435,179 @@ func TestApplyStagedNeverDowngrades(t *testing.T) {
 	if res := apply("50-ddddddd"); res.OK || !strings.Contains(res.Message, "fairy-agent update --force") {
 		t.Fatalf("forced downgrade: %+v", res)
 	}
-	if res := apply("42-bbbbbbb"); !res.OK {
-		t.Fatalf("forced reinstall of the same version: %+v", res)
+	for _, force := range []bool{true, false} {
+		req.Force = force
+		nb, _ := json.Marshal(req)
+		_ = os.WriteFile(filepath.Join(ar.stage, stageRequestFile), nb, 0o600)
+		if res := apply("42-bbbbbbb"); res.OK || !strings.Contains(res.Message, "already installed") {
+			t.Fatalf("reinstall of the same version, force=%v: %+v", force, res)
+		}
+	}
+	if b, _ := os.ReadFile(ar.target); string(b) != "installed 41" {
+		t.Fatalf("the program was replaced: %q", b)
+	}
+	if _, err := os.Stat(lastApplyPath(ar.result)); err == nil {
+		t.Fatal("a refused run was counted for the cooldown")
+	}
+}
+
+// L22: the installer refuses a second run within UpdateCooldown of the last one that replaced the program. It
+// keeps the time in its own folder; runs it refuses do not move it.
+func TestApplyStagedCooldown(t *testing.T) {
+	ar := newApplyRig(t, "42-bbbbbbb", []byte("new 42"))
+	t0 := time.Unix(1_800_000_000, 0)
+	clock := t0
+	ar.now = func() time.Time { return clock }
+	if res := ar.apply(nil); !res.OK {
+		t.Fatalf("first run: %+v", res)
+	}
+	stamp, err := os.ReadFile(lastApplyPath(ar.result))
+	if err != nil || strings.TrimSpace(string(stamp)) != "1800000000" {
+		t.Fatalf("time of the run not recorded: %q %v", stamp, err)
+	}
+	if filepath.Dir(lastApplyPath(ar.result)) != filepath.Dir(ar.result) {
+		t.Fatal("the time is not kept next to the result file")
+	}
+	ar.current, ar.starts = "42-bbbbbbb", 0
+	ar.publish("build-43", "43-ccccccc", []byte("new 43"))
+
+	for _, after := range []time.Duration{0, time.Second, 5 * time.Minute, UpdateCooldown - time.Second} {
+		clock = t0.Add(after)
+		res := ar.apply(nil)
+		if res.OK || !strings.Contains(res.Message, "less than 10 minutes ago") || !strings.Contains(res.Message, "try again in") {
+			t.Fatalf("after %s: %+v", after, res)
+		}
+		if res.To != "43-ccccccc" || len(res.ID) != 16 {
+			t.Fatalf("after %s: the refusal does not name the request: %+v", after, res)
+		}
+		if b, _ := os.ReadFile(ar.target); string(b) != "new 42" || ar.starts != 0 {
+			t.Fatalf("after %s: the program was touched (%q, %d starts)", after, b, ar.starts)
+		}
+		if r := readResult(ar.result); r == nil || r.OK || r.ID != res.ID {
+			t.Fatalf("after %s: result file %+v", after, r)
+		}
+	}
+	// 600 refused runs later the time has not moved: the next run after the pause goes through
+	if now, _ := os.ReadFile(lastApplyPath(ar.result)); string(now) != string(stamp) {
+		t.Fatalf("a refused run moved the time: %q", now)
+	}
+	if ents, _ := os.ReadDir(filepath.Dir(ar.target)); len(ents) != 2 { // fairy-agent, fairy-agent.old
+		t.Fatalf("a refused run left files next to the program: %v", ents)
+	}
+	clock = t0.Add(UpdateCooldown)
+	if res := ar.apply(nil); !res.OK {
+		t.Fatalf("after the cooldown: %+v", res)
+	}
+	if b, _ := os.ReadFile(ar.target); string(b) != "new 43" {
+		t.Fatalf("%q", b)
+	}
+
+	// a run that rolls back restarted the service twice: it counts
+	ar = newApplyRig(t, "42-bbbbbbb", []byte("new 42"))
+	clock = t0
+	ar.now = func() time.Time { return clock }
+	ar.unhealty = true
+	if res := ar.apply(nil); res.OK || !strings.Contains(res.Message, "rolled back") {
+		t.Fatalf("%+v", res)
+	}
+	ar.unhealty = false
+	ar.restage()
+	clock = t0.Add(time.Minute)
+	if res := ar.apply(nil); res.OK || !strings.Contains(res.Message, "try again in 9m0s") {
+		t.Fatalf("after a rollback: %+v", res)
+	}
+	// the clock was set back (the recorded time is in the future): nobody is locked out
+	clock = t0.Add(-time.Hour)
+	if res := ar.apply(nil); !res.OK {
+		t.Fatalf("clock set back: %+v", res)
+	}
+
+	// what the time file holds is not trusted beyond being a time: rubbish, a link, a huge file hold nothing back
+	for name, plant := range map[string]func(p string){
+		"rubbish": func(p string) { _ = os.WriteFile(p, []byte("soon\n"), 0o644) },
+		"empty":   func(p string) { _ = os.WriteFile(p, nil, 0o644) },
+		"huge":    func(p string) { _ = os.WriteFile(p, []byte(strings.Repeat("9", 4096)), 0o644) },
+		"link": func(p string) {
+			real := filepath.Join(t.TempDir(), "elsewhere")
+			_ = os.WriteFile(real, []byte("1800000000\n"), 0o644)
+			_ = os.Symlink(real, p)
+		},
+	} {
+		ar = newApplyRig(t, "42-bbbbbbb", []byte("new 42"))
+		clock = t0
+		ar.now = func() time.Time { return clock }
+		_ = os.MkdirAll(filepath.Dir(ar.result), 0o755)
+		plant(lastApplyPath(ar.result))
+		if res := ar.apply(nil); !res.OK {
+			t.Fatalf("%s: %+v", name, res)
+		}
+		if b, _ := os.ReadFile(lastApplyPath(ar.result)); strings.TrimSpace(string(b)) != "1800000000" {
+			t.Fatalf("%s: the time was not replaced: %q", name, b)
+		}
+		if st, err := os.Lstat(lastApplyPath(ar.result)); err != nil || !st.Mode().IsRegular() {
+			t.Fatalf("%s: %v", name, err)
+		}
+	}
+}
+
+// L22, the agent's half: "force" from the network is ignored (same version: nothing happens; older: refused),
+// and during the installer's cooldown nothing is downloaded.
+func TestUpdaterIgnoresForceAndKeepsTheCooldown(t *testing.T) {
+	// the audit's loop: the same version, forced, again and again
+	r := newUpdRig(t, "42-bbbbbbb", nil)
+	r.gh.Publish("build-42", "fairy-agent", "42-bbbbbbb", map[string][]byte{testAsset: []byte("x")}, nil)
+	for i := 0; i < 5; i++ {
+		if st, _ := post(t, r.srv.URL, ctlTok, map[string]any{"force": true}); st != 202 {
+			t.Fatal(st)
+		}
+		if st := r.wait(t); st.State != "idle" || !strings.Contains(st.Message, "already up to date") {
+			t.Fatalf("%+v", st)
+		}
+	}
+	if n := r.gh.Downloads(testAsset); n != 0 || r.applied.Load() != 0 {
+		t.Fatalf("5 forced requests: %d downloads, %d installer starts", n, r.applied.Load())
+	}
+	// an older release, forced
+	r = newUpdRig(t, "43-ccccccc", nil)
+	r.gh.Publish("build-42", "fairy-agent", "42-bbbbbbb", map[string][]byte{testAsset: []byte("x")}, nil)
+	r.u.Start(UpdateRequest{Force: true})
+	if st := r.wait(t); st.State != "failed" || !strings.Contains(st.Message, "not downgrading") {
+		t.Fatalf("%+v", st)
+	}
+	if n := r.gh.Downloads(testAsset); n != 0 || r.applied.Load() != 0 {
+		t.Fatalf("forced older release: %d downloads, %d installer starts", n, r.applied.Load())
+	}
+
+	// a newer release while the installer's cooldown runs: refused before the download, with the time left
+	r = newUpdRig(t, "41-aaaaaaa", nil)
+	r.gh.Publish("build-42", "fairy-agent", "42-bbbbbbb", map[string][]byte{testAsset: []byte("x")}, nil)
+	_ = os.MkdirAll(filepath.Dir(r.result), 0o755)
+	stamp := func(at time.Time) {
+		_ = os.WriteFile(lastApplyPath(r.result), []byte(strconv.FormatInt(at.Unix(), 10)+"\n"), 0o644)
+	}
+	stamp(time.Now().Add(-3 * time.Minute))
+	r.u.Start(UpdateRequest{})
+	st := r.wait(t)
+	if st.State != "failed" || !strings.Contains(st.Message, "less than 10 minutes ago") || st.Target != "42-bbbbbbb" {
+		t.Fatalf("%+v", st)
+	}
+	if n := r.gh.Downloads(testAsset); n != 0 || r.applied.Load() != 0 {
+		t.Fatalf("during the cooldown: %d downloads, %d installer starts", n, r.applied.Load())
+	}
+	// after it: downloaded and handed to the installer
+	stamp(time.Now().Add(-UpdateCooldown - time.Second))
+	r.u.Start(UpdateRequest{})
+	r.wait(t)
+	if n := r.gh.Downloads(testAsset); n != 1 || r.applied.Load() != 1 {
+		t.Fatalf("after the cooldown: %d downloads, %d installer starts", n, r.applied.Load())
+	}
+	var req map[string]any
+	b, _ := os.ReadFile(filepath.Join(r.stage, stageRequestFile))
+	if json.Unmarshal(b, &req) != nil || req["id"] == "" {
+		t.Fatalf("%s", b)
+	}
+	if _, has := req["force"]; has {
+		t.Fatalf("the stage still carries force: %s", b)
 	}
 }
 

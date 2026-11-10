@@ -18,6 +18,7 @@ import (
 	"regexp"
 	"runtime"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -62,16 +63,62 @@ type UpdateResult struct {
 
 // UpdateRequest is the POST /update body.
 type UpdateRequest struct {
-	Force       bool `json:"force"` // also reinstall the same version or install an older one
+	// Force is read and ignored: a request from the network never reinstalls the same version or installs an
+	// older one (the panel never sent it). That is for root / an administrator on the machine:
+	// fairy-agent update --force.
+	Force       bool `json:"force"`
 	RequestedBy any  `json:"requested_by"`
+}
+
+// UpdateCooldown is the least time between two installer runs that were asked for through the agent (the
+// panel's Update button). A run restarts the agent (on Windows the helper too, so the fans go back to the BMC
+// for a moment); without a pause, whoever holds the control token could keep a machine restarting. The
+// installer keeps the time itself, where the agent's account cannot write. `fairy-agent update` on the
+// machine is not held back by it.
+const UpdateCooldown = 10 * time.Minute
+
+// lastApplyFile, next to the installer's result file, holds the time (Unix seconds) of the installer's last
+// run that went as far as replacing the program.
+const lastApplyFile = "last-apply"
+
+func lastApplyPath(resultPath string) string {
+	return filepath.Join(filepath.Dir(resultPath), lastApplyFile)
+}
+
+// cooldownLeft is how long the installer still refuses a new run (0: it does not). A missing or unreadable
+// time, or one in the future (the clock was set back), holds nothing back.
+func cooldownLeft(resultPath string, now time.Time) time.Duration {
+	if resultPath == "" {
+		return 0
+	}
+	b, err := release.ReadStaged(lastApplyPath(resultPath), 64)
+	if err != nil {
+		return 0
+	}
+	n, err := strconv.ParseInt(strings.TrimSpace(string(b)), 10, 64)
+	if err != nil {
+		return 0
+	}
+	age := now.Sub(time.Unix(n, 0))
+	if age < 0 || age >= UpdateCooldown {
+		return 0
+	}
+	return UpdateCooldown - age
+}
+
+func cooldownMessage(left time.Duration) string {
+	return fmt.Sprintf("an update was installed on this machine less than %d minutes ago; refused, try again in %s "+
+		"(on the machine itself, any time: fairy-agent update)", int(UpdateCooldown/time.Minute), left.Round(time.Second))
 }
 
 // stageRequest is request.json in the stage folder.
 type stageRequest struct {
-	ID          string  `json:"id"`
-	From        string  `json:"from"`
-	To          string  `json:"to"`
-	Force       bool    `json:"force"`
+	ID   string `json:"id"`
+	From string `json:"from"`
+	To   string `json:"to"`
+	// Force is no longer written, and the installer ignores it: the stage belongs to the less privileged
+	// agent, so nothing in it can ask for the same or an older version.
+	Force       bool    `json:"force,omitempty"`
 	RequestedBy string  `json:"requested_by"`
 	At          float64 `json:"at"`
 }
@@ -217,8 +264,12 @@ func (u *Updater) Start(req UpdateRequest) (int, map[string]any) {
 	u.busy = true
 	u.done = make(chan struct{})
 	u.st.State, u.st.Message, u.st.Target, u.st.Since = "downloading", "checking the latest release", "", u.ts()
-	slog.Warn("self-update: requested", "requested_by", who, "current", u.o.Version, "force", req.Force)
-	go u.run(req.Force, who, u.done)
+	slog.Warn("self-update: requested", "requested_by", who, "current", u.o.Version)
+	if req.Force {
+		slog.Warn("self-update: \"force\" in the request is ignored (the same or an older version is only installed by hand: fairy-agent update --force)",
+			"requested_by", who)
+	}
+	go u.run(who, u.done)
 	return 202, map[string]any{"state": "downloading", "current": u.o.Version}
 }
 
@@ -234,7 +285,7 @@ func (u *Updater) fail(msg, target string) {
 	u.set("failed", msg, target)
 }
 
-func (u *Updater) run(force bool, who string, done chan struct{}) {
+func (u *Updater) run(who string, done chan struct{}) {
 	defer u.finish(done)
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
 	defer cancel()
@@ -245,11 +296,11 @@ func (u *Updater) run(force bool, who string, done chan struct{}) {
 	}
 	cmp, known := release.Compare(u.o.Version, ch.Version)
 	switch {
-	case cmp == 0 && !force:
+	case cmp == 0:
 		slog.Info("self-update: already up to date", "version", u.o.Version)
 		u.set("idle", "already up to date ("+u.o.Version+")", "")
 		return
-	case cmp < 0 && !force:
+	case cmp < 0:
 		u.fail(fmt.Sprintf("the latest release %s is older than this agent (%s); not downgrading", ch.Version, u.o.Version), ch.Version)
 		return
 	case !known:
@@ -257,9 +308,14 @@ func (u *Updater) run(force bool, who string, done chan struct{}) {
 		u.fail(release.NotComparable(u.o.Version, ch.Version).Error()+"; not installing (by hand, as root / Administrator: fairy-agent update --force)", ch.Version)
 		return
 	}
+	// The installer would refuse (applyStaged): say so before anything is downloaded.
+	if left := cooldownLeft(u.o.ResultPath, u.now()); left > 0 {
+		u.fail(cooldownMessage(left), ch.Version)
+		return
+	}
 	u.set("downloading", "downloading "+ch.Version+" ("+ch.Tag+")", ch.Version)
 	slog.Info("self-update: downloading", "release", ch.Tag, "version", ch.Version, "asset", u.o.Asset)
-	id, err := u.stage(ctx, ch, force, who)
+	id, err := u.stage(ctx, ch, who)
 	if err != nil {
 		u.fail(safeErr(err), ch.Version)
 		return
@@ -290,7 +346,7 @@ func (u *Updater) run(force bool, who string, done chan struct{}) {
 }
 
 // stage writes the verified release files and the binary into the stage folder.
-func (u *Updater) stage(ctx context.Context, ch *release.Checked, force bool, who string) (string, error) {
+func (u *Updater) stage(ctx context.Context, ch *release.Checked, who string) (string, error) {
 	dir := u.o.StageDir
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return "", fmt.Errorf("stage folder %s: %w%s", dir, err, stageHint)
@@ -309,7 +365,7 @@ func (u *Updater) stage(ctx context.Context, ch *release.Checked, force bool, wh
 	idb := make([]byte, 8)
 	_, _ = rand.Read(idb)
 	id := hex.EncodeToString(idb)
-	req, _ := json.Marshal(stageRequest{ID: id, From: u.o.Version, To: ch.Version, Force: force, RequestedBy: who, At: u.ts()})
+	req, _ := json.Marshal(stageRequest{ID: id, From: u.o.Version, To: ch.Version, RequestedBy: who, At: u.ts()})
 	for name, data := range map[string][]byte{release.SumsFile: ch.SumsRaw, release.SigFile: ch.SigRaw,
 		release.VersionFile: ch.VersionRaw, stageRequestFile: req} {
 		if err := os.WriteFile(filepath.Join(dir, name), data, 0o600); err != nil {
@@ -357,6 +413,7 @@ type ApplyOptions struct {
 	CurrentVersion       string             // the installed (and running) version
 	Installer            *release.Installer // Target, Stop, Start, Relabel, RenameSwap; Healthy is set here
 	Healthy              func(ctx context.Context, version string) error
+	Now                  func() time.Time // nil: time.Now (the cooldown; tests)
 }
 
 var idRe = regexp.MustCompile(`^[0-9a-f]{1,32}$`)
@@ -423,12 +480,13 @@ func applyStaged(ctx context.Context, o ApplyOptions, res *UpdateResult) error {
 	res.To = ch.Version
 	cmp, known := release.Compare(o.CurrentVersion, ch.Version)
 	slog.Warn("apply-update: verified the staged release", "from", o.CurrentVersion, "to", ch.Version,
-		"requested_by", cleanWho(req.RequestedBy), "force", req.Force)
-	if !req.Force && cmp == 0 {
-		return errors.New("already installed")
+		"requested_by", cleanWho(req.RequestedBy))
+	// The stage is written by the less privileged agent: nothing in it (request.json's "force") makes the
+	// installer put the same version in again, which only restarts the service, or an older one, which may
+	// have flaws fixed since. Both are for root / an administrator: fairy-agent update --force.
+	if cmp == 0 {
+		return errors.New("already installed (to install it again, by hand: fairy-agent update --force)")
 	}
-	// Never older, not even with force: the stage is written by the less privileged agent, and an old signed
-	// release may have flaws fixed since. Going back is for root / an administrator: fairy-agent update --force.
 	if known && cmp < 0 {
 		return fmt.Errorf("%s is older than the installed %s; not downgrading (by hand: fairy-agent update --force)", ch.Version, o.CurrentVersion)
 	}
@@ -441,10 +499,24 @@ func applyStaged(ctx context.Context, o ApplyOptions, res *UpdateResult) error {
 	if !ok {
 		return fmt.Errorf("the release has no %s", o.Asset)
 	}
+	now := time.Now
+	if o.Now != nil {
+		now = o.Now
+	}
+	if left := cooldownLeft(o.ResultPath, now()); left > 0 {
+		return errors.New(cooldownMessage(left))
+	}
 	in := *o.Installer
 	newPath, err := release.CopyVerified(p(o.Asset), filepath.Dir(in.Target), want)
 	if err != nil {
 		return err
+	}
+	// From here on the service is stopped, swapped and restarted: that is the run the cooldown counts. Runs
+	// refused above change nothing and do not move the time, so asking again and again cannot keep an update
+	// away for ever.
+	if err := writeAtomic(lastApplyPath(o.ResultPath), []byte(strconv.FormatInt(now().Unix(), 10)+"\n")); err != nil {
+		os.Remove(newPath)
+		return fmt.Errorf("cannot record the time of this run: %w", err)
 	}
 	in.Healthy = func(ctx context.Context) error { return o.Healthy(ctx, ch.Version) }
 	// after a rollback the installed version runs again: that one is what the check must find
@@ -486,11 +558,17 @@ func plainIfExists(dir string) error {
 }
 
 func writeResult(path string, r UpdateResult) error {
-	if err := plainIfExists(filepath.Dir(path)); err != nil {
-		return err
-	}
 	b, err := json.Marshal(r)
 	if err != nil {
+		return err
+	}
+	return writeAtomic(path, b)
+}
+
+// writeAtomic replaces a file in the installer's own folder in one step (readable by everyone: the agent
+// reads it).
+func writeAtomic(path string, b []byte) error {
+	if err := plainIfExists(filepath.Dir(path)); err != nil {
 		return err
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {

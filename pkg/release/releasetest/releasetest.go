@@ -84,6 +84,17 @@ func (s *Server) Hits() []string {
 	return slices.Clone(s.hits)
 }
 
+// Downloads is how many times the file name was fetched from the storage host so far.
+func (s *Server) Downloads(name string) int {
+	n := 0
+	for _, h := range s.Hits() {
+		if h == "/storage/"+name {
+			n++
+		}
+	}
+	return n
+}
+
 // Client returns a release.Client for s.Repo that talks to this server.
 func (s *Server) Client() *release.Client {
 	c, err := release.NewClient(s.Repo, "releasetest")

@@ -103,6 +103,22 @@ func TestCLIUpdate(t *testing.T) {
 	if strings.Join(r.done, ",") != "41-0000000>42-1a2b3c4:ok" {
 		t.Fatal(r.done)
 	}
+	// by hand, --force puts the same version in again, as often as it is asked (no cooldown here: the one who
+	// runs this is root / an administrator on the machine) ...
+	for i := 0; i < 3; i++ {
+		before := r.starts
+		c = r.cli("42-1a2b3c4", nil)
+		c.Force = true
+		if err := c.Run(context.Background()); err != nil || r.starts != before+1 {
+			t.Fatal("--force, same version:", err, r.starts-before)
+		}
+	}
+	// ... and an older release
+	c = r.cli("50-fffffff", nil)
+	c.Force = true
+	if err := c.Run(context.Background()); err != nil {
+		t.Fatal("--force, older release:", err)
+	}
 }
 
 // L23: a signed release whose version has no build number (v0.4.2), or one of ten digits, is not "newer" than
