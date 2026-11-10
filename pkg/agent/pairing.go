@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"mime"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -27,26 +28,46 @@ func PairingPath(cfg *Config) string {
 	return filepath.Join(cfg.Dir(), "pairing.json")
 }
 
+// pairOthersPerMin is how many /pair requests from addresses other than the panel's are looked at per minute,
+// all of them together (each such address has enroll.RatePerMin of its own inside that).
+const pairOthersPerMin = 4 * enroll.RatePerMin
+
 // Pairer answers POST /pair: the panel's first contact after "Add host". It answers only while the state file
 // holds an unexpired, unused join code, only to the panel's address stored with it, at most enroll.RatePerMin
 // times a minute; a correct proof gets the tokens once and closes pairing for good.
+//
+// Who is asking is settled before anything is counted: the panel's address has a budget of its own, which no
+// other address can use up. Every other address is refused anyway and has its own small budget (so that one
+// machine cannot fill the log), inside one shared budget (so that many addresses cannot either).
 type Pairer struct {
 	Path   string
 	Tokens func() (Tokens, error)
 	Info   func() enroll.Response // version, hostname, platform, features (no tokens)
 	Now    func() time.Time
 
-	mu    sync.Mutex
-	limit *limiter
+	mu     sync.Mutex
+	limit  *limiter // the panel's address
+	each   *limiter // any other address, per address
+	others *limiter // all other addresses together
 }
 
 // NewPairer builds the /pair handler for a state file.
 func NewPairer(path string, tokens func() (Tokens, error), info func() enroll.Response) *Pairer {
-	return &Pairer{Path: path, Tokens: tokens, Info: info, Now: time.Now, limit: newLimiter(enroll.RatePerMin, time.Minute)}
+	return &Pairer{Path: path, Tokens: tokens, Info: info, Now: time.Now, limit: newLimiter(enroll.RatePerMin, time.Minute),
+		each: newLimiter(enroll.RatePerMin, time.Minute), others: newLimiter(pairOthersPerMin, time.Minute)}
 }
 
 func pairErr(w http.ResponseWriter, status int, code, msg string) {
 	writeJSON(w, status, map[string]any{"error": msg, "code": code})
+}
+
+// allow counts one request in the budget of who sent it. Another address gets an entry of its own only while
+// the shared budget has room, so the per-address table stays small whatever arrives.
+func (p *Pairer) allow(ip string, fromPanel bool) bool {
+	if fromPanel {
+		return p.limit.allow("panel")
+	}
+	return p.others.allowPeek("others") && p.each.allow(ip) && p.others.allow("others")
 }
 
 // ServeHTTP is POST /pair.
@@ -60,14 +81,9 @@ func (p *Pairer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		pairErr(w, 404, "pairing_inactive", "pairing is not active on this agent")
 		return
 	}
-	if !p.limit.allow("pair") {
-		pairErr(w, 429, "rate_limited", "too many pairing requests; try again in a minute")
-		return
-	}
-	var req enroll.Request
-	b, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 1024))
-	if err != nil || json.Unmarshal(b, &req) != nil || req.Proof == "" {
-		pairErr(w, 400, "bad_request", `expected {"proof": "..."}`)
+	// A browser can send a form or text body to this port without asking (no CORS preflight), JSON it cannot.
+	if mt, _, err := mime.ParseMediaType(r.Header.Get("Content-Type")); err != nil || mt != "application/json" {
+		pairErr(w, 415, "unsupported_media_type", "expected Content-Type: application/json")
 		return
 	}
 	ip := clientIP(r)
@@ -75,6 +91,11 @@ func (p *Pairer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	defer p.mu.Unlock()
 	now := p.Now()
 	st, err := enroll.ReadState(p.Path)
+	// The caller's address first: only then is the request counted, in the panel's budget or the others'.
+	if !p.allow(ip, err == nil && st.Panel != "" && ip == st.Panel) {
+		pairErr(w, 429, "rate_limited", "too many pairing requests; try again in a minute")
+		return
+	}
 	if err != nil || !st.Active(now) {
 		if err != nil && !errors.Is(err, os.ErrNotExist) {
 			slog.Warn("pairing state unreadable", "error", err.Error())
@@ -91,6 +112,12 @@ func (p *Pairer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if st.Panel != "" && ip != st.Panel {
 		slog.Warn("pairing request refused: not from the panel's address", "remote", ip, "panel", st.Panel)
 		pairErr(w, 403, "wrong_address", "pairing is only open to the panel's address")
+		return
+	}
+	var req enroll.Request
+	b, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 1024))
+	if err != nil || json.Unmarshal(b, &req) != nil || req.Proof == "" {
+		pairErr(w, 400, "bad_request", `expected {"proof": "..."}`)
 		return
 	}
 	if !enroll.Check(req.Proof, st.Verifier) {

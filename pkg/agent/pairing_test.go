@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -158,6 +159,95 @@ func TestPairWrongCodesAndRateLimit(t *testing.T) {
 	}
 	if s, _ := enroll.ReadState(r.path); s.Closed != "too many wrong codes" || s.Verifier != "" {
 		t.Fatalf("state: %+v", s)
+	}
+}
+
+// from sends one POST /pair straight to the handler as if it came from addr (httptest's server only ever
+// connects from 127.0.0.1).
+func (r *pairRig) from(addr, ctype, body string) (int, map[string]any) {
+	req := httptest.NewRequest(http.MethodPost, enroll.Path, strings.NewReader(body))
+	req.RemoteAddr = net.JoinHostPort(addr, "40000")
+	if ctype != "" {
+		req.Header.Set("Content-Type", ctype)
+	}
+	rec := httptest.NewRecorder()
+	r.p.ServeHTTP(rec, req)
+	var m map[string]any
+	_ = json.Unmarshal(rec.Body.Bytes(), &m)
+	return rec.Code, m
+}
+
+// L15: the budget used to be one for everybody and was counted before the address check, so any machine that
+// reached the port could keep the panel out for the whole Add host window.
+func TestPairBudgetOfOthersDoesNotStopThePanel(t *testing.T) {
+	const panel = "100.88.109.47"
+	r := newPairRig(t, "", panel)
+	good := `{"proof":"` + r.proof + `"}`
+	// one machine, 100 requests, any content: refused, and after its own budget not even looked at
+	seen := map[int]int{}
+	for i := 0; i < 100; i++ {
+		st, _ := r.from("100.99.0.5", "application/json", good)
+		seen[st]++
+	}
+	if seen[403] != enroll.RatePerMin || seen[429] != 100-enroll.RatePerMin || len(seen) != 2 {
+		t.Fatalf("one other address: %v", seen)
+	}
+	// many machines: the shared budget of the others ends, the table of addresses stays small
+	seen = map[int]int{}
+	for i := 0; i < 300; i++ {
+		st, _ := r.from(fmt.Sprintf("100.99.%d.%d", 1+i/200, 1+i%200), "application/json", `{"proof":"x"}`)
+		seen[st]++
+	}
+	if seen[403] != pairOthersPerMin-enroll.RatePerMin || seen[403]+seen[429] != 300 {
+		t.Fatalf("many other addresses: %v", seen)
+	}
+	if n := len(r.p.each.hits); n > pairOthersPerMin {
+		t.Fatalf("%d addresses remembered, want at most %d", n, pairOthersPerMin)
+	}
+	if s, _ := enroll.ReadState(r.path); s.Failures != 0 || !s.Active(r.now) {
+		t.Fatalf("requests from elsewhere must not use up the code: %+v", s)
+	}
+	// the panel is not affected: its first request pairs
+	st, body := r.from(panel, "application/json", good)
+	if st != 200 || body["token"] != readTok {
+		t.Fatalf("the panel after the flood: %d %v", st, body)
+	}
+}
+
+// The panel's own budget is still enroll.RatePerMin a minute, and other addresses are told so independently.
+func TestPairPanelBudgetIsItsOwn(t *testing.T) {
+	const panel = "100.88.109.47"
+	r := newPairRig(t, "", panel)
+	for i := 0; i < enroll.RatePerMin; i++ {
+		if st, body := r.from(panel, "application/json", `{"proof":"x"}`); st != 403 || body["code"] != "wrong_code" {
+			t.Fatalf("%d: %d %v", i, st, body)
+		}
+	}
+	if st, body := r.from(panel, "application/json", `{"proof":"`+r.proof+`"}`); st != 429 || body["code"] != "rate_limited" {
+		t.Fatalf("the panel over its budget: %d %v", st, body)
+	}
+	if st, body := r.from("100.99.0.5", "application/json", `{}`); st != 403 || body["code"] != "wrong_address" {
+		t.Fatalf("another address while the panel is over its budget: %d %v", st, body)
+	}
+}
+
+// Only JSON is looked at (the panel has always sent it): a web page cannot make a browser on the panel's
+// machine send JSON to this port without a preflight, which the agent does not answer.
+func TestPairNeedsJSONContentType(t *testing.T) {
+	r := newPairRig(t, "", "127.0.0.1")
+	good := `{"proof":"` + r.proof + `"}`
+	for _, ct := range []string{"", "text/plain", "application/x-www-form-urlencoded", "multipart/form-data; boundary=x", "application/jsonx", "json"} {
+		for i := 0; i < 2*enroll.RatePerMin; i++ { // not counted either
+			if st, body := r.from("127.0.0.1", ct, good); st != 415 || body["code"] != "unsupported_media_type" {
+				t.Fatalf("Content-Type %q: %d %v", ct, st, body)
+			}
+		}
+	}
+	if s, _ := enroll.ReadState(r.path); s.Failures != 0 || !s.Active(r.now) {
+		t.Fatalf("state changed: %+v", s)
+	}
+	if st, _ := r.from("127.0.0.1", "application/json; charset=utf-8", good); st != 200 {
+		t.Fatalf("JSON with a charset: %d", st)
 	}
 }
 
