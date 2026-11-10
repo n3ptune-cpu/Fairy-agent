@@ -216,43 +216,216 @@ installed fairy-agent's release key". Use 2.3 there.
 
 ---
 
-## Part 2: one last update by hand on each machine
+## Part 2: installing or updating an agent by hand
 
-The agents running now cannot update themselves yet. Install the release build once; after that the panel's
-Update button does it.
+Nothing in this part downloads "latest" and runs it. Every way below either names one release, or lets an
+installed release build check the signature itself. Pick the row that fits the machine:
 
-### 2.1 Linux machines (Proxmox nodes, Fedora), as root
+| The machine | Do this |
+| --- | --- |
+| has no agent yet | **Add host** in the panel and run the command it shows ([AGENT.md](AGENT.md#add-a-host-from-the-panel-one-command)). Nothing by hand. |
+| runs a release build (`fairy-agent version` says `signed-release key: built in`) and only needs a newer program | [2.1](#21-a-machine-that-runs-a-release-build-fairy-agent-update): `fairy-agent update` |
+| needs the service files or rules of a newer release | [2.2](#22-service-files-and-rules-of-a-newer-release-re-pair): **Re-pair** in the panel |
+| can use none of these (no panel yet, a build without the release key, or after a key change, 1.7) | [2.3](#23-by-hand-from-one-named-release-checked): by hand from one named release |
 
-Set `ARCH` to `amd64` (NSX-KACHINA, NSX-PERLICA) or `arm64` (NSX-FONTAINE, NSX-SNEZHNAYA), then paste the rest:
+Self-update from the panel's Update button is switched on per machine in [2.4](#24-switch-self-update-on).
 
-```sh
-ARCH=amd64
-mkdir -p /root/fairy-update && cd /root/fairy-update && rm -f ./*
-REL=https://github.com/n3ptune-cpu/Fairy-agent/releases/latest/download
-RAW=https://raw.githubusercontent.com/n3ptune-cpu/Fairy-agent/main/deploy
-curl -fsSL -O "$REL/fairy-agent-linux-$ARCH" -O "$REL/SHA256SUMS" -O "$REL/VERSION"
-sha256sum -c --ignore-missing SHA256SUMS      # both lines must say OK; if not, stop
-curl -fsSL -O "$RAW/fairy-agent.service" -O "$RAW/fairy-agent-update.service" -O "$RAW/fairy-agent.polkit.rules"
-cat VERSION                                   # e.g. fairy-agent 3-1a2b3c4
-```
+### 2.1 A machine that runs a release build: `fairy-agent update`
 
-Install the program, the two units and the polkit rule:
+Linux, as root:
 
 ```sh
-install -m 0755 "fairy-agent-linux-$ARCH" /usr/local/bin/fairy-agent.new
-mv /usr/local/bin/fairy-agent.new /usr/local/bin/fairy-agent
-command -v restorecon >/dev/null && restorecon -v /usr/local/bin/fairy-agent    # Fedora (SELinux)
-install -m 0644 fairy-agent.service /etc/systemd/system/fairy-agent.service
-install -m 0644 fairy-agent-update.service /etc/systemd/system/fairy-agent-update.service
-[ -d /etc/polkit-1/rules.d ] || apt-get install -y polkitd                   # Debian / Proxmox without polkit
-install -m 0644 fairy-agent.polkit.rules /etc/polkit-1/rules.d/49-fairy-agent.rules
-fairy-agent version                           # must say: signed-release key: built in
+fairy-agent version          # must say: signed-release key: built in
+fairy-agent update --check   # installed vs latest release
+fairy-agent update           # asks, then downloads, checks the signature with its built-in key, swaps, restarts
 ```
 
-(If you had changed your own `fairy-agent.service`, keep yours and only add these two lines under
-`[Service]`: `StateDirectory=fairy-agent` and `StateDirectoryMode=0700`.)
+Windows, PowerShell as Administrator:
 
-Switch self-update on. It needs the control token; check that the file exists:
+```powershell
+& "C:\Program Files\Fairy\fairy-agent.exe" version
+& "C:\Program Files\Fairy\fairy-agent.exe" update --check
+& "C:\Program Files\Fairy\fairy-agent.exe" update
+```
+
+This works even where `self_update` is off (it is you at the machine, not the panel). It replaces the program
+only. If the new program does not come up, the old one is put back.
+
+### 2.2 Service files and rules of a newer release: Re-pair
+
+An update (2.1, or the panel's Update button) replaces the program and nothing else. Some things only the
+install script delivers:
+
+* Linux: the current `fairy-agent.service` (since 0.6.0 it hands the fans back to the BMC when the agent has
+  ended, `ExecStopPost`), `fairy-agent-update.service`, and one polkit rule per feature that is on.
+* Windows: the service setup and the check of the data folder (AGENT.md, "Running the installer again").
+
+To run the install script again:
+
+1. In the panel, open the host's page and press **Re-pair**.
+2. Run the command it shows on the machine (Linux: a user with sudo, or root on a Proxmox node; Windows:
+   PowerShell as Administrator).
+
+The machine's settings stay. It gets new tokens, which the panel picks up by itself. If the script says the
+installed fairy-agent `is NEWER than this installer's release`, it leaves the program alone (on Linux the
+existing service files too): update the panel first, then Re-pair again.
+
+### 2.3 By hand from one named release, checked
+
+Use this only when 2.1 and 2.2 do not fit. The machine must already have the agent's user, folders and tokens
+(for a machine without any, follow [AGENT.md, "Install on Linux"](AGENT.md#install-on-linux) or
+["Install on Windows"](AGENT.md#install-on-windows) with the files you download and check here).
+
+#### Linux, as root
+
+1. Download one named release. `BUILD` below is an **example value**: put in the tag of the release you want,
+   as shown on <https://github.com/n3ptune-cpu/Fairy-agent/releases>. The file names are those of 0.6.0 and
+   later releases.
+
+   ```sh
+   BUILD=build-20      # EXAMPLE VALUE: the release tag you chose
+   ARCH=amd64          # or arm64 (uname -m says x86_64 or aarch64)
+   mkdir -p /root/fairy-update && cd /root/fairy-update && rm -f ./*
+   REL=https://github.com/n3ptune-cpu/Fairy-agent/releases/download/$BUILD
+   for f in "fairy-agent-linux-$ARCH" SHA256SUMS SHA256SUMS.sig VERSION fairy-agent.service \
+            fairy-agent-update.service fairy-agent-power.polkit.rules fairy-agent-update.polkit.rules; do
+     curl -fsSL --proto '=https' -O "$REL/$f" || { echo "download of $f failed: stop here"; break; }
+   done
+   cat VERSION                                   # e.g. fairy-agent 20-1a2b3c4
+   ```
+
+2. Check the signature and the files. Use way A if you can.
+
+   **Way A**: a release build of fairy-agent is installed on this machine, and the release key was not
+   changed since:
+
+   ```sh
+   fairy-agent verify-release /root/fairy-update
+   ```
+
+   Expected: one line that starts `release 20-1a2b3c4: signature OK, checked` and lists the downloaded files.
+   Anything else: stop.
+
+   **Way B**: no release build is installed, or the key was changed (1.7). Check the signature on your PC,
+   which has Go and the Fairy-agent repository with the public key:
+
+   1. On the PC, download `SHA256SUMS` and `SHA256SUMS.sig` of the **same** release from its page on GitHub
+      into the Fairy-agent folder. Then, in PowerShell in that folder:
+
+      ```powershell
+      go run ./cmd/fairy-release-key verify --pub release\signing.pub SHA256SUMS
+      (Get-FileHash SHA256SUMS -Algorithm SHA256).Hash.ToLower()
+      ```
+
+      Expected: `OK: signature of SHA256SUMS is good`, then 64 hex digits.
+   2. On the machine:
+
+      ```sh
+      sha256sum SHA256SUMS                          # the same 64 hex digits as on the PC, else stop
+      sha256sum -c --ignore-missing SHA256SUMS      # every line must say OK, else stop
+      ```
+
+3. Install the program and the two units. This replaces `/etc/systemd/system/fairy-agent.service`. If you
+   changed that file yourself, save a copy first:
+   `cp -p /etc/systemd/system/fairy-agent.service /root/fairy-agent.service.mine`.
+
+   ```sh
+   install -m 0755 "fairy-agent-linux-$ARCH" /usr/local/bin/fairy-agent.new
+   mv /usr/local/bin/fairy-agent.new /usr/local/bin/fairy-agent
+   command -v restorecon >/dev/null && restorecon -v /usr/local/bin/fairy-agent    # Fedora (SELinux)
+   install -m 0644 fairy-agent.service /etc/systemd/system/fairy-agent.service
+   install -m 0644 fairy-agent-update.service /etc/systemd/system/fairy-agent-update.service
+   fairy-agent version                           # must say: signed-release key: built in
+   ```
+
+4. Install one polkit rule per feature that is on, and remove the combined rule of installs before 0.6.0
+   (it granted both rights for either feature):
+
+   ```sh
+   [ -d /etc/polkit-1/rules.d ] || apt-get install -y polkitd                   # Debian / Proxmox without polkit
+   fairy-agent config get self_update.enabled      # true: run the next line
+   install -m 0644 fairy-agent-update.polkit.rules /etc/polkit-1/rules.d/49-fairy-agent-update.rules
+   fairy-agent config get power_control.enabled    # true: run the next line
+   install -m 0644 fairy-agent-power.polkit.rules /etc/polkit-1/rules.d/49-fairy-agent-power.rules
+   rm -f /etc/polkit-1/rules.d/49-fairy-agent.rules
+   ```
+
+   If you switch self-update on in 2.4, come back and install the update rule.
+
+5. Restart and look:
+
+   ```sh
+   systemctl daemon-reload && systemctl restart fairy-agent
+   systemctl status fairy-agent --no-pager       # "fairy-agent listening ..."
+   ```
+
+`/root/fairy-update` can be deleted afterwards.
+
+#### Windows, PowerShell as Administrator
+
+1. Download one named release into a new folder. `$build` is an **example value**, as above.
+
+   ```powershell
+   $ProgressPreference = 'SilentlyContinue'
+   $build = 'build-20'      # EXAMPLE VALUE: the release tag you chose
+   $d = Join-Path $env:TEMP ('fairy-update-' + [guid]::NewGuid().ToString('N'))
+   New-Item -ItemType Directory -Path $d | Out-Null; cd $d
+   $rel = "https://github.com/n3ptune-cpu/Fairy-agent/releases/download/$build"
+   foreach ($f in 'fairy-agent-windows-amd64.exe', 'SHA256SUMS', 'SHA256SUMS.sig', 'VERSION', 'install-fairy-agent.ps1') { Invoke-WebRequest -UseBasicParsing "$rel/$f" -OutFile $f }
+   Get-Content VERSION
+   ```
+
+2. Check the signature and the files. Use way A if you can.
+
+   **Way A**: a release build from 0.4.3 or later is installed on this PC, and the release key was not changed
+   since:
+
+   ```powershell
+   & "C:\Program Files\Fairy\fairy-agent.exe" verify-release $d
+   ```
+
+   Expected: one line that starts `release` and says `signature OK, checked`, with
+   `fairy-agent-windows-amd64.exe` and `install-fairy-agent.ps1` in the list. Anything else: stop.
+
+   **Way B**: otherwise. On the PC that has Go and the Fairy-agent repository (it can be this PC), in the
+   Fairy-agent folder:
+
+   ```powershell
+   go run ./cmd/fairy-release-key verify --pub release\signing.pub "$d\SHA256SUMS"
+   ```
+
+   Expected: a line that starts `OK: signature of`. Then, back in the download folder (`cd $d`):
+
+   ```powershell
+   $want = ((Select-String -Path SHA256SUMS -Pattern 'fairy-agent-windows-amd64.exe$').Line -split '\s+')[0]
+   $got = (Get-FileHash fairy-agent-windows-amd64.exe -Algorithm SHA256).Hash.ToLower()
+   if ($got -eq $want) { 'OK: program matches' } else { 'MISMATCH: stop here' }
+   $want = ((Select-String -Path SHA256SUMS -Pattern 'install-fairy-agent.ps1$').Line -split '\s+')[0]
+   $got = (Get-FileHash install-fairy-agent.ps1 -Algorithm SHA256).Hash.ToLower()
+   if ($got -eq $want) { 'OK: script matches' } else { 'MISMATCH: stop here' }
+   ```
+
+3. Only if every check said OK:
+
+   ```powershell
+   Set-ExecutionPolicy -Scope Process Bypass
+   .\install-fairy-agent.ps1 -PanelAddress 100.64.0.2     # EXAMPLE VALUE: the panel's Tailscale address; add
+                                                        # -Helper on a new install that needs fan control,
+                                                        # Core Temp or power
+   & "C:\Program Files\Fairy\fairy-agent.exe" version   # must say: signed-release key: built in
+   ```
+
+   The install script also sets up what self-update needs (safe to run again): the **fairy-agent-update**
+   service (LocalSystem, started on demand) that installs signed releases, and the download folder
+   `C:\ProgramData\fairy-agent\update\stage`. The agent itself cannot change `C:\Program Files\Fairy`.
+
+### 2.4 Switch self-update on
+
+Self-update needs the control token.
+
+#### Linux, as root
+
+Check that the control token file exists:
 
 ```sh
 ls -l /etc/fairy-agent/control-token || {
@@ -269,6 +442,10 @@ self_update:
   enabled: true
 ```
 
+Self-update on Linux also needs `fairy-agent-update.service` and the rule
+`/etc/polkit-1/rules.d/49-fairy-agent-update.rules`. The install script puts both in place when self-update
+is ticked in the panel (2.2); by hand they are steps 3 and 4 of 2.3.
+
 Check and restart:
 
 ```sh
@@ -277,27 +454,9 @@ systemctl daemon-reload && systemctl restart fairy-agent
 systemctl status fairy-agent --no-pager       # "fairy-agent listening ... features=...self_update..."
 ```
 
-`/root/fairy-update` can be deleted afterwards.
-
-### 2.2 Windows PCs, PowerShell as Administrator
+#### Windows, PowerShell as Administrator
 
 ```powershell
-$ProgressPreference = 'SilentlyContinue'
-$d = "$env:TEMP\fairy-update"; New-Item -ItemType Directory -Force $d | Out-Null; cd $d
-$rel = 'https://github.com/n3ptune-cpu/Fairy-agent/releases/latest/download'
-foreach ($f in 'fairy-agent-windows-amd64.exe', 'SHA256SUMS', 'VERSION') { Invoke-WebRequest "$rel/$f" -OutFile $f }
-Invoke-WebRequest 'https://raw.githubusercontent.com/n3ptune-cpu/Fairy-agent/main/deploy/install-fairy-agent.ps1' -OutFile install-fairy-agent.ps1
-$want = ((Select-String -Path SHA256SUMS -Pattern 'fairy-agent-windows-amd64.exe$').Line -split '\s+')[0]
-$got = (Get-FileHash fairy-agent-windows-amd64.exe -Algorithm SHA256).Hash.ToLower()
-if ($got -eq $want) { 'OK: checksum matches' } else { 'MISMATCH: stop here' }
-```
-
-Only if it said OK:
-
-```powershell
-Set-ExecutionPolicy -Scope Process Bypass
-.\install-fairy-agent.ps1 -PanelAddress 100.64.0.2     # the panel's Tailscale address; add -Helper on a
-                                                     # new install that needs fan control, Core Temp or power
 notepad C:\ProgramData\fairy-agent\config.yaml
 ```
 
@@ -308,11 +467,9 @@ self_update:
   enabled: true
 ```
 
-then `Restart-Service fairy-agent`. The install script also sets up what self-update needs (safe to run again):
-the **fairy-agent-update** service (LocalSystem, started on demand) that installs signed releases, and the
-download folder `C:\ProgramData\fairy-agent\update\stage`. The agent itself cannot change
-`C:\Program Files\Fairy`. On a PC that ran 0.4.2 or older, run this once after it is on 0.4.3 (through the
-panel or by hand), in PowerShell as Administrator; it also takes back the write access 0.4.2 gave the agent:
+then `Restart-Service fairy-agent`. On a PC that ran 0.4.2 or older, run this once after it is on 0.4.3
+(through the panel or by hand), in PowerShell as Administrator; it sets up the updater service and takes back
+the write access 0.4.2 gave the agent:
 
 ```powershell
 & "C:\Program Files\Fairy\fairy-agent.exe" setup-self-update
@@ -337,16 +494,42 @@ The control token is in `C:\ProgramData\fairy-agent\control-token`.
 
 ### 3.1 Install the release build of the panel once
 
-```sh
-mkdir -p /root/fairy-update && cd /root/fairy-update && rm -f ./*
-REL=https://github.com/n3ptune-cpu/Fairy-dashboard/releases/latest/download
-curl -fsSL -O "$REL/fairy-linux-amd64" -O "$REL/SHA256SUMS" -O "$REL/VERSION"
-sha256sum -c --ignore-missing SHA256SUMS      # both OK, else stop
-install -m 0755 fairy-linux-amd64 /usr/local/bin/fairy.new && mv /usr/local/bin/fairy.new /usr/local/bin/fairy
-curl -fsSL https://raw.githubusercontent.com/n3ptune-cpu/Fairy-dashboard/main/deploy/fairy-update -o /usr/local/sbin/fairy-update
-chmod 0755 /usr/local/sbin/fairy-update
-systemctl restart fairy && fairy version      # must say: release key: built in
-```
+A panel that already runs a release build (`fairy version` says `release key: built in`) updates itself with
+`fairy update` (see [The panel: `fairy update`](#the-panel-fairy-update) below): go on with 3.2. Do the steps
+here only for the first release build, or after a key change (1.7).
+
+1. Download one named release. `BUILD` is an **example value**: put in the tag of the release you want, as
+   shown on <https://github.com/n3ptune-cpu/Fairy-dashboard/releases>.
+
+   ```sh
+   BUILD=build-10      # EXAMPLE VALUE: the release tag you chose
+   mkdir -p /root/fairy-update && cd /root/fairy-update && rm -f ./*
+   REL=https://github.com/n3ptune-cpu/Fairy-dashboard/releases/download/$BUILD
+   curl -fsSL --proto '=https' -O "$REL/fairy-linux-amd64" -O "$REL/SHA256SUMS" -O "$REL/SHA256SUMS.sig" -O "$REL/VERSION"
+   sha256sum SHA256SUMS                          # 64 hex digits, needed in step 2
+   ```
+
+2. Check the signature on your PC, as in way B of 2.3: download `SHA256SUMS` and `SHA256SUMS.sig` of the
+   **same** Fairy-dashboard release into the Fairy-agent folder (the same key signs both programs), then
+
+   ```powershell
+   go run ./cmd/fairy-release-key verify --pub release\signing.pub SHA256SUMS
+   (Get-FileHash SHA256SUMS -Algorithm SHA256).Hash.ToLower()
+   ```
+
+   Expected: `OK: signature of SHA256SUMS is good`, and the same 64 hex digits as in step 1. If not, stop.
+
+3. Install:
+
+   ```sh
+   sha256sum -c --ignore-missing SHA256SUMS      # both lines must say OK, else stop
+   install -m 0755 fairy-linux-amd64 /usr/local/bin/fairy.new && mv /usr/local/bin/fairy.new /usr/local/bin/fairy
+   printf '%s\n' '#!/bin/sh' 'exec /usr/local/bin/fairy update "$@"' > /usr/local/sbin/fairy-update
+   chmod 0755 /usr/local/sbin/fairy-update
+   systemctl restart fairy && fairy version      # must say: release key: built in
+   ```
+
+   The third line writes the small wrapper `fairy-update` (it only runs `fairy update`).
 
 ### 3.2 Tell the panel which agents may update
 

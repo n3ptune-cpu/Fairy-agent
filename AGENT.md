@@ -191,8 +191,10 @@ unencrypted inside Tailscale.
 You need: Windows 10 or 11 (64-bit), Tailscale installed and signed in with **Run unattended** switched on
 (Tailscale icon > Preferences > Run unattended, or `tailscale up --unattended`; without it Tailscale only
 connects after someone signs in to Windows, so after a reboot or a Wake-on-LAN the panel shows the PC offline
-until then; the installer warns when it is off), and the file
-`fairy-agent-windows-amd64.exe` (plus `install-fairy-agent.ps1` from the `deploy` folder).
+until then; the installer warns when it is off), and the files
+`fairy-agent-windows-amd64.exe` and `install-fairy-agent.ps1` of **one** release. Download and check them as in
+[SETUP-UPDATES.md, 2.3](SETUP-UPDATES.md#23-by-hand-from-one-named-release-checked). The usual way is
+[Add host](#add-a-host-from-the-panel-one-command); this section is for doing it by hand.
 
 **The easy way.** Put both files in one folder, open **PowerShell as Administrator** (right-click the Start
 button, "Terminal (Admin)"), go to that folder and run:
@@ -423,7 +425,12 @@ out of Performance Monitor Users).
 ## Install on Linux
 
 You need: Linux with systemd (Debian, Ubuntu, Proxmox VE, Fedora...), amd64 or arm64 (e.g. Raspberry Pi 4/5),
-Tailscale signed in. As root:
+Tailscale signed in. The usual way is [Add host](#add-a-host-from-the-panel-one-command); this section is for
+doing it by hand. Take the program, the two `.service` files, the polkit rules and the tmpfiles rule from
+**one** release, downloaded and checked as in
+[SETUP-UPDATES.md, 2.3](SETUP-UPDATES.md#23-by-hand-from-one-named-release-checked) (in a release they have no
+`deploy/` in front). `fairy-agent.config.example.yaml` and `fairy-agent.udev.rules` are not part of a release:
+they come from the `deploy/` folder of this repository. As root:
 
 ```sh
 # 1. a user for the agent, the program, the settings folder
@@ -911,7 +918,9 @@ are lists of devices: edit those in the file.
   token in the panel's `fairy.env` is exactly the one in the agent's `token` file. A wrong token shows up in the
   agent's log as "rejected request".
 * **Update.** With self-update on: the panel's Update button (see [Updates](#updates-the-panels-update-button)).
-  By hand: Windows: run `install-fairy-agent.ps1` again with the new exe (or `Stop-Service fairy-agent`, copy
+  On the machine: `fairy-agent update` (it checks the release's signature itself). By hand, with files
+  downloaded and checked as in [SETUP-UPDATES.md, 2.3](SETUP-UPDATES.md#23-by-hand-from-one-named-release-checked):
+  Windows: run `install-fairy-agent.ps1` again with the new exe (or `Stop-Service fairy-agent`, copy
   the exe over, `Start-Service fairy-agent`). Linux: copy the new binary to `/usr/local/bin/fairy-agent`, then
   `systemctl restart fairy-agent`. Settings and tokens stay. `fairy-agent version` shows the version and
   whether the program carries the release key.
