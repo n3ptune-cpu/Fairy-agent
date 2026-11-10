@@ -36,9 +36,13 @@ type Parts struct {
 	BMC      *agent.BMC                     // BMC sensors (IPMI through Windows' driver)
 	Fan      *agent.Fan                     // fan control on that BMC (and its watchdog)
 	Power    agent.PowerExec                // shutdown, reboot, sleep
-	Updater  func(ctx context.Context) error
-	Audit    *slog.Logger // the audit log (helper.log); nil = slog.Default()
-	Now      func() time.Time
+	// MinDelayS is power_control.min_delay_s of config.yaml: the shortest delay a shutdown, reboot or sleep may
+	// be asked with. The helper enforces it itself (the agent does too): a compromised agent process cannot
+	// shorten the warning time below what the administrator set. 0 means the protocol's minimum.
+	MinDelayS int
+	Updater   func(ctx context.Context) error
+	Audit     *slog.Logger // the audit log (helper.log); nil = slog.Default()
+	Now       func() time.Time
 }
 
 // Server answers the agent's requests.
@@ -89,6 +93,7 @@ func FromConfig(cfg *agent.Config, version string, audit *slog.Logger) (Parts, f
 	}
 	if cfg.PowerControl.Enabled {
 		p.Power = agent.SystemPower()
+		p.MinDelayS = cfg.PowerControl.MinDelayS
 	}
 	if cfg.SelfUpdate.Enabled {
 		p.Updater = agent.StartUpdaterService
@@ -290,6 +295,9 @@ func (s *Server) power(r proto.Request) proto.Response {
 		}
 		return proto.OK(proto.PowerData{Action: "cancel"})
 	}
+	if min := s.minDelay(); *r.DelayS < min {
+		return proto.Fail(proto.CodeBadRequest, fmt.Sprintf("delay_s must be %d-%d (power_control.min_delay_s in config.yaml, read when the helper starts)", min, proto.MaxDelayS))
+	}
 	if action == "sleep" {
 		if ok, why := s.canSleep(); !ok {
 			return proto.WithStatus(409, map[string]any{"error": "this machine cannot sleep: " + why, "code": "sleep_unavailable"})
@@ -301,6 +309,9 @@ func (s *Server) power(r proto.Request) proto.Response {
 	}
 	return proto.OK(proto.PowerData{Action: action})
 }
+
+// minDelay is the shortest delay the helper accepts: config.yaml's, never below the protocol's.
+func (s *Server) minDelay() int { return max(s.p.MinDelayS, proto.MinDelayS) }
 
 // canSleep asks the power part at most every 10 minutes.
 func (s *Server) canSleep() (bool, string) {

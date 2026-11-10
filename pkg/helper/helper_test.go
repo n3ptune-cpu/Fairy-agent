@@ -285,6 +285,61 @@ func TestPower(t *testing.T) {
 	}
 }
 
+// L34: the helper enforces power_control.min_delay_s itself. With 3600 configured, a request for 10 seconds
+// (what a compromised agent process could send over the pipe) is refused before anything is scheduled.
+func TestPowerMinDelay(t *testing.T) {
+	cfg, err := agent.Parse([]byte("power_control: {enabled: true, min_delay_s: 3600}\n"), t.TempDir()+"/config.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, closer, err := FromConfig(cfg, "v", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closer()
+	if p.MinDelayS != 3600 {
+		t.Fatalf("FromConfig: MinDelayS = %d, want 3600", p.MinDelayS)
+	}
+	audit := &syncBuf{}
+	exec := &agenttest.PowerExec{}
+	srv := New(Parts{Power: exec, MinDelayS: p.MinDelayS, Audit: slog.New(slog.NewTextHandler(audit, nil))})
+	call := func(req string) proto.Response { return srv.Handle(context.Background(), "test-client", []byte(req)) }
+	for _, action := range []string{"shutdown", "reboot", "sleep"} {
+		for _, d := range []int{10, 60, 3599} {
+			resp := call(`{"v":1,"verb":"power","action":"` + action + `","delay_s":` + itoa(d) + `,"by":"panel"}`)
+			if resp.Status != 400 || resp.Code != proto.CodeBadRequest || !strings.Contains(resp.Error, "3600-86400") {
+				t.Fatalf("%s in %d s with min_delay_s 3600: %+v", action, d, resp)
+			}
+		}
+	}
+	if len(exec.Scheduled) != 0 {
+		t.Fatalf("scheduled below the minimum: %v", exec.Scheduled)
+	}
+	if !strings.Contains(audit.String(), "status=400") { // refused requests are in the audit log too
+		t.Fatalf("audit log lacks the refusals:\n%s", audit.String())
+	}
+	for _, d := range []int{3600, 86400} {
+		if resp := call(`{"v":1,"verb":"power","action":"shutdown","delay_s":` + itoa(d) + `}`); resp.Status != 200 {
+			t.Fatalf("%d s: %+v", d, resp)
+		}
+	}
+	if resp := call(`{"v":1,"verb":"power","action":"cancel"}`); resp.Status != 200 { // cancel has no delay
+		t.Fatal(resp)
+	}
+	// no min_delay_s in config.yaml: the default (10) and the protocol's minimum are the same
+	cfg, _ = agent.Parse([]byte("power_control: {enabled: true}\n"), t.TempDir()+"/config.yaml")
+	p2, closer2, _ := FromConfig(cfg, "v", nil)
+	defer closer2()
+	srv2 := New(Parts{Power: &agenttest.PowerExec{}, MinDelayS: p2.MinDelayS, Audit: slog.New(slog.NewTextHandler(io.Discard, nil))})
+	if resp := srv2.Handle(context.Background(), "c", []byte(`{"v":1,"verb":"power","action":"reboot","delay_s":10}`)); resp.Status != 200 {
+		t.Fatal(resp)
+	}
+	// a Parts without the setting (0) still has the protocol's floor
+	if New(Parts{}).minDelay() != proto.MinDelayS {
+		t.Fatal("no floor")
+	}
+}
+
 func TestCoreTempRead(t *testing.T) {
 	var err error
 	block := []byte{1, 2, 3}
