@@ -116,3 +116,59 @@ func TestInstallPS1WorkFolderCannotBeSwapped(t *testing.T) {
 		t.Error("install.ps1: the PowerShell 7 way of creating the folder is not behind the PSEdition test")
 	}
 }
+
+// O2, the Windows form: install.ps1 -Join CODE (the line of an older panel) is still accepted and now says,
+// once, that it is deprecated, as install.sh --join CODE does. The warning is a fixed text: the code is in
+// no message of the script.
+//
+// Nothing here runs the script; the test pins its text.
+func TestInstallPS1WarnsAboutJoinOnTheCommandLine(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("..", "..", "deploy", "install.ps1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.ReplaceAll(string(raw), "\r\n", "\n"), "\n")
+	at := func(re string) int {
+		found := -1
+		for i, l := range lines {
+			if regexp.MustCompile(re).MatchString(l) {
+				if found >= 0 {
+					t.Fatalf("install.ps1: more than one line matches %s", re)
+				}
+				found = i
+			}
+		}
+		if found < 0 {
+			t.Fatalf("install.ps1: no line matches %s", re)
+		}
+		return found
+	}
+	take := at(`^\$code = \$Join$`)
+	warn := at(`^if \(\$code\) \{ Write-Warning '[^']*' \}$`)
+	env := at(`^if \(-not \$code\) \{ \$code = \$env:FAIRY_JOIN_CODE \}$`)
+	// the warning is given exactly when the code came as -Join: after it was taken from the parameter, before
+	// the environment is asked
+	if !(take < warn && warn < env) {
+		t.Errorf("install.ps1: the order is not take -Join (%d), warn (%d), ask the environment (%d)", take, warn, env)
+	}
+	text := lines[warn][strings.Index(lines[warn], "'")+1 : strings.LastIndex(lines[warn], "'")]
+	for _, want := range []string{"-Join CODE is deprecated", "later release", "FAIRY_JOIN_CODE"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("install.ps1: the warning does not say %q: %s", want, text)
+		}
+	}
+	// a text in single quotes with no $ and no backtick in it: PowerShell puts no variable into it
+	if strings.ContainsAny(text, "$`\"") {
+		t.Errorf("install.ps1: the warning is not a fixed text: %s", text)
+	}
+	// and no statement of the script that writes something out names the variable that holds the code
+	shows := regexp.MustCompile(`(?i)(Write-\w+|throw|Out-\w+|echo|Add-Content|Set-Content|Tee-Object|Start-Transcript)\b.*\$(code|Join)\b`)
+	for i, l := range lines {
+		if s := strings.TrimSpace(l); strings.HasPrefix(s, "#") {
+			continue
+		}
+		if shows.MatchString(l) {
+			t.Errorf("install.ps1 line %d writes the join code out: %s", i+1, l)
+		}
+	}
+}

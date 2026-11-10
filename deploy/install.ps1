@@ -14,7 +14,7 @@
   just before ($env:FAIRY_JOIN_CODE='CODE'). It is then on no program's command line, where every user of
   the PC could read it while the installer runs. The script removes the variable again, never shows the
   code and hands it to `fairy-agent join` through that program's environment. -Join CODE (lines of older
-  panels) still works.
+  panels) still works, with a warning; it is deprecated and will be removed in a later release.
 
   -PairV2 (the panel's line says so when the panel speaks it): the agent answers the panel encrypted, and
   only a panel that proves it has this join code.
@@ -70,6 +70,8 @@ $ProgressPreference = 'SilentlyContinue'
 # is removed at once, also from the window this runs in, so that nothing started later inherits it.
 $code = $Join
 $Join = ''
+# -Join CODE is the old form. One warning, a fixed text in single quotes: the code is in no message.
+if ($code) { Write-Warning '-Join CODE is deprecated and will stop working in a later release: the code stays in the PowerShell history, and where it is part of a command line other users of this PC can read it while this runs. Use the line the panel shows now (it sets FAIRY_JOIN_CODE).' }
 if (-not $code) { $code = $env:FAIRY_JOIN_CODE }
 Remove-Item Env:FAIRY_JOIN_CODE -ErrorAction SilentlyContinue
 if (-not $code) { throw "no join code: use the line from the panel's Add host dialog (it sets FAIRY_JOIN_CODE), or -Join CODE" }
