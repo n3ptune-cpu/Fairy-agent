@@ -64,27 +64,52 @@ func TestWatchdogFailsSafeWhenTheFanModeCannotBeRead(t *testing.T) {
 	r.fan.t = &faultyBMC{Transport: r.bmc, modeEvery: 3}
 	r.fan.WatchdogOnce(ctx)
 	r.fan.WatchdogOnce(ctx)
+	r.fan.WatchdogOnce(ctx) // the third check without a temperature: this one cannot read the mode
 	if _, d := r.bmc.State(); d[0] != 30 {
-		t.Fatal("acted before the third check without a temperature:", d)
+		t.Fatal("one failed question about the mode moved the fans:", d)
 	}
-	r.fan.WatchdogOnce(ctx) // the third check: this one cannot read the mode
+	r.fan.WatchdogOnce(ctx) // the mode is readable again, and the count was not forgotten
 	if _, d := r.bmc.State(); d != [2]byte{100, 100} {
-		t.Fatalf("30 s without any temperature, fans left at %v: the check that could not read the fan mode did not act", d)
+		t.Fatalf("40 s without any temperature, fans left at %v: the check that could not read the fan mode "+
+			"made the watchdog forget its count", d)
 	}
 	if m, _ := r.bmc.State(); m != modeFull {
 		t.Fatal("the mode was changed:", m)
 	}
 	ev := r.fan.recentEvents()
+	if last := ev[len(ev)-1]; last.Action != "watchdog: duty 100%" || strings.Contains(last.Detail, "does not say which fan mode is set") {
+		t.Fatalf("%+v", last)
+	}
+
+	// a BMC that never says the mode and no temperature: 100 % at the third check, as with a readable mode
+	r = manualRig(t, 30)
+	r.fan.localTemps = func() []collect.Temp { return nil }
+	r.fan.t = &faultyBMC{Transport: r.bmc, modeEvery: 1}
+	r.fan.WatchdogOnce(ctx)
+	r.fan.WatchdogOnce(ctx)
+	if _, d := r.bmc.State(); d[0] != 30 {
+		t.Fatal("acted before the third check:", d)
+	}
+	r.fan.WatchdogOnce(ctx)
+	if _, d := r.bmc.State(); d != [2]byte{100, 100} {
+		t.Fatalf("30 s without a temperature and without the fan mode, fans left at %v", d)
+	}
+	ev = r.fan.recentEvents()
 	if last := ev[len(ev)-1]; last.Action != "watchdog: duty 100%" || !strings.Contains(last.Detail, "does not say which fan mode is set") {
 		t.Fatalf("%+v", last)
 	}
 
-	// a hot CPU and a BMC that never says the mode: 100 % at the first check
+	// a hot CPU and a BMC that never says the mode: 100 % at the third check in a row (20 s), not before
 	r = manualRig(t, 30, 95)
 	r.fan.t = &faultyBMC{Transport: r.bmc, modeEvery: 1}
 	r.fan.WatchdogOnce(ctx)
+	r.fan.WatchdogOnce(ctx)
+	if _, d := r.bmc.State(); d[0] != 30 {
+		t.Fatal("acted before the third check that could not read the mode:", d)
+	}
+	r.fan.WatchdogOnce(ctx)
 	if _, d := r.bmc.State(); d != [2]byte{100, 100} {
-		t.Fatalf("CPU at 95 °C, fans left at %v: a check that cannot read the fan mode does nothing", d)
+		t.Fatalf("CPU at 95 °C, fans left at %v: three checks in a row that cannot read the fan mode do nothing", d)
 	}
 	// a lower duty is then held off like after any other watchdog action
 	if code, _ := r.fan.dutyRefusal(); code != "fan_watchdog_hold" {
@@ -92,9 +117,88 @@ func TestWatchdogFailsSafeWhenTheFanModeCannotBeRead(t *testing.T) {
 	}
 }
 
+// One failed IPMI call must not make the fans jump. A BMC that fails "which fan mode?" now and then (busy
+// for a moment) is not a BMC whose mode is unknown: nothing is sent for such a check, whatever the temperature
+// says and whatever mode the fans are in, and the next check that reads the mode acts as always.
+func TestOneFailedModeReadDoesNotMoveTheFans(t *testing.T) {
+	ctx := context.Background()
+
+	// the BMC's automatic mode (the owner's choice), a hot CPU, every second question fails, for 4 minutes:
+	// nothing is ever sent, the owner's mode stays, and a lower duty is not held off
+	r := manualRig(t, 30, 95)
+	if st, b := r.fan.SetMode(ctx, "heavyio", "owner"); st != 200 {
+		t.Fatal(st, b)
+	}
+	f := &faultyBMC{Transport: r.bmc, modeEvery: 2}
+	r.fan.t = f
+	for i := 0; i < 24; i++ {
+		r.fan.WatchdogOnce(ctx)
+	}
+	if m, _ := r.bmc.State(); m != modeHeavyIO || f.writes() != 0 || !r.fan.actedAt.IsZero() {
+		t.Fatalf("mode %v, %d commands sent, acted %v", m, f.writes(), r.fan.actedAt)
+	}
+	// the same with two failed questions in a row out of three
+	r = manualRig(t, 30, 95)
+	if st, b := r.fan.SetMode(ctx, "heavyio", "owner"); st != 200 {
+		t.Fatal(st, b)
+	}
+	two := &twoOfThree{Transport: r.bmc}
+	r.fan.t = two
+	for i := 0; i < 24; i++ {
+		r.fan.WatchdogOnce(ctx)
+	}
+	if m, d := r.bmc.State(); m != modeHeavyIO || two.writes != 0 {
+		t.Fatalf("mode %v duty %v, %d commands sent", m, d, two.writes)
+	}
+
+	// mode "full" at 30 %, a hot CPU, and the first question fails: nothing at that check, 100 % at the next
+	// (which reads the mode), by the ordinary rule
+	r = manualRig(t, 30, 95)
+	f = &faultyBMC{Transport: r.bmc, modeEvery: 1}
+	r.fan.t = f
+	r.fan.WatchdogOnce(ctx)
+	if _, d := r.bmc.State(); d[0] != 30 || f.writes() != 0 {
+		t.Fatalf("one failed question moved the fans: %v, %d commands", d, f.writes())
+	}
+	f.modeEvery = 0
+	r.fan.WatchdogOnce(ctx)
+	if m, d := r.bmc.State(); m != modeFull || d != [2]byte{100, 100} || !r.fan.blindAt.IsZero() || r.fan.modeFails != 0 {
+		t.Fatal(m, d, r.fan.blindAt, r.fan.modeFails)
+	}
+}
+
+// twoOfThree fails "which fan mode?" twice out of every three times, and counts the commands that change
+// something.
+type twoOfThree struct {
+	ipmi.Transport
+	reads, writes int
+}
+
+func (f *twoOfThree) Raw(ctx context.Context, netfn, cmd byte, data []byte) ([]byte, error) {
+	if netfn == ipmi.NetFnOEM {
+		switch {
+		case cmd == ipmi.CmdSMCFanMode && len(data) == 1:
+			if f.reads++; f.reads%3 != 0 {
+				return nil, &ipmi.CompletionError{Code: 0xC0}
+			}
+		case (cmd == ipmi.CmdSMCFanMode && len(data) == 2) || (cmd == ipmi.CmdSMCFanDuty && len(data) == 4):
+			f.writes++
+		}
+	}
+	return f.Transport.Raw(ctx, netfn, cmd, data)
+}
+
+// thrice runs three watchdog checks: as many as it takes before the watchdog acts without the fan mode.
+func thrice(ctx context.Context, f *Fan) {
+	for i := 0; i < fanBlindAfter; i++ {
+		f.WatchdogOnce(ctx)
+	}
+}
+
 // What the watchdog does not do when it cannot read the mode: it never acts on a cool CPU, never sets a duty
-// below 100 %, never changes the mode while the BMC takes 100 %, and does not send command after command to a
-// BMC that answers nothing.
+// below 100 %, never changes the mode while the BMC takes 100 %, does not send command after command to a
+// BMC that answers nothing, says what it did once and not every 30 s, and stops as soon as the mode can be
+// read again.
 func TestWatchdogBlindIsConservative(t *testing.T) {
 	ctx := context.Background()
 
@@ -116,7 +220,7 @@ func TestWatchdogBlindIsConservative(t *testing.T) {
 	}
 	f = &faultyBMC{Transport: r.bmc, modeEvery: 1}
 	r.fan.t = f
-	r.fan.WatchdogOnce(ctx)
+	thrice(ctx, r.fan)
 	if f.writes() != 0 {
 		t.Fatal("commands sent with both zones at 100 %:", f.dutyWrites, f.modeWrites)
 	}
@@ -129,9 +233,9 @@ func TestWatchdogBlindIsConservative(t *testing.T) {
 	}
 	f = &faultyBMC{Transport: r.bmc, modeEvery: 1}
 	r.fan.t = f
-	r.fan.WatchdogOnce(ctx)
-	if m, _ := r.bmc.State(); m != modeHeavyIO || len(f.modeWrites) != 0 {
-		t.Fatal("the owner's mode was changed:", m, f.modeWrites)
+	thrice(ctx, r.fan)
+	if m, _ := r.bmc.State(); m != modeHeavyIO || len(f.modeWrites) != 0 || len(f.dutyWrites) == 0 {
+		t.Fatal("the owner's mode was changed, or nothing was sent:", m, f.modeWrites, f.dutyWrites)
 	}
 	for _, d := range f.dutyWrites {
 		if d != 100 {
@@ -139,13 +243,22 @@ func TestWatchdogBlindIsConservative(t *testing.T) {
 		}
 	}
 
-	// A BMC that answers nothing at all, with a hot CPU: one try (100 % for both zones, then its automatic
-	// mode), and the next one 30 s later at the earliest, however often the watchdog looks.
+	// A BMC that answers nothing at all, with a hot CPU: nothing for two checks, then one try (100 % for both
+	// zones, then its automatic mode), and the next one 30 s later at the earliest, however often the watchdog
+	// looks. What happened is written once, not with every try.
 	r = manualRig(t, 30, 95)
 	f = &faultyBMC{Transport: r.bmc, modeEvery: 1, noDutyRead: true, noDutyWrite: true, noModeWrite: true}
 	r.fan.t = f
 	now := time.Now()
 	r.fan.now = func() time.Time { return now }
+	before := len(r.fan.recentEvents())
+	for i := 0; i < fanBlindAfter-1; i++ {
+		r.fan.WatchdogOnce(ctx)
+		now = now.Add(WatchdogInterval)
+	}
+	if f.writes() != 0 {
+		t.Fatalf("%d commands before the third check in a row", f.writes())
+	}
 	r.fan.WatchdogOnce(ctx)
 	first := f.writes()
 	if len(f.dutyWrites) != 2 || len(f.modeWrites) == 0 || len(f.modeWrites) > 2 {
@@ -163,14 +276,32 @@ func TestWatchdogBlindIsConservative(t *testing.T) {
 	if f.writes() != 2*first {
 		t.Fatalf("no second try after 30 s: %d commands, want %d", f.writes(), 2*first)
 	}
+	for i := 0; i < 60; i++ { // ten more minutes of it
+		now = now.Add(WatchdogInterval)
+		r.fan.WatchdogOnce(ctx)
+	}
+	if got := f.writes(); got != 22*first {
+		t.Fatalf("%d commands in 10 minutes 50 s, want one try in 30 s (%d)", got, 22*first)
+	}
 	for _, d := range f.dutyWrites {
 		if d != 100 {
 			t.Fatal("a duty below 100 % was sent:", f.dutyWrites)
 		}
 	}
-	ev := r.fan.recentEvents()
-	if last := ev[len(ev)-1]; last.Action != "auto failed" {
-		t.Fatalf("%+v", ev)
+	ev := r.fan.recentEvents()[before:]
+	if len(ev) != 2 || ev[0].Action != "watchdog failed" || ev[1].Action != "auto failed" {
+		t.Fatalf("22 tries, want them written once: %+v", ev)
+	}
+	// the BMC answers again (mode full, 30 %, still hot): the ordinary rule, at once, and the spell is over
+	f.modeEvery, f.noDutyRead, f.noDutyWrite, f.noModeWrite = 0, false, false, false
+	now = now.Add(WatchdogInterval)
+	r.fan.WatchdogOnce(ctx)
+	if m, d := r.bmc.State(); m != modeFull || d != [2]byte{100, 100} || !r.fan.blindAt.IsZero() || r.fan.modeFails != 0 || r.fan.blindSaid != "" {
+		t.Fatal(m, d, r.fan.blindAt, r.fan.modeFails, r.fan.blindSaid)
+	}
+	ev = r.fan.recentEvents()
+	if last := ev[len(ev)-1]; last.Action != "watchdog: duty 100%" || strings.Contains(last.Detail, "does not say") {
+		t.Fatalf("%+v", last)
 	}
 
 	// The BMC does not take 100 % but takes a mode: the fans are handed back to its automatic mode, so its own
@@ -178,7 +309,7 @@ func TestWatchdogBlindIsConservative(t *testing.T) {
 	r = manualRig(t, 30, 95)
 	f = &faultyBMC{Transport: r.bmc, modeEvery: 1, noDutyWrite: true}
 	r.fan.t = f
-	r.fan.WatchdogOnce(ctx)
+	thrice(ctx, r.fan)
 	if m, _ := r.bmc.State(); m != modeOptimal {
 		t.Fatal("not handed back to the BMC's automatic mode:", m)
 	}
