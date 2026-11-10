@@ -23,8 +23,9 @@ const (
 	status8      = `{"StatusSNS":{"Time":"2026-01-01T00:00:00","ENERGY":{"Total":12.5,"Power":95,"Voltage":230,"Current":0.41}}}`
 )
 
-// fakePlug is a Tasmota plug with a web password. header: it takes the password in an Authorization header
-// (newer firmware). warn200: without a password it answers 200 with a WARNING instead of 401 (older firmware).
+// fakePlug is a Tasmota plug with a web password, as its firmware answers /cm: the password is taken from the
+// address (every firmware) and, when header is set, also from an Authorization header (firmware from 9.3.0
+// on). warn200: without a password it answers 200 with a WARNING instead of 401 (firmware before 8).
 type fakePlug struct {
 	header, warn200 bool
 	mu              sync.Mutex
@@ -78,37 +79,14 @@ func inAddress(text string) bool {
 		strings.Contains(text, url.PathEscape(plugPassword)) || strings.Contains(text, "password=")
 }
 
-// Review O1: the plug's web password travelled in the address of every request (/cm?user=..&password=..).
-// A plug that takes it in a header gets it there and never sees an address with it.
-func TestTasmotaPasswordGoesInAHeaderWhenThePlugTakesIt(t *testing.T) {
-	plug := &fakePlug{header: true}
-	srv := httptest.NewServer(plug)
-	defer srv.Close()
-	s := tasmotaSource(t, srv.URL)
-	for i := 0; i < 3; i++ {
-		rs, err := s.Read(context.Background(), 2*time.Second)
-		if err != nil || len(rs) != 1 || rs[0].Watts == nil || *rs[0].Watts != 95 {
-			t.Fatalf("read %d: %+v %v", i, rs, err)
-		}
-	}
-	urls, auth := plug.seen()
-	if len(urls) != 3 {
-		t.Fatalf("%d requests for 3 reads", len(urls))
-	}
-	for i, u := range urls {
-		if inAddress(u) || strings.Contains(u, "user=") || u != "/cm?cmnd=Status+8" {
-			t.Errorf("request %d: the address carries the password or the user: %s", i, u)
-		}
-		if !strings.HasPrefix(auth[i], "Basic ") {
-			t.Errorf("request %d: no Authorization header", i)
-		}
-	}
-}
-
-// A plug with older firmware does not know the header. It is asked Tasmota's documented way, with the password
-// in the address, and from then on only that way (no two requests for every reading).
-func TestTasmotaOlderFirmwareStillWorks(t *testing.T) {
-	for name, plug := range map[string]*fakePlug{"answers 401": {}, "answers 200 with a WARNING": {warn200: true}} {
+// A plug with a web password is asked the one way Tasmota documents, and exactly as every release before
+// asked it: one request for every reading, user and password in the address, no Authorization header. That
+// holds for every firmware: one that would also take a header, one that answers 401 without a password and
+// one that answers 200 with a WARNING. No plug ever sees a request without its password (which it would
+// count, and log, as a failed login).
+func TestTasmotaPasswordGoesTheDocumentedWay(t *testing.T) {
+	for name, plug := range map[string]*fakePlug{"firmware that also takes a header": {header: true},
+		"answers 401 without a password": {}, "answers 200 with a WARNING": {warn200: true}} {
 		srv := httptest.NewServer(plug)
 		s := tasmotaSource(t, srv.URL)
 		for i := 0; i < 3; i++ {
@@ -117,11 +95,39 @@ func TestTasmotaOlderFirmwareStillWorks(t *testing.T) {
 				t.Fatalf("%s, read %d: %+v %v", name, i, rs, err)
 			}
 		}
-		urls, _ := plug.seen()
-		if len(urls) != 4 || inAddress(urls[0]) || !inAddress(urls[1]) || !inAddress(urls[2]) || !inAddress(urls[3]) {
-			t.Errorf("%s: want one try with the header, then the address form three times; got %d requests", name, len(urls))
+		urls, auth := plug.seen()
+		if len(urls) != 3 {
+			t.Errorf("%s: %d requests for 3 reads", name, len(urls))
+		}
+		for i, u := range urls {
+			pu, err := url.Parse(u)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if q := pu.Query(); pu.Path != "/cm" || len(q) != 3 || q.Get("cmnd") != "Status 8" || q.Get("user") != "admin" ||
+				q.Get("password") != plugPassword {
+				t.Errorf("%s, request %d: not Tasmota's documented form: %s %v", name, i, pu.Path, len(q))
+			}
+			if auth[i] != "" {
+				t.Errorf("%s, request %d: an Authorization header was sent", name, i)
+			}
 		}
 		srv.Close()
+	}
+	// a wrong password is one refused request for a reading, not two
+	wrong := &fakePlug{}
+	srv := httptest.NewServer(wrong)
+	defer srv.Close()
+	t.Setenv("PLUG_PW", "not-the-password")
+	s, err := Build(map[string]any{"id": "desk", "type": "tasmota", "url": srv.URL, "password_env": "PLUG_PW"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Read(context.Background(), 2*time.Second); err == nil {
+		t.Fatal("a wrong password was accepted")
+	}
+	if urls, _ := wrong.seen(); len(urls) != 1 {
+		t.Errorf("%d requests for one reading with a wrong password", len(urls))
 	}
 	// a plug without a password is asked as before, with neither
 	open := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -131,7 +137,7 @@ func TestTasmotaOlderFirmwareStillWorks(t *testing.T) {
 		_, _ = w.Write([]byte(status8))
 	}))
 	defer open.Close()
-	s, err := Build(map[string]any{"id": "desk", "type": "tasmota", "url": open.URL}, nil)
+	s, err = Build(map[string]any{"id": "desk", "type": "tasmota", "url": open.URL}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -148,8 +154,7 @@ func TestTasmotaAddressWithPasswordNeverLeaves(t *testing.T) {
 	slog.SetDefault(slog.New(slog.NewTextHandler(&logged, &slog.HandlerOptions{Level: slog.LevelDebug})))
 	defer slog.SetDefault(old)
 
-	// each case: a plug that needs the address form (so the request in question carries the password), and
-	// then fails in its own way
+	// each case: a plug that checks the password in the address, and then fails in its own way
 	hang := make(chan struct{})
 	defer close(hang)
 	needsURL := func(then http.HandlerFunc) http.Handler {
@@ -162,8 +167,8 @@ func TestTasmotaAddressWithPasswordNeverLeaves(t *testing.T) {
 		})
 	}
 	cases := map[string]http.Handler{
-		"wrong password (401 both ways)": http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(401) }),
-		"server error":                   needsURL(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(500) }),
+		"wrong password (401)": http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(401) }),
+		"server error":         needsURL(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(500) }),
 		"redirect that repeats the address": needsURL(func(w http.ResponseWriter, r *http.Request) {
 			http.Redirect(w, r, "http://192.0.2.1"+r.URL.String(), http.StatusFound)
 		}),
@@ -206,7 +211,7 @@ func TestTasmotaAddressWithPasswordNeverLeaves(t *testing.T) {
 	for name, h := range cases {
 		srv := httptest.NewServer(h)
 		s := tasmotaSource(t, srv.URL)
-		for i := 0; i < 2; i++ { // the second read goes straight to the address form where the first one worked
+		for i := 0; i < 2; i++ {
 			rs, err := s.Read(context.Background(), 300*time.Millisecond)
 			check(name, rs, err)
 		}
@@ -219,13 +224,10 @@ func TestTasmotaAddressWithPasswordNeverLeaves(t *testing.T) {
 	ln.Close()
 	for name, base := range map[string]string{"nothing listens": dead} {
 		s := tasmotaSource(t, base)
-		st := s.(*tasmota)
-		st.inURL.Store(true) // the address form at once
 		rs, err := s.Read(context.Background(), 300*time.Millisecond)
 		check(name, rs, err)
 	}
 	st := &tasmota{c: TasmotaConfig{Base: Base{ID: "desk"}, URL: "http://exa mple.invalid\x7f", Username: "admin", PasswordEnv: "PLUG_PW"}}
-	st.inURL.Store(true)
 	rs, err := st.Read(context.Background(), 300*time.Millisecond)
 	check("an address that cannot be parsed", rs, err)
 

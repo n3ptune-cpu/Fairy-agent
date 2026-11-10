@@ -2,11 +2,8 @@ package power
 
 import (
 	"context"
-	"errors"
-	"net/http"
 	"net/url"
 	"strings"
-	"sync/atomic"
 	"time"
 
 	"github.com/n3ptune-cpu/Fairy-agent/pkg/configutil"
@@ -24,46 +21,34 @@ type TasmotaConfig struct {
 type tasmota struct {
 	defaults
 	c TasmotaConfig
-	// inURL: this plug refused the password in a header and took it in the address (older firmware). Later
-	// reads go straight to that form; a restart asks the header way again.
-	inURL atomic.Bool
 }
 
 func (s *tasmota) Info() Base { return s.c.Base }
 
 // Read asks the plug for "Status 8" (its measurements).
 //
-// A plug with a web password wants it with every command. Tasmota's own, documented way is in the address:
-// /cm?user=<name>&password=<password>&cmnd=... . Newer firmware also takes it in an HTTP header
-// (Authorization: Basic), which keeps the password out of every address. So the header is tried first, and
-// the address form is used only for a plug that refuses the header (HTTP 401, or the "WARNING" answer older
-// firmware gives with HTTP 200). Either way the password crosses the local network in clear: Tasmota's HTTP
-// API has nothing else.
+// A plug with a web password wants it with every command, and Tasmota documents one way to give it: in the
+// address, /cm?user=<name>&password=<password>&cmnd=... ("this must be included (in plaintext) in the URL of
+// the HTTP request", Tasmota's Commands page, "with Web Requests"). That is the only form used here, one
+// request for every reading, as in every release before. Firmware from 9.3.0 on also takes an HTTP header
+// (Authorization: Basic) for /cm, but that is in its source only, not in its documentation, older firmware
+// refuses it, and it protects nothing: Tasmota speaks plain HTTP, so the password crosses the local network
+// in clear in either form.
 //
-// The address with the password is never logged and never part of an error: devices.GetJSON returns only
-// fixed words for a failed request, and safeError checks that again here.
+// What this code does guarantee is that the address with the password is never logged and never part of an
+// error: devices.GetJSON returns only fixed words for a failed request, and safeError checks that again here.
 func (s *tasmota) Read(ctx context.Context, timeout time.Duration) ([]Reading, error) {
 	c := s.c
+	q := url.Values{"cmnd": {"Status 8"}}
 	pw, err := configutil.EnvSecret(c.PasswordEnv, "power source "+c.ID, 1)
 	if err != nil {
 		return nil, devices.Safe(err)
 	}
-	client := devices.LANClient(timeout)
-	plain := strings.TrimRight(c.URL, "/") + "/cm?" + url.Values{"cmnd": {"Status 8"}}.Encode()
-	var d map[string]any
-	switch {
-	case pw == "":
-		d, err = devices.GetJSON(ctx, client, plain, "", "", "")
-	case s.inURL.Load():
-		d, err = s.readWithPasswordInURL(ctx, client, pw)
-	default:
-		d, err = devices.GetJSON(ctx, client, plain, "basic", c.Username, pw)
-		if tasmotaWantsPasswordInURL(d, err) {
-			if d, err = s.readWithPasswordInURL(ctx, client, pw); err == nil && !tasmotaWantsPasswordInURL(d, nil) {
-				s.inURL.Store(true)
-			}
-		}
+	if pw != "" { // Tasmota's own scheme; the address is never logged
+		q.Set("user", c.Username)
+		q.Set("password", pw)
 	}
+	d, err := devices.GetJSON(ctx, devices.LANClient(timeout), strings.TrimRight(c.URL, "/")+"/cm?"+q.Encode(), "", "", "")
 	if err != nil {
 		return nil, safeError(err, pw)
 	}
@@ -72,26 +57,6 @@ func (s *tasmota) Read(ctx context.Context, timeout time.Duration) ([]Reading, e
 		return nil, safeError(err, pw)
 	}
 	return []Reading{NewReading(c.Base, r)}, nil
-}
-
-// readWithPasswordInURL is Tasmota's older way: the password in the address.
-func (s *tasmota) readWithPasswordInURL(ctx context.Context, client *http.Client, pw string) (map[string]any, error) {
-	q := url.Values{"cmnd": {"Status 8"}, "user": {s.c.Username}, "password": {pw}}
-	return devices.GetJSON(ctx, client, strings.TrimRight(s.c.URL, "/")+"/cm?"+q.Encode(), "", "", "")
-}
-
-// tasmotaWantsPasswordInURL reports whether a plug's answer to a command says "no password seen": HTTP 401, or
-// (older firmware) HTTP 200 with {"WARNING":"Need user=<username>&password=<password>"}.
-func tasmotaWantsPasswordInURL(d map[string]any, err error) bool {
-	var he *devices.HTTPStatusError
-	if errors.As(err, &he) {
-		return he.Code == http.StatusUnauthorized
-	}
-	if err != nil {
-		return false
-	}
-	_, warned := d["WARNING"]
-	return warned
 }
 
 // safeError returns err as it is when its text cannot give the password away, and a fixed word otherwise. The
