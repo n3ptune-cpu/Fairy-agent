@@ -342,14 +342,23 @@ Use this only when 2.1 and 2.2 do not fit. The machine must already have the age
 
    ```sh
    [ -d /etc/polkit-1/rules.d ] || apt-get install -y polkitd                   # Debian / Proxmox without polkit
-   fairy-agent config get self_update.enabled      # true: run the next line
-   install -m 0644 fairy-agent-update.polkit.rules /etc/polkit-1/rules.d/49-fairy-agent-update.rules
-   fairy-agent config get power_control.enabled    # true: run the next line
-   install -m 0644 fairy-agent-power.polkit.rules /etc/polkit-1/rules.d/49-fairy-agent-power.rules
-   rm -f /etc/polkit-1/rules.d/49-fairy-agent.rules
+   R=/etc/polkit-1/rules.d
+   if [ "$(fairy-agent config get self_update.enabled)" = true ]; then
+     install -m 0644 fairy-agent-update.polkit.rules "$R/49-fairy-agent-update.rules"
+   else
+     rm -f "$R/49-fairy-agent-update.rules"
+   fi
+   if [ "$(fairy-agent config get power_control.enabled)" = true ]; then
+     install -m 0644 fairy-agent-power.polkit.rules "$R/49-fairy-agent-power.rules"
+   else
+     rm -f "$R/49-fairy-agent-power.rules"
+   fi
+   rm -f "$R/49-fairy-agent.rules"
+   ls "$R" | grep fairy                            # only the rule(s) of what is switched on
    ```
 
-   If you switch self-update on in 2.4, come back and install the update rule.
+   The block can be pasted as a whole: it asks `config.yaml` which features are on. If you switch self-update
+   on in 2.4, run it again afterwards.
 
 5. Restart and look:
 
