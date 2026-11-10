@@ -418,6 +418,71 @@ func TestInstallerRollsBack(t *testing.T) {
 	}
 }
 
+// L28: the check after a rollback must look for the PREVIOUS version. With one check for both (one that
+// expects the new version, as the agent's does) a clean rollback was reported as "rolling back FAILED too",
+// after waiting the whole health timeout a second time.
+func TestInstallerChecksThePreviousVersionAfterARollback(t *testing.T) {
+	for _, rs := range []bool{false, true} {
+		target, newPath := setupTarget(t)
+		running := func() string { b, _ := os.ReadFile(target); return string(b) }
+		expect := func(want string) func(context.Context) error {
+			return func(context.Context) error {
+				if got := running(); got != want {
+					return fmt.Errorf("agent reports version %q, want %s", got, want)
+				}
+				return nil
+			}
+		}
+		var asked []string
+		in := &release.Installer{Target: target, RenameSwap: rs, HealthTimeout: 300 * time.Millisecond, Interval: 10 * time.Millisecond,
+			Start: func(context.Context) error { return nil },
+			Stop:  func(context.Context) error { return nil },
+			// the new binary never reports the new version (it "crashes": the old one's answer is all there is)
+			Healthy: func(ctx context.Context) error {
+				asked = append(asked, "new")
+				return errors.New("agent not answering")
+			},
+			HealthyPrevious: func(ctx context.Context) error { asked = append(asked, "previous"); return expect("old")(ctx) }}
+		start := time.Now()
+		err := in.Install(context.Background(), newPath)
+		var rb *release.RolledBackError
+		if !errors.As(err, &rb) || rb.RollbackErr != nil {
+			t.Fatalf("renameSwap=%v: %v", rs, err)
+		}
+		if !strings.Contains(err.Error(), "rolled back to the previous version") || strings.Contains(err.Error(), "FAILED") {
+			t.Fatalf("renameSwap=%v: %v", rs, err)
+		}
+		if running() != "old" {
+			t.Fatalf("renameSwap=%v: not rolled back", rs)
+		}
+		if asked[len(asked)-1] != "previous" || asked[0] != "new" {
+			t.Fatalf("renameSwap=%v: checks %v", rs, asked)
+		}
+		// the rollback's check passes at once: one health timeout in all, not two
+		if d := time.Since(start); d > 550*time.Millisecond {
+			t.Fatalf("renameSwap=%v: took %s", rs, d)
+		}
+
+		// without HealthyPrevious the one check is used for both, as before (the panel's own updater)
+		target, newPath = setupTarget(t)
+		f := &fakeSvc{target: target, failNew: true}
+		if err := f.installer(rs).Install(context.Background(), newPath); !errors.As(err, &rb) || rb.RollbackErr != nil {
+			t.Fatalf("renameSwap=%v, one check: %v", rs, err)
+		}
+
+		// a previous version that does not come back either is still reported as a failed rollback
+		target, newPath = setupTarget(t)
+		in = &release.Installer{Target: target, RenameSwap: rs, HealthTimeout: 100 * time.Millisecond, Interval: 10 * time.Millisecond,
+			Start: func(context.Context) error { return nil }, Stop: func(context.Context) error { return nil },
+			Healthy:         func(context.Context) error { return errors.New("agent not answering") },
+			HealthyPrevious: func(context.Context) error { return errors.New("agent not answering") }}
+		if err := in.Install(context.Background(), newPath); !errors.As(err, &rb) || rb.RollbackErr == nil ||
+			!strings.Contains(err.Error(), "the previous version is not healthy either") {
+			t.Fatalf("renameSwap=%v, dead previous version: %v", rs, err)
+		}
+	}
+}
+
 func TestInstallerRefusesOtherFolder(t *testing.T) {
 	target, _ := setupTarget(t)
 	other := filepath.Join(t.TempDir(), "x")

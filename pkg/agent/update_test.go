@@ -5,6 +5,7 @@ import (
 	"crypto/ed25519"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -256,11 +257,14 @@ type applyRig struct {
 	starts   int
 	running  string // the "running" binary's content
 	unhealty bool
+	versions map[string]string // binary content -> the version it reports
+	checked  []string          // the versions the health check was asked for, in order
 }
 
 func newApplyRig(t *testing.T, publishVersion string, bin []byte) *applyRig {
 	t.Helper()
 	ar := &applyRig{gh: releasetest.New(t, release.AgentRepo)}
+	ar.versions = map[string]string{"installed 41": "41-aaaaaaa", string(bin): publishVersion}
 	dir := t.TempDir()
 	ar.stage, ar.result = filepath.Join(dir, "state", "update"), filepath.Join(dir, "res", "result.json")
 	bindir := filepath.Join(dir, "bin")
@@ -299,8 +303,13 @@ func (ar *applyRig) apply(key ed25519.PublicKey) UpdateResult {
 	return ApplyStaged(context.Background(), ApplyOptions{StageDir: ar.stage, ResultPath: ar.result, Asset: testAsset,
 		Key: key, CurrentVersion: "41-aaaaaaa", Installer: in,
 		Healthy: func(_ context.Context, want string) error {
+			ar.checked = append(ar.checked, want)
+			// what the real check does (CheckRunning): the running agent must report the version asked for
 			if ar.unhealty && ar.running != "installed 41" {
-				return errors.New("agent reports the old version")
+				return errors.New("agent not answering")
+			}
+			if got := ar.versions[ar.running]; got != want {
+				return fmt.Errorf("agent reports version %q, want %s", got, want)
 			}
 			return nil
 		}})
@@ -365,6 +374,14 @@ func TestApplyStagedReverifiesAndRollsBack(t *testing.T) {
 	}
 	if b, _ := os.ReadFile(ar.target); string(b) != "installed 41" || ar.running != "installed 41" || ar.starts != 2 {
 		t.Fatalf("not rolled back: %q running %q starts %d", b, ar.running, ar.starts)
+	}
+	// L28: a clean rollback says so. The check after it asks for the version that is installed again (41), not
+	// for the one that failed (42), which made every rollback read "rolling back FAILED too".
+	if !strings.Contains(res.Message, "rolled back to the previous version") || strings.Contains(res.Message, "FAILED") {
+		t.Fatalf("a clean rollback is misreported: %s", res.Message)
+	}
+	if n := len(ar.checked); n < 2 || ar.checked[0] != "42-bbbbbbb" || ar.checked[n-1] != "41-aaaaaaa" {
+		t.Fatalf("health checks asked for %v", ar.checked)
 	}
 	if r := readResult(ar.result); r == nil || r.OK {
 		t.Fatal("result file")

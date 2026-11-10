@@ -447,6 +447,8 @@ func applyStaged(ctx context.Context, o ApplyOptions, res *UpdateResult) error {
 		return err
 	}
 	in.Healthy = func(ctx context.Context) error { return o.Healthy(ctx, ch.Version) }
+	// after a rollback the installed version runs again: that one is what the check must find
+	in.HealthyPrevious = func(ctx context.Context) error { return o.Healthy(ctx, o.CurrentVersion) }
 	if in.Logf == nil {
 		in.Logf = func(f string, a ...any) { slog.Info("apply-update: " + fmt.Sprintf(f, a...)) }
 	}
@@ -638,15 +640,19 @@ func NewUpdateCLI(ctx context.Context, cfg *Config, version, releaseKey string) 
 				in.Healthy = func(context.Context) error { return nil }
 				return in
 			}
-			in.Healthy = func(ctx context.Context) error {
-				if err := serviceRunning(ctx); err != nil {
-					return err
+			healthy := func(v string) func(context.Context) error {
+				return func(ctx context.Context) error {
+					if err := serviceRunning(ctx); err != nil {
+						return err
+					}
+					if cfg == nil {
+						return nil
+					}
+					return CheckRunning(ctx, cfg, v)
 				}
-				if cfg == nil {
-					return nil
-				}
-				return CheckRunning(ctx, cfg, want)
 			}
+			// after a rollback this binary's own version runs again
+			in.Healthy, in.HealthyPrevious = healthy(want), healthy(version)
 			return in
 		}}
 	if !running {

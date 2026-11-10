@@ -23,10 +23,13 @@ type Installer struct {
 	// Start runs after the swap and again after a rollback (Linux: systemctl restart <unit>).
 	Start func(ctx context.Context) error
 	// Healthy is asked once a second until it has said yes HealthPasses times in a row, or HealthTimeout ends.
-	Healthy       func(ctx context.Context) error
-	HealthTimeout time.Duration // default 30 s
-	HealthPasses  int           // default 1
-	Interval      time.Duration // default 1 s
+	Healthy func(ctx context.Context) error
+	// HealthyPrevious is asked instead of Healthy after a rollback, when the PREVIOUS version runs again: a
+	// check that expects the new version (Healthy) can never pass then. nil: Healthy is asked.
+	HealthyPrevious func(ctx context.Context) error
+	HealthTimeout   time.Duration // default 30 s
+	HealthPasses    int           // default 1
+	Interval        time.Duration // default 1 s
 	// Relabel runs after the new binary is in place (restorecon on SELinux hosts); may be nil.
 	Relabel func(path string)
 	// RenameSwap moves the old binary aside before moving the new one in (needed on Windows, where a running
@@ -153,14 +156,21 @@ func (in *Installer) rollback(ctx context.Context, cause error) error {
 	if err := in.Start(ctx); err != nil {
 		return &RolledBackError{Cause: cause, RollbackErr: fmt.Errorf("starting the previous version: %w", err)}
 	}
-	if err := in.waitHealthy(ctx); err != nil {
+	check := in.HealthyPrevious
+	if check == nil {
+		check = in.Healthy
+	}
+	if err := in.waitFor(ctx, check); err != nil {
 		return &RolledBackError{Cause: cause, RollbackErr: fmt.Errorf("the previous version is not healthy either: %w", err)}
 	}
 	in.logf("previous version restored and healthy")
 	return &RolledBackError{Cause: cause}
 }
 
-func (in *Installer) waitHealthy(ctx context.Context) error {
+func (in *Installer) waitHealthy(ctx context.Context) error { return in.waitFor(ctx, in.Healthy) }
+
+// waitFor asks healthy once every Interval until it has said yes HealthPasses times in a row.
+func (in *Installer) waitFor(ctx context.Context, healthy func(context.Context) error) error {
 	timeout, passes, every := in.HealthTimeout, in.HealthPasses, in.Interval
 	if timeout <= 0 {
 		timeout = 30 * time.Second
@@ -176,7 +186,7 @@ func (in *Installer) waitHealthy(ctx context.Context) error {
 	var last error
 	ok := 0
 	for {
-		if err := in.Healthy(ctx); err != nil {
+		if err := healthy(ctx); err != nil {
 			last, ok = err, 0
 		} else if ok++; ok >= passes {
 			return nil
