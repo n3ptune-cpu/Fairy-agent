@@ -6,6 +6,12 @@ import (
 	"path/filepath"
 )
 
+// checkOldFile is checkOld, the look at the file that is about to be replaced (Windows: it must be a plain
+// file that Administrators, SYSTEM or TrustedInstaller own). It is a variable for the tests on Windows, whose
+// files belong to the user who runs them: write_windows_test.go tests the check itself on such a file, the
+// other tests answer it to test what happens after it.
+var checkOldFile = checkOld
+
 // WriteFile replaces an existing config.yaml with data in one step: a new file next to it gets the old file's
 // owner, permissions and (Linux) SELinux label / ACL, is flushed to disk, then renamed over the old one, so a
 // crash leaves either the old or the new file, never half of one.
@@ -23,7 +29,7 @@ func WriteFile(path string, data []byte) error {
 	if !st.Mode().IsRegular() {
 		return fmt.Errorf("%s is not a regular file", path)
 	}
-	if err := checkOld(path); err != nil {
+	if err := checkOldFile(path); err != nil {
 		return err
 	}
 	tmp, err := os.CreateTemp(filepath.Dir(path), ".config.yaml.new-*")

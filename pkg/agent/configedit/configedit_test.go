@@ -195,7 +195,39 @@ func TestParseValueList(t *testing.T) {
 	}
 }
 
+// ownedByAdministrators answers WriteFile's look at the old file's owner on Windows, where a test's files
+// belong to the user who runs the tests and are refused for that (rightly: write_windows_test.go tests that
+// refusal on the real file). What comes after the look is what the tests below are about. Elsewhere there is
+// no such look and nothing is replaced.
+func ownedByAdministrators(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS != "windows" {
+		return
+	}
+	old := checkOldFile
+	t.Cleanup(func() { checkOldFile = old })
+	checkOldFile = func(string) error { return nil }
+}
+
+// fileItself is what os.SameFile compares, read from the opened file. (os.Stat's result is not enough for
+// "is this still the same file?": on Windows it holds the path, and the file is looked up when os.SameFile
+// asks, which is after the file was replaced.)
+func fileItself(t *testing.T, p string) os.FileInfo {
+	t.Helper()
+	f, err := os.Open(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	fi, err := f.Stat()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return fi
+}
+
 func TestWriteFileKeepsPermissions(t *testing.T) {
+	ownedByAdministrators(t)
 	dir := t.TempDir()
 	p := filepath.Join(dir, "config.yaml")
 	if err := os.WriteFile(p, []byte("a: 1\n"), 0o640); err != nil {
@@ -221,6 +253,7 @@ func TestWriteFileKeepsPermissions(t *testing.T) {
 // stands for "the file someone else prepared and still owns") keeps the old content, and the config's name
 // now belongs to a different file.
 func TestWriteFileNeverWritesInPlace(t *testing.T) {
+	ownedByAdministrators(t)
 	dir := t.TempDir()
 	p := filepath.Join(dir, "config.yaml")
 	if err := os.WriteFile(p, []byte("planted: 1\n"), 0o640); err != nil {
@@ -230,7 +263,7 @@ func TestWriteFileNeverWritesInPlace(t *testing.T) {
 	if err := os.Link(p, old); err != nil {
 		t.Skip("no hard links here:", err)
 	}
-	before, _ := os.Stat(p)
+	before := fileItself(t, p)
 	if err := WriteFile(p, []byte("a: 2\n")); err != nil {
 		t.Fatal(err)
 	}
@@ -240,8 +273,10 @@ func TestWriteFileNeverWritesInPlace(t *testing.T) {
 	if b, _ := os.ReadFile(p); string(b) != "a: 2\n" {
 		t.Fatalf("%q", b)
 	}
-	after, _ := os.Stat(p)
-	if os.SameFile(before, after) {
+	if os.SameFile(before, fileItself(t, p)) {
 		t.Fatal("config.yaml is still the old file")
+	}
+	if !os.SameFile(before, fileItself(t, old)) {
+		t.Fatal("the old file is no longer under its other name")
 	}
 }
