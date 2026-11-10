@@ -222,104 +222,173 @@ said `03ea` and `skipped`), the first `2d:00.0` entry with `overdrive=8 temp=PML
 the others `same card`, `cards=1` and `temp_api="[2d:00.0 PMLog]"`. The panel shows the card "via AMD" with a
 temperature (and watts with PMLog). If it says `temp=none (...)`, send the line: it holds each call's ADL error.
 
-## 12. 0.6.0: the security fixes (data folder, installer, Cancel, update check)
+## 12. 0.6.0: the security fixes. One checklist for a real PC
 
 **None of 0.6.0's Windows code and neither of its two PowerShell scripts has run on Windows.** The Go code was
 compiled and its decisions tested on Linux; the scripts were written and re-read, not parsed. Do this list on
 **one** PC first (again: not the PC whose fans Fairy controls), and send the output of any step that differs.
 
-`N` below stands for the build number of the 0.6.0 release (the number in the tag `build-N` on the Releases
-page). Type the real number in its place. Everything is one line at a time in **PowerShell as
-Administrator**. Steps marked *read-only* change nothing.
+How to read it:
 
-### 12.1 Before updating (all read-only)
+* One step is one line to type, in **Windows PowerShell as Administrator** unless the step says otherwise, and
+  what a good answer looks like after the arrow (`->`).
+* The steps are in the order to do them. Steps 1 to 21 **only read**. Steps 22 to 29 change a throwaway folder
+  or something harmless. Steps 30 to 34 install.
+* `N` is the build number of the 0.6.0 release (the number in the tag `build-N` on the Releases page). Type the
+  real number in its place. `$fa` is the program, as at the top of this file.
+* **[KEY]** marks the five steps that matter most. If time is short, do those five (2, 13, 16, 20 and, on the
+  same visit, 9). Each one checks a guess the new code makes about real Windows; if a guess is wrong, that step
+  shows it before anything breaks.
 
-1. `$PSVersionTable.PSVersion.ToString()`
-   Expected: starts with `5.1`.
-2. Owners in the data folder:
-   `(Get-Acl C:\ProgramData\fairy-agent).Owner; Get-ChildItem C:\ProgramData\fairy-agent -Recurse -Force | ForEach-Object { '{0}  {1}' -f (Get-Acl -LiteralPath $_.FullName).Owner, $_.FullName }`
-   Expected: `BUILTIN\Administrators` or `NT AUTHORITY\SYSTEM` on every line; inside `logs\`, `state\` and
-   `update\stage\` also `NT SERVICE\fairy-agent`. **Any other name outside those three folders: do not update
-   this PC yet, send the output.** The new helper and updater would refuse that folder.
-3. `(Get-Acl C:\ProgramData\fairy-agent).Sddl`
-   Expected: `O:BA...D:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;S-1-5-80-...)`.
-4. `(Get-Acl C:\ProgramData\fairy-agent\config.yaml).Sddl; (Get-Acl C:\ProgramData\fairy-agent\token).Sddl`
-   Expected, twice: `O:BA...D:AI(A;ID;FA;;;SY)(A;ID;FA;;;BA)(A;ID;0x1200a9;;;S-1-5-80-...)`, nothing else.
-5. `(Get-Acl 'C:\Program Files\Fairy').Owner; (Get-Acl 'C:\Program Files\Fairy\fairy-agent.exe').Owner`
-   Expected: `BUILTIN\Administrators`, `NT AUTHORITY\SYSTEM` or `NT SERVICE\TrustedInstaller` on both. Any
-   other name: the installer will replace the program instead of keeping a newer one (safe, but report it).
-6. Parse `install.ps1` of the new release without running it:
-   `$b=(New-Object Net.WebClient).DownloadData('https://github.com/n3ptune-cpu/Fairy-agent/releases/download/build-N/install.ps1'); $e=$null; [void][Management.Automation.Language.Parser]::ParseInput([Text.Encoding]::UTF8.GetString($b),[ref]$null,[ref]$e); "parse errors: $($e.Count)"; $e`
-   Expected: `parse errors: 0`. If not, send the output and stop here.
-7. The same line with `install-fairy-agent.ps1` in place of `install.ps1`.
-   Expected: `parse errors: 0`.
-8. Run `install.ps1` from memory up to its first check (needs step 6's `$b` in the same window; the join code
-   and the address are made-up example values):
-   `$env:FAIRY_JOIN_CODE='AAAA-AAAA-AAAA-AAAA-AAAA-AAAA-AAAA-AAAA'; & ([scriptblock]::Create([Text.Encoding]::UTF8.GetString($b))) -PanelAddress 100.64.0.10`
-   Expected: one red error that starts `no release fingerprint (-SumsSha256)`. Nothing is downloaded.
-   Then `Test-Path Env:FAIRY_JOIN_CODE`
-   Expected: `False`.
-9. The permission call the script makes, on a throwaway folder (creates and removes one empty folder):
-   `$d=Join-Path $env:TEMP ('fairy-acltest-'+[guid]::NewGuid().ToString('N')); New-Item -ItemType Directory -Path $d | Out-Null; icacls $d /inheritance:r /grant:r '*S-1-5-32-544:(OI)(CI)F' '*S-1-5-18:(OI)(CI)F' /Q; (Get-Acl $d).Sddl; Remove-Item $d`
-   Expected: `Successfully processed 1 files`, and an Sddl whose `D:` part starts with `P` and holds only
-   `(A;OICI;FA;;;BA)` and `(A;OICI;FA;;;SY)` (either order). Send it if there is anything else in it.
+### A. Before updating (read-only; one PC is enough if all were installed the same way)
 
-### 12.2 After pressing Update (to build N) on the first PC
+1. Which PowerShell this is.
+   `$PSVersionTable.PSVersion.ToString()`
+   -> starts with `5.1`.
+2. **[KEY] Who owns the data folder and the program.** The new helper and updater refuse a folder that another
+   account owns, and the installer would move it aside.
+   `(Get-Acl C:\ProgramData\fairy-agent).Owner; Get-ChildItem C:\ProgramData\fairy-agent -Recurse -Force | ForEach-Object { '{0}  {1}' -f (Get-Acl -LiteralPath $_.FullName).Owner, $_.FullName }; (Get-Acl 'C:\Program Files\Fairy').Owner; (Get-Acl 'C:\Program Files\Fairy\fairy-agent.exe').Owner`
+   -> `BUILTIN\Administrators` or `NT AUTHORITY\SYSTEM` on every line (`NT SERVICE\TrustedInstaller` also for
+   the last two); inside `logs\`, `state\` and `update\stage\` also `NT SERVICE\fairy-agent`. **Any other name:
+   do not update this PC yet, send the output.**
+3. The permissions of the folder, of `config.yaml` and of `token`.
+   `(Get-Acl C:\ProgramData\fairy-agent).Sddl; (Get-Acl C:\ProgramData\fairy-agent\config.yaml).Sddl; (Get-Acl C:\ProgramData\fairy-agent\token).Sddl`
+   -> first `O:BA...D:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;S-1-5-80-...)`, the other two
+   `O:BA...D:AI(A;ID;FA;;;SY)(A;ID;FA;;;BA)(A;ID;0x1200a9;;;S-1-5-80-...)`, nothing else.
+4. The permissions of the agent's three folders. The installer moves one of them aside as a whole when it
+   differs (AGENT.md, "The agent's three folders"), so it is good to know beforehand.
+   `'logs','state','update\stage' | ForEach-Object { (Get-Acl "C:\ProgramData\fairy-agent\$_").Sddl }`
+   -> three times `O:BA...D:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1301bf;;;S-1-5-80-...)`. A line
+   that starts `O:SY` or `O:S-1-5-80-` with the same `D:` part is fine too (only the owner is corrected).
+5. Who becomes the owner of what this window creates.
+   `[Security.Principal.WindowsIdentity]::GetCurrent().Owner.Value`
+   -> `S-1-5-32-544` (Administrators). Another value: send it; step 2 then decides.
+6. Who became the owner of what the helper (LocalSystem) created.
+   `(Get-Acl C:\ProgramData\fairy-agent\helper\helper.log).Owner`
+   -> `BUILTIN\Administrators` (or `NT AUTHORITY\SYSTEM`).
+7. The folders above the data folder.
+   `(Get-Acl C:\ProgramData).Sddl; (Get-Acl C:\).Sddl`
+   -> owner `O:SY`, `O:BA` or TrustedInstaller (`O:S-1-5-80-956008885-...`); for `BU` and `AU` no entry that
+   applies to the folder itself (no `IO` in its second field) with `FA`, `SD`, `DT`, `WD` or `WO`.
+8. The two temp folders. The install script now works in the second one.
+   `icacls $env:TEMP; icacls $env:SystemRoot\Temp`
+   -> the first shows your own account with `(OI)(CI)(F)`; the second shows `BUILTIN\Users:(CI)(S,WD,AD,X)`
+   and no `(F)` or `(M)` for Users.
+9. **[KEY] Who owns the helper's pipe** (works on 0.5.x too, while the helper runs).
+   `(Get-Acl -LiteralPath '\\.\pipe\fairy-agent-helper').Sddl`
+   -> starts with `O:BA` or `O:SY`, and holds `(D;;GA;;;NU)(A;;GA;;;SY)(A;;GA;;;BA)(A;;0x120183;;;S-1-5-80-`.
+   If PowerShell cannot read a pipe this way (an error instead of a line), that is no finding: step 16 prints
+   the same owner.
+10. Does a failing check stop a PowerShell line? (This is why the panel's install line is being changed.)
+    `if ((1/0) -ne 'x') { throw 'stop' }; 'ran'`
+    -> an error line, then `ran`.
+11. Can this PC compute SHA-256 the way the panel's install line does?
+    `(Get-ItemProperty HKLM:\SYSTEM\CurrentControlSet\Control\Lsa\FipsAlgorithmPolicy).Enabled; [Security.Cryptography.SHA256]::Create().GetType().Name`
+    -> `0`, then `SHA256Managed`. An error on the second part: send it, and do not use the panel's install
+    line on this PC until the panel is updated.
+12. Both scripts of the new release parse (nothing is run).
+    `foreach ($n in 'install.ps1','install-fairy-agent.ps1') { $b=(New-Object Net.WebClient).DownloadData("https://github.com/n3ptune-cpu/Fairy-agent/releases/download/build-N/$n"); $e=$null; [void][Management.Automation.Language.Parser]::ParseInput([Text.Encoding]::UTF8.GetString($b),[ref]$null,[ref]$e); "$n parse errors: $($e.Count)"; $e }`
+    -> `parse errors: 0`, twice. If not, stop here and send the output.
+13. **[KEY] Run `install.ps1` in this PowerShell, up to its first check.** The script has no dry-run switch;
+    this is the nearest thing: without the release fingerprint it stops before it downloads or changes
+    anything. The join code and the address are made-up example values.
+    `$b=(New-Object Net.WebClient).DownloadData('https://github.com/n3ptune-cpu/Fairy-agent/releases/download/build-N/install.ps1'); $env:FAIRY_JOIN_CODE='AAAA-AAAA-AAAA-AAAA-AAAA-AAAA-AAAA-AAAA'; & ([scriptblock]::Create([Text.Encoding]::UTF8.GetString($b))) -PanelAddress 100.64.0.10; Test-Path Env:FAIRY_JOIN_CODE`
+    -> one red error that starts `no release fingerprint (-SumsSha256)`, then `False`.
 
-10. `& $fa version` shows build N, and the panel shows the host.
-11. `Select-String -Path C:\ProgramData\fairy-agent\logs\agent.log -Pattern 'data folder'`
-    Expected: no line with `data folder is not safe`.
-12. `Select-String -Path C:\ProgramData\fairy-agent\logs\agent.log -Pattern 'exclusive use' | Select-Object -Last 2`
-    Expected: no line. (A line means Windows refused to give the agent its port for exclusive use; the agent
-    works, report it.)
-13. Core Temp PCs:
-    `Select-String -Path C:\ProgramData\fairy-agent\logs\agent.log -Pattern 'Core Temp' | Select-Object -Last 3`
-    Expected: `Core Temp readings available` with `shared_memory=...`, and core temperatures in the panel. A
-    line with `belongs to S-1-5-21...` means Core Temp's shared memory is not owned by Administrators on this
-    PC: report it, and switch on Core Temp's "Enable global shared memory (SNMP)" (AGENT.md, "Core Temp").
-14. `& $fa helper-status`
-    Expected: `helper: running`.
+### B. After pressing Update (to build N) on the first PC (read-only)
+
+14. The new program runs.
+    `& $fa version`
+    -> shows build N; the panel shows the host.
+15. The agent's own look at its data folder, and its port.
+    `Select-String -Path C:\ProgramData\fairy-agent\logs\agent.log -Pattern 'data folder is not safe','exclusive use' | Select-Object -Last 3`
+    -> no line.
+16. **[KEY] The new helper starts, and its pipe belongs to Administrators or SYSTEM.**
+    `& $fa helper-status; Get-Content C:\ProgramData\fairy-agent\helper\helper.log -Tail 5`
+    -> `helper pipe owner: S-1-5-32-544 (...)` (or `S-1-5-18`), `helper: running, answers on ...`, and in the
+    log `helper started` with no line that starts with `pipe:`. No line that starts with `note:`. **Another
+    owner: send the output, and leave `require_helper_pipe_owner` off.**
+17. The agent's own note about the pipe (it is written once when the owner is not the expected one).
+    `Select-String -Path C:\ProgramData\fairy-agent\logs\agent.log -Pattern "helper's pipe" | Select-Object -Last 2`
+    -> no line.
+18. A typed command on a healthy PC.
+    `& $fa update --check`
+    -> the installed and the latest version; **no** `cannot be trusted`.
+19. What the services told Windows.
+    `Get-WinEvent -FilterHashtable @{LogName='Application'; ProviderName='fairy-agent','fairy-agent-helper'} -MaxEvents 10 -ErrorAction SilentlyContinue | Format-List TimeCreated, Message`
+    -> no `did nothing`, no `not serving anything`, no `cannot start`.
+20. **[KEY] Core Temp PCs: who owns Core Temp's shared memory.**
+    `Select-String -Path C:\ProgramData\fairy-agent\logs\agent.log, C:\ProgramData\fairy-agent\helper\helper.log -Pattern 'Core Temp' | Select-Object -Last 4`
+    -> `Core Temp readings available` with `shared_memory=...`, and core temperatures in the panel. **A line
+    with `belongs to S-1-5-21-...` means the guess "what Core Temp creates belongs to Administrators" is wrong
+    on this PC: send it.** (With `It is used all the same` the readings still work; with `not used` they do
+    not: switch on Core Temp's "Enable global shared memory (SNMP)", AGENT.md, "Core Temp".)
+21. The health answer.
+    `(Invoke-WebRequest -UseBasicParsing "http://$((Get-NetIPAddress -InterfaceAlias Tailscale -AddressFamily IPv4).IPAddress):9101/health?c=0123456789abcdef").Content`
+    -> `{"proof":"` followed by 64 hex digits; no version, no token.
+
+### C. These change a throwaway folder or something harmless
+
+22. The way the install script now makes its work folder (creates and removes one empty folder in
+    `C:\Windows\Temp`).
+    `$d=Join-Path $env:SystemRoot ('Temp\fairy-acltest-'+[guid]::NewGuid().ToString('N')); $s=New-Object System.Security.AccessControl.DirectorySecurity; $s.SetSecurityDescriptorSddlForm('O:BAD:PAI(A;OICI;FA;;;BA)(A;OICI;FA;;;SY)'); [System.IO.Directory]::CreateDirectory($d,$s) | Out-Null; (Get-Acl -LiteralPath $d).Sddl; Remove-Item -LiteralPath $d`
+    -> one line that starts `O:BA`, whose `D:` part starts with `P` and holds only `(A;OICI;FA;;;BA)` and
+    `(A;OICI;FA;;;SY)`. Anything else in it, or an error: send it (the script would stop with `did not get the
+    permissions it was created with`).
+23. Can an ordinary account make a junction? In a window that is **not** run as administrator:
+    `cmd /c "mkdir %TEMP%\fj-a %TEMP%\fj-t & mklink /J %TEMP%\fj-a\j %TEMP%\fj-t & rmdir %TEMP%\fj-a\j & rmdir %TEMP%\fj-a %TEMP%\fj-t"`
+    -> `Junction created for ...`. (That is what the rule "the installer changes nothing inside the agent's
+    folders" guards against. `You do not have sufficient privilege`: send it; the rule stays.)
+24. Do permissions set on a folder reach through a junction inside it? (For the record; since this release the
+    installer does not depend on the answer.)
+    `mkdir C:\fj\a, C:\fj\t | Out-Null; Set-Content C:\fj\t\f x; cmd /c mklink /J C:\fj\a\j C:\fj\t | Out-Null; $b=(Get-Acl C:\fj\t\f).Sddl; $acl=Get-Acl C:\fj\a; $acl.SetAccessRuleProtection($true,$false); $acl.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule('Users','Modify','ContainerInherit,ObjectInherit','None','Allow'))); Set-Acl C:\fj\a $acl; $b -eq (Get-Acl C:\fj\t\f).Sddl; cmd /c rmdir C:\fj\a\j; cmd /c rd /s /q C:\fj`
+    -> `True`. `False`: send it.
+25. Fairy's own shutdown is remembered across a restart of both services. In the panel schedule a shutdown in
+    10 minutes, then:
+    `Restart-Service fairy-agent-helper; Restart-Service fairy-agent; Start-Sleep 5; Test-Path C:\ProgramData\fairy-agent\helper\power-pending.json`
+    -> `True`, and the panel still shows the pending shutdown. Press **Cancel** in the panel: Windows shows that
+    the shutdown was cancelled, `Test-Path` on the same file says `False`, the PC stays on.
+26. The same across sleep. Schedule a shutdown in 30 minutes, put the PC to sleep for 2 minutes, wake it.
+    `Test-Path C:\ProgramData\fairy-agent\helper\power-pending.json`
+    -> `True` and the panel still shows it; Cancel works as in step 25.
+27. The same across a correction of the clock (optional; it moves the PC's clock by five minutes and back).
+    Schedule a shutdown in 30 minutes, then:
+    `Set-Date (Get-Date).AddMinutes(5) | Out-Null; Start-Sleep 20; Test-Path C:\ProgramData\fairy-agent\helper\power-pending.json; w32tm /resync /force`
+    -> `True`, the panel still shows the shutdown (now for a time five minutes later by the clock), and Cancel
+    works as in step 25.
+28. Fairy does not cancel what it did not start.
+    `shutdown /s /t 600`
+    -> the panel shows **nothing** pending. Then `shutdown /a`.
+29. Optional: the helper waits for its pipe name. Stop the helper, hold the name from a second window with any
+    program that creates `\\.\pipe\fairy-agent-helper`, start the helper.
     `Get-Content C:\ProgramData\fairy-agent\helper\helper.log -Tail 5`
-    Expected: `helper started`, no line that starts with `pipe:`.
-15. `Get-WinEvent -FilterHashtable @{LogName='Application'; ProviderName='fairy-agent','fairy-agent-helper'} -MaxEvents 10 -ErrorAction SilentlyContinue | Format-List TimeCreated, Message`
-    Expected: no `did nothing` and no `not serving anything`.
-16. `(Invoke-WebRequest -UseBasicParsing "http://$((Get-NetIPAddress -InterfaceAlias Tailscale -AddressFamily IPv4).IPAddress):9101/health?c=0123456789abcdef").Content`
-    Expected: `{"proof":"` followed by 64 hex digits. No version, no token.
+    -> `pipe: another process holds the name` with that program's id, and `free again` within 30 seconds of
+    closing it.
 
-### 12.3 Re-pair with the panel's new line (this installs)
+### D. These install
 
 Only after the panel has been updated too, so that its line names build N.
 
-17. On the host's page press **Re-pair** and run the line. Expected lines, in this order:
-    `SHA256SUMS matches the hash the panel checked`,
+30. On the host's page press **Re-pair** and run the line.
+    -> these lines, in this order: `SHA256SUMS matches the hash the panel checked`,
     `verified (the panel's fingerprint, signature and hashes)`, `program checksum matches SHA256SUMS`,
-    `pairing v2:`, `paired with the panel`. On a healthy PC there is **no** line that starts with `repaired:`
-    or `IMPORTANT:` (if there is one, read AGENT.md, "Running the installer again", and send the output).
-18. `Test-Path Env:FAIRY_JOIN_CODE`
-    Expected: `False`.
-    `(Get-ChildItem $env:TEMP -Filter 'fairy-install-*').Count`
-    Expected: `0`.
-    `& $fa pair-status`
-    Expected: `paired with the panel (...)`.
-19. Steps 2 to 4 again: the same expected output.
+    `pairing v2:`, `paired with the panel`; **no** line that starts with `repaired:` or `IMPORTANT:` on a
+    healthy PC (if there is one, read AGENT.md, "Running the installer again", and send the output).
+31. Nothing is left behind, and the PC is paired.
+    `Test-Path Env:FAIRY_JOIN_CODE; (Get-ChildItem $env:SystemRoot\Temp -Filter 'fairy-install-*' -Force -ErrorAction SilentlyContinue).Count; (Get-ChildItem C:\ProgramData -Filter 'fairy-agent.*' -Force).Count; & $fa pair-status`
+    -> `False`, `0`, `0`, `paired with the panel (...)`.
+32. Steps 2, 3 and 4 again -> the same output as before. If a clean PC or VM is at hand: after **Add host**
+    there, steps 2, 3 and 4 give the expected output too (the folders were created with their permissions).
+33. When the build after N exists, press **Update**.
+    `Get-Content C:\ProgramData\fairy-agent\update\installer.log -Tail 5; Test-Path C:\ProgramData\fairy-agent\update\last-apply`
+    -> `apply-update: done`, `True`. Press Update again: nothing is installed a second time ("already up to
+    date").
+34. Later, on a PC whose agent is newer than the release the panel's line names, Re-pair.
+    -> the output has `is NEWER than this installer's release`, and `& $fa version` is unchanged.
 
-### 12.4 Cancel (changes state, harmless)
-
-20. In the panel schedule a shutdown in 10 minutes. Then `Restart-Service fairy-agent`. The panel still shows
-    the pending shutdown. `Test-Path C:\ProgramData\fairy-agent\helper\power-pending.json`
-    Expected: `True`. Press **Cancel** in the panel: Windows shows that the shutdown was cancelled, the file
-    is gone, the PC stays on.
-21. The other half: `shutdown /s /t 600` typed by hand. The panel shows **nothing** pending. Then
-    `shutdown /a`.
-
-### 12.5 When the build after N exists
-
-22. Press **Update**. `Get-Content C:\ProgramData\fairy-agent\update\installer.log -Tail 5`
-    Expected: `apply-update: done`. `Test-Path C:\ProgramData\fairy-agent\update\last-apply`
-    Expected: `True`. Press Update again: nothing is installed a second time (the agent answers "already up
-    to date").
-23. Later, on a PC whose agent is newer than the release the panel's line names, Re-pair: the output has
-    `is NEWER than this installer's release`, and `& $fa version` is unchanged.
+**If a step refuses with `the data folder cannot be trusted`:** the message ends with what to run
+(`& "C:\Program Files\Fairy\fairy-agent.exe" setup-self-update`, as Administrator). AGENT.md, "Running the
+installer again", says what that keeps and what it moves aside.
 
 ## Rollback (back to build 10 / v0.4.4)
 
