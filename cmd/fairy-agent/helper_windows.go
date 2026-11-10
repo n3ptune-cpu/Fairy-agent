@@ -43,7 +43,9 @@ func (h helperHandler) Execute(_ []string, req <-chan svc.ChangeRequest, status 
 	runtime.GOMAXPROCS(min(2, runtime.NumCPU()))
 	debug.SetGCPercent(50)
 	debug.SetMemoryLimit(24 << 20)
-	cfg, err := agent.Load(h.cfgPath)
+	// LocalSystem reads nothing in a folder someone else controls: the folder is checked before config.yaml
+	// is opened (loadTrustedConfig)
+	cfg, err := loadTrustedConfig(h.cfgPath, func(p string) error { return trustedDataDir(p) })
 	if err != nil {
 		helperEventLog("fairy-agent-helper cannot start: " + err.Error())
 		return false, 1

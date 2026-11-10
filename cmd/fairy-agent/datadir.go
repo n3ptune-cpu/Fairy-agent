@@ -1249,6 +1249,18 @@ func fillDataDir(cfgPath string, rep dirReport, out io.Writer) error {
 	return nil
 }
 
+// loadTrustedConfig reads config.yaml for a service that runs as LocalSystem (the helper): only after check
+// has accepted the file and its folder. Before, the helper read and parsed config.yaml first and its folder was
+// checked afterwards (in helper.Run): a file someone else had prepared was read whole into a LocalSystem
+// process, and when it did not parse, the error, with words of the file in it, went to the Application event
+// log. helper.Run still makes the check again before it serves anything.
+func loadTrustedConfig(cfgPath string, check func(cfgPath string) error) (*agent.Config, error) {
+	if err := check(cfgPath); err != nil {
+		return nil, fmt.Errorf("not serving anything: %w", err)
+	}
+	return agent.Load(cfgPath)
+}
+
 // repairOrRemoveService is the data folder step of a first `install`. The service has to exist before the
 // folder is repaired (the folder's permissions name the service's account, which Windows creates with the
 // service), and it starts with Windows. So when the repair fails, the service is removed again: left

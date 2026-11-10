@@ -1163,3 +1163,39 @@ func TestFailedFirstInstallRemovesTheService(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// N7 (review of the Windows side): the LocalSystem helper read and parsed config.yaml before its folder was
+// checked. With a folder that fails the check the file is not read at all now: nothing of it can reach the
+// event log.
+func TestHelperChecksTheFolderBeforeItReadsTheConfig(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.yaml")
+	// what someone else prepared: it does not parse, and the parser would quote its key in the error
+	if err := os.WriteFile(cfgPath, []byte("PLANTED_WORD_FOR_THE_EVENT_LOG: 1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	untrusted := errors.New("the data folder cannot be trusted: " + cfgPath + " is owned by " + tUser + repairHint)
+	var asked []string
+	cfg, err := loadTrustedConfig(cfgPath, func(p string) error { asked = append(asked, p); return untrusted })
+	if cfg != nil || !errors.Is(err, untrusted) || len(asked) != 1 || asked[0] != cfgPath {
+		t.Fatal(cfg, err, asked)
+	}
+	if strings.Contains(err.Error(), "PLANTED_WORD") || !strings.Contains(err.Error(), "not serving anything") || !strings.Contains(err.Error(), "setup-self-update") {
+		t.Fatalf("the message: %v", err)
+	}
+	// not read: a config.yaml that cannot even be opened gives the same answer, not "cannot read config"
+	if _, err := loadTrustedConfig(filepath.Join(dir, "missing", "config.yaml"), func(string) error { return untrusted }); !errors.Is(err, untrusted) {
+		t.Fatal(err)
+	}
+	// a folder that passes: the file is read, and what is wrong with it is said as before
+	if _, err := loadTrustedConfig(cfgPath, func(string) error { return nil }); err == nil || !strings.Contains(err.Error(), "PLANTED_WORD") {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(cfgPath, []byte("power_control:\n  enabled: true\n  min_delay_s: 60\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err = loadTrustedConfig(cfgPath, func(string) error { return nil })
+	if err != nil || !cfg.PowerControl.Enabled || cfg.Path() != cfgPath {
+		t.Fatal(cfg, err)
+	}
+}
