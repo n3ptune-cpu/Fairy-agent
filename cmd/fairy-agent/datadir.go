@@ -492,6 +492,7 @@ func adminUpdateDirTrusted(cfgPath string) error {
 // being able to read is not a reason to refuse here (it does not let them steer the program); `install` and
 // `setup-self-update` correct that.
 func checkDataDir(fs dataFS, cfgPath, agentSID string, alsoDirs ...string) error {
+	cfgPath = filepath.Clean(cfgPath) // one spelling: every path below is built from it and compared with it
 	dir := filepath.Dir(cfgPath)
 	if err := checkAncestors(fs, dir); err != nil {
 		return err
@@ -754,6 +755,11 @@ const stopServices = "stop the fairy-agent services (Stop-Service fairy-agent, f
 // Only a folder named fairy-agent is repaired this way; with another --config folder it reports what is wrong
 // and moves nothing.
 func repairDataDir(fs dataFS, cfgPath, agentSID string) (dirReport, error) {
+	// One spelling of the path. What is found in the folder is compared with cfgPath by name (is this
+	// config.yaml? then it must be a file, and moving it aside is reported as such), and the names are built
+	// from the cleaned folder: "C:/ProgramData/fairy-agent/config.yaml" or "...\fairy-agent\.\config.yaml"
+	// must not make config.yaml a file like any other.
+	cfgPath = filepath.Clean(cfgPath)
 	dir := filepath.Dir(cfgPath)
 	rep := dirReport{Leaked: map[string]bool{}}
 	ours := strings.EqualFold(filepath.Base(dir), dataFolderName)

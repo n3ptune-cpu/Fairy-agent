@@ -723,6 +723,61 @@ func TestRepairStopsWithAClearMessage(t *testing.T) {
 	}
 }
 
+// However the path of config.yaml is spelled, the repair knows config.yaml when it sees it: a planted one is
+// reported as moved aside (the owner is told to pair again and to switch the features back on), and a folder
+// under that name is not taken for a folder of its own. The names found in the folder are compared with the
+// path that was given; "a/./config.yaml" and, on Windows, "C:/a/config.yaml" used to compare unequal.
+func TestRepairKnowsConfigYAMLHoweverItsPathIsSpelled(t *testing.T) {
+	t.Setenv("FAIRY_AGENT_TOKEN", "")
+	t.Setenv("FAIRY_AGENT_CONTROL_TOKEN", "")
+	sep := string(filepath.Separator)
+	spellings := map[string]func(p *pc) string{
+		"clean":               func(p *pc) string { return p.cfgPath },
+		"a dot in the middle": func(p *pc) string { return p.dir + sep + "." + sep + "config.yaml" },
+		"a doubled separator": func(p *pc) string { return p.dir + sep + sep + "config.yaml" },
+		"up and down again":   func(p *pc) string { return p.dir + sep + "logs" + sep + ".." + sep + "config.yaml" },
+		"forward slashes":     func(p *pc) string { return filepath.ToSlash(p.cfgPath) },
+	}
+	for name, spell := range spellings {
+		// a config.yaml someone else wrote
+		p := newPC(t)
+		p.installed(t)
+		p.put(t, "config.yaml", sddlPlantedFile, "power_control: {enabled: true}\n")
+		if err := checkDataDir(p.fs, spell(p), tSvc); err == nil || !strings.Contains(err.Error(), "config.yaml") {
+			t.Errorf("%s: the check passes a planted config.yaml: %v", name, err)
+		}
+		rep, err := repairDataDir(p.fs, spell(p), tSvc)
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if !rep.ConfigAside || len(rep.Aside) != 1 {
+			t.Errorf("%s: config.yaml was moved aside (%v) and the report does not say so: %+v", name, rep.Aside, rep)
+		}
+		var out bytes.Buffer
+		if err := fillDataDir(p.cfgPath, rep, &out); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if !strings.Contains(out.String(), "IMPORTANT: config.yaml could not be trusted") {
+			t.Errorf("%s: the owner is not told that config.yaml was replaced:\n%s", name, out.String())
+		}
+		// a folder under the name config.yaml
+		p = newPC(t)
+		p.installed(t)
+		_ = os.Remove(p.cfgPath)
+		p.put(t, "config.yaml/", sddlDataDir, "")
+		rep, err = repairDataDir(p.fs, spell(p), tSvc)
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if !rep.ConfigAside || !strings.Contains(strings.Join(rep.Notes, "\n"), "folder where a file belongs") {
+			t.Errorf("%s: a folder named config.yaml was kept: %+v", name, rep)
+		}
+		if err := checkDataDir(p.fs, spell(p), tSvc); err != nil {
+			t.Errorf("%s: not safe after the repair: %v", name, err)
+		}
+	}
+}
+
 // checkDataDir: what the updater, the helper, join and the agent's start-up warning rely on. It only looks.
 func TestCheckDataDir(t *testing.T) {
 	healthy := func() *pc { p := newPC(t); p.installed(t); return p }
