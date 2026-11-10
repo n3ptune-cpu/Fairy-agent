@@ -145,21 +145,52 @@ func TestAssetNamesAndVersions(t *testing.T) {
 	if n, ok := release.BuildNumber("42-1a2b3c4"); !ok || n != 42 {
 		t.Fatal(n, ok)
 	}
-	for _, v := range []string{"dev", "v0.1.0-3-gabc", "", "-1"} {
+	for v, want := range map[string]int{"0-a": 0, "7": 7, "042-x": 42, "999999999-abcdef0": 999999999} {
+		if n, ok := release.BuildNumber(v); !ok || n != want || release.NoBuildNumber(v) != "" {
+			t.Fatalf("%q: %d %v %q", v, n, ok, release.NoBuildNumber(v))
+		}
+	}
+	for _, v := range []string{"dev", "v0.1.0-3-gabc", "v0.4.2", "", "-1", "+42-abc", " 42-abc", "4 2-abc", "0x2a-abc", "42a-abc",
+		"1000000000-abc", "99999999999999999999-abc"} {
 		if _, ok := release.BuildNumber(v); ok {
 			t.Fatalf("%q has no build number", v)
 		}
+		if release.NoBuildNumber(v) == "" {
+			t.Fatalf("%q: no reason", v)
+		}
+	}
+	if why := release.NoBuildNumber("1000000000-abc"); !strings.Contains(why, "more than 9 digits") {
+		t.Fatal(why)
+	}
+	if why := release.NoBuildNumber("v0.4.2"); !strings.Contains(why, "does not start with a build number") {
+		t.Fatal(why)
 	}
 	cases := []struct {
 		cur, cand string
 		cmp       int
 		known     bool
 	}{{"41-aaaaaaa", "42-bbbbbbb", 1, true}, {"42-bbbbbbb", "42-bbbbbbb", 0, true}, {"43-c", "42-b", -1, true},
-		{"dev", "42-b", 1, false}}
+		{"dev", "42-b", 1, false}, {"20-abc", "v0.4.2", 1, false}, {"20-abc", "1000000000-abc", 1, false}, {"dev", "dev", 0, true},
+		{"42-aaaaaaa", "42-bbbbbbb", 0, true}}
 	for _, c := range cases {
-		if cmp, known := release.Compare(c.cur, c.cand); cmp != c.cmp || known != c.known {
+		cmp, known := release.Compare(c.cur, c.cand)
+		if cmp != c.cmp || known != c.known {
 			t.Fatalf("%v: %d %v", c, cmp, known)
 		}
+		// L23: NotComparable is an error exactly when Compare cannot tell, and it names the version at fault
+		err := release.NotComparable(c.cur, c.cand)
+		if (err == nil) != known {
+			t.Fatalf("%v: NotComparable %v", c, err)
+		}
+		if err != nil && !errors.Is(err, release.ErrNotComparable) {
+			t.Fatalf("%v: %v", c, err)
+		}
+	}
+	if err := release.NotComparable("20-abc", "v0.4.2"); err == nil || !strings.Contains(err.Error(), `the release's version "v0.4.2"`) {
+		t.Fatal(err)
+	}
+	if err := release.NotComparable("dev", "42-b"); err == nil || !strings.Contains(err.Error(), `the installed version "dev"`) {
+		t.Fatal(err)
 	}
 	if p, v, err := release.ParseVersionFile([]byte("fairy-agent 42-1a2b3c4\n")); err != nil || p != "fairy-agent" || v != "42-1a2b3c4" {
 		t.Fatal(p, v, err)

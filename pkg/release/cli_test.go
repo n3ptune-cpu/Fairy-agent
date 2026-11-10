@@ -105,6 +105,49 @@ func TestCLIUpdate(t *testing.T) {
 	}
 }
 
+// L23: a signed release whose version has no build number (v0.4.2), or one of ten digits, is not "newer" than
+// anything: refused, also for an installed local build, unless root says --force.
+func TestCLIRefusesVersionsItCannotCompare(t *testing.T) {
+	for _, c := range []struct{ current, published, wantErr string }{
+		{"20-abcdef0", "v0.4.2", `the release's version "v0.4.2" does not start with a build number`},
+		{"20-abcdef0", "1000000000-abcdef0", "more than 9 digits"},
+		{"dev", "42-1a2b3c4", `the installed version "dev"`},
+	} {
+		r := newCLIRig(t)
+		r.gh.Publish("build-42", "fairy-agent", c.published, map[string][]byte{"fairy-agent-linux-amd64": []byte("binary " + c.published)}, nil)
+		err := r.cli(c.current, nil).Run(context.Background())
+		if err == nil || !errors.Is(err, release.ErrNotComparable) || !strings.Contains(err.Error(), c.wantErr) ||
+			!strings.Contains(err.Error(), "--force") {
+			t.Fatalf("%v: %v", c, err)
+		}
+		if b, _ := os.ReadFile(r.target); string(b) != "binary 41-0000000" || r.starts != 0 || len(r.done) != 0 {
+			t.Fatalf("%v: something was installed (%q, %d starts, %v)", c, b, r.starts, r.done)
+		}
+		if got := strings.Join(r.steps, ","); got != "checking,failed" {
+			t.Fatalf("%v: progress %s", c, got)
+		}
+		// --check only reports, and says the same
+		chk := r.cli(c.current, nil)
+		chk.Check = true
+		if err := chk.Run(context.Background()); err == nil || !errors.Is(err, release.ErrNotComparable) {
+			t.Fatalf("%v: --check: %v", c, err)
+		}
+		// by hand with --force it is installed, and the output says why it had to be forced
+		r.out.Reset()
+		forced := r.cli(c.current, nil)
+		forced.Force = true
+		if err := forced.Run(context.Background()); err != nil {
+			t.Fatalf("%v: --force: %v\n%s", c, err, r.out.String())
+		}
+		if b, _ := os.ReadFile(r.target); string(b) != "binary "+c.published {
+			t.Fatalf("%v: --force installed %q", c, b)
+		}
+		if !strings.Contains(r.out.String(), "because of --force") {
+			t.Fatalf("%v: %s", c, r.out.String())
+		}
+	}
+}
+
 func TestCLIRefusesAndRollsBack(t *testing.T) {
 	r := newCLIRig(t)
 	r.gh.Publish("build-42", "fairy-agent", "42-1a2b3c4", map[string][]byte{"fairy-agent-linux-amd64": []byte("binary 42-1a2b3c4")}, nil)

@@ -65,8 +65,13 @@ func (c *CLI) Run(ctx context.Context) error {
 		err := fmt.Errorf("the latest release %s is older than the installed %s; not downgrading (--force installs it anyway)", ch.Version, c.Current)
 		c.progress("failed", ch.Version, err.Error())
 		return err
+	case !known && !c.Force:
+		// never "newer" by default: a release without a build number would otherwise go over any installed one
+		err := fmt.Errorf("%w; not installing (--force installs it anyway)", NotComparable(c.Current, ch.Version))
+		c.progress("failed", ch.Version, err.Error())
+		return err
 	case !known:
-		fmt.Fprintln(c.Out, "(the installed version is not a release build, so it cannot be compared)")
+		fmt.Fprintf(c.Out, "(%v; installing it because of --force)\n", NotComparable(c.Current, ch.Version))
 	}
 	if c.Check {
 		fmt.Fprintf(c.Out, "An update is available: run `%s update` (as root / Administrator) to install it.\n", c.Program)

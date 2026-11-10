@@ -253,7 +253,9 @@ func (u *Updater) run(force bool, who string, done chan struct{}) {
 		u.fail(fmt.Sprintf("the latest release %s is older than this agent (%s); not downgrading", ch.Version, u.o.Version), ch.Version)
 		return
 	case !known:
-		slog.Warn("self-update: cannot compare versions (local build?)", "current", u.o.Version, "release", ch.Version)
+		// The installer refuses it anyway (applyStaged): say so here, before anything is downloaded.
+		u.fail(release.NotComparable(u.o.Version, ch.Version).Error()+"; not installing (by hand, as root / Administrator: fairy-agent update --force)", ch.Version)
+		return
 	}
 	u.set("downloading", "downloading "+ch.Version+" ("+ch.Tag+")", ch.Version)
 	slog.Info("self-update: downloading", "release", ch.Tag, "version", ch.Version, "asset", u.o.Asset)
@@ -429,6 +431,11 @@ func applyStaged(ctx context.Context, o ApplyOptions, res *UpdateResult) error {
 	// release may have flaws fixed since. Going back is for root / an administrator: fairy-agent update --force.
 	if known && cmp < 0 {
 		return fmt.Errorf("%s is older than the installed %s; not downgrading (by hand: fairy-agent update --force)", ch.Version, o.CurrentVersion)
+	}
+	// "Never older" can only be told from build numbers. A signed release in another format (v0.4.2), or with a
+	// build number too long to read, is not "newer": refused here too, force or not.
+	if !known {
+		return fmt.Errorf("%w; not installing (by hand: fairy-agent update --force)", release.NotComparable(o.CurrentVersion, ch.Version))
 	}
 	want, ok := ch.Sums[o.Asset]
 	if !ok {

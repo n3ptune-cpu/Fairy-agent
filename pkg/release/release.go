@@ -208,19 +208,49 @@ func ParseVersionFile(b []byte) (program, version string, err error) {
 	return f[0], f[1], nil
 }
 
+// maxBuildDigits is the longest build number that is read: nine digits fit in an int on every platform, and a
+// release workflow would need a thousand years of hourly builds to get there.
+const maxBuildDigits = 9
+
 // BuildNumber is the release build number at the start of a version ("42-1a2b3c4" -> 42). ok is false for
-// versions that do not start with one (local builds: "dev", "v0.1.0-3-gabcdef").
+// versions that do not start with one (local builds: "dev", "v0.1.0-3-gabcdef") and for a number of more than
+// nine digits (NoBuildNumber says which).
 func BuildNumber(v string) (int, bool) {
 	head, _, _ := strings.Cut(v, "-")
+	if head == "" || len(head) > maxBuildDigits {
+		return 0, false
+	}
+	for _, c := range head {
+		if c < '0' || c > '9' {
+			return 0, false
+		}
+	}
 	n, err := strconv.Atoi(head)
-	if err != nil || n < 0 || len(head) > 9 {
+	if err != nil {
 		return 0, false
 	}
 	return n, true
 }
 
+// NoBuildNumber says why a version has no build number that can be compared ("" when it has one).
+func NoBuildNumber(v string) string {
+	if _, ok := BuildNumber(v); ok {
+		return ""
+	}
+	head, _, _ := strings.Cut(v, "-")
+	digits := head != ""
+	for _, c := range head {
+		digits = digits && c >= '0' && c <= '9'
+	}
+	if digits && len(head) > maxBuildDigits {
+		return fmt.Sprintf("version %q has a build number of more than %d digits", v, maxBuildDigits)
+	}
+	return fmt.Sprintf("version %q does not start with a build number (a release is e.g. 42-1a2b3c4)", v)
+}
+
 // Compare tells how a candidate release version relates to the running one: 1 newer, 0 the same, -1 older,
-// and known=false when either has no build number (then only "the same" can be told apart).
+// and known=false when either has no build number (then only "the same" can be told apart). A caller that
+// installs must not treat known=false as "newer": see ErrNotComparable.
 func Compare(current, candidate string) (cmp int, known bool) {
 	if current == candidate {
 		return 0, true
@@ -237,4 +267,22 @@ func Compare(current, candidate string) (cmp int, known bool) {
 		return -1, true
 	}
 	return 0, true // same build number, different commit text: treat as the same build
+}
+
+// ErrNotComparable is returned by NotComparable.
+var ErrNotComparable = errors.New("the versions cannot be compared")
+
+// NotComparable is nil when Compare can tell which of the two versions is newer, and otherwise an error
+// (wrapping ErrNotComparable) that names the version without a usable build number. The "never older" rule of
+// every installer rests on build numbers, so a signed release in another format (v0.4.2), or one with a
+// ten-digit number, must not pass as "newer": it is refused, and only root / an administrator can install it
+// by hand with `update --force`.
+func NotComparable(current, candidate string) error {
+	if _, known := Compare(current, candidate); known {
+		return nil
+	}
+	if why := NoBuildNumber(candidate); why != "" {
+		return fmt.Errorf("%w: the release's %s", ErrNotComparable, why)
+	}
+	return fmt.Errorf("%w: the installed %s", ErrNotComparable, NoBuildNumber(current))
 }

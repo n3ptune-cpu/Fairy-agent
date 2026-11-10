@@ -268,13 +268,19 @@ func newApplyRig(t *testing.T, publishVersion string, bin []byte) *applyRig {
 	ar.target = filepath.Join(bindir, "fairy-agent")
 	_ = os.WriteFile(ar.target, []byte("installed 41"), 0o755)
 	ar.gh.Publish("build-42", "fairy-agent", publishVersion, map[string][]byte{testAsset: bin}, nil)
-	// stage it exactly as the agent does
+	// stage it exactly as the agent does (its own stage step; the agent's refusals before it are not the
+	// installer's, which must stand on its own)
 	u := NewUpdater(UpdaterOptions{Version: "41-aaaaaaa", Key: ar.gh.Pub, Client: ar.gh.Client(), StageDir: ar.stage,
 		ResultPath: ar.result, Asset: testAsset, ResultWait: time.Millisecond, Apply: func(context.Context) error { return nil }})
-	u.Start(UpdateRequest{RequestedBy: "test"})
-	<-u.done
+	ch, err := ar.gh.Client().Check(context.Background(), ar.gh.Pub, release.AgentProgram)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := u.stage(context.Background(), ch, false, "test"); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := os.Stat(filepath.Join(ar.stage, testAsset)); err != nil {
-		t.Fatalf("not staged: %+v", u.Status())
+		t.Fatalf("not staged: %v", err)
 	}
 	return ar
 }
@@ -395,6 +401,63 @@ func TestApplyStagedNeverDowngrades(t *testing.T) {
 	}
 	if res := apply("42-bbbbbbb"); !res.OK {
 		t.Fatalf("forced reinstall of the same version: %+v", res)
+	}
+}
+
+// L23: the "never older" rule rests on build numbers. A validly signed release whose version has none (v0.4.2),
+// or one of ten digits, used to pass as "newer" and went over build 20. The installer refuses it, with or
+// without force in the stage; so does an installed version that cannot be compared (a local build).
+func TestApplyStagedRefusesVersionsItCannotCompare(t *testing.T) {
+	for _, c := range []struct{ current, staged, want string }{
+		{"20-abcdef0", "v0.4.2", `the release's version "v0.4.2" does not start with a build number`},
+		{"20-abcdef0", "1000000000-abcdef0", "more than 9 digits"},
+		{"dev", "42-bbbbbbb", `the installed version "dev"`},
+	} {
+		for _, force := range []bool{false, true} {
+			ar := newApplyRig(t, c.staged, []byte("other "+c.staged))
+			var req stageRequest
+			b, _ := os.ReadFile(filepath.Join(ar.stage, stageRequestFile))
+			_ = json.Unmarshal(b, &req)
+			req.Force = force
+			nb, _ := json.Marshal(req)
+			_ = os.WriteFile(filepath.Join(ar.stage, stageRequestFile), nb, 0o600)
+			starts := 0
+			in := &release.Installer{Target: ar.target, Start: func(context.Context) error { starts++; return nil }}
+			res := ApplyStaged(context.Background(), ApplyOptions{StageDir: ar.stage, ResultPath: ar.result, Asset: testAsset,
+				Key: ar.gh.Pub, CurrentVersion: c.current, Installer: in, Healthy: func(context.Context, string) error { return nil }})
+			if res.OK || !strings.Contains(res.Message, c.want) || !strings.Contains(res.Message, "fairy-agent update --force") {
+				t.Fatalf("%v force=%v: %+v", c, force, res)
+			}
+			if b, _ := os.ReadFile(ar.target); string(b) != "installed 41" || starts != 0 {
+				t.Fatalf("%v force=%v: the program was touched (%q, %d starts)", c, force, b, starts)
+			}
+			if _, err := os.Stat(ar.target + ".old"); err == nil {
+				t.Fatalf("%v force=%v: a backup was made", c, force)
+			}
+		}
+	}
+}
+
+// L23, the agent's half: it does not download a release it cannot compare (the installer would refuse it).
+func TestUpdaterRefusesVersionsItCannotCompare(t *testing.T) {
+	for _, c := range []struct{ current, published string }{{"20-abcdef0", "v0.4.2"}, {"20-abcdef0", "1000000000-abcdef0"}, {"dev", "42-bbbbbbb"}} {
+		for _, force := range []bool{false, true} {
+			r := newUpdRig(t, c.current, nil)
+			r.gh.Publish("build-42", "fairy-agent", c.published, map[string][]byte{testAsset: []byte("new")}, nil)
+			if st, _ := post(t, r.srv.URL, ctlTok, map[string]any{"force": force}); st != 202 {
+				t.Fatal(st)
+			}
+			st := r.wait(t)
+			if st.State != "failed" || !strings.Contains(st.Message, "cannot be compared") || !strings.Contains(st.Message, "fairy-agent update --force") {
+				t.Fatalf("%v force=%v: %+v", c, force, st)
+			}
+			if r.applied.Load() != 0 {
+				t.Fatalf("%v force=%v: the installer was started", c, force)
+			}
+			if _, err := os.Stat(filepath.Join(r.stage, testAsset)); err == nil {
+				t.Fatalf("%v force=%v: the release was downloaded", c, force)
+			}
+		}
 	}
 }
 
