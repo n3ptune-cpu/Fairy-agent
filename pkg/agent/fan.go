@@ -50,6 +50,8 @@ type Fan struct {
 	events      []FanEvent
 	noTemp      int
 	actedAt     time.Time // when the watchdog last sent the fans to 100 % (zero: not since the start)
+	closed      bool      // Shutdown was called: no more changes from the API
+	changed     bool      // SetMode or SetDuty changed the fans since this process started
 }
 
 // NewFan returns the fan controller.
@@ -136,6 +138,9 @@ func (f *Fan) SetMode(ctx context.Context, mode, who string) (int, map[string]an
 	defer cancel()
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.closed {
+		return 503, stoppingBody()
+	}
 	if err := ipmi.SetFanMode(ctx, f.t, mode); err != nil {
 		if !modeUnsupported(err) {
 			return 502, map[string]any{"error": "BMC refused the fan mode: " + safeErr(err)}
@@ -154,6 +159,7 @@ func (f *Fan) SetMode(ctx context.Context, mode, who string) (int, map[string]an
 	}
 	delete(f.unsupported, mode)
 	f.noTemp = 0
+	f.changed = true
 	f.event("mode="+mode, who)
 	return 200, map[string]any{"mode": mode}
 }
@@ -224,6 +230,9 @@ func (f *Fan) SetDuty(ctx context.Context, zone, percent int, who string) (int, 
 	defer cancel()
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.closed {
+		return 503, stoppingBody()
+	}
 	mode, err := ipmi.GetFanMode(ctx, f.t)
 	if err != nil {
 		return 502, map[string]any{"error": "cannot read the fan mode: " + safeErr(err)}
@@ -240,6 +249,7 @@ func (f *Fan) SetDuty(ctx context.Context, zone, percent int, who string) (int, 
 	if err := ipmi.SetDuty(ctx, f.t, byte(zone), percent); err != nil {
 		return 502, map[string]any{"error": "BMC refused the duty: " + safeErr(err)}
 	}
+	f.changed = true
 	f.event(fmt.Sprintf("duty zone %d=%d%%", zone, percent), who)
 	return 200, map[string]any{"zone": zone, "percent": percent}
 }
@@ -253,6 +263,11 @@ func (f *Fan) Auto(ctx context.Context, who string, force bool) (string, error) 
 	defer cancel()
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	return f.auto(ctx, who, force)
+}
+
+// auto is Auto for a caller that holds f.mu.
+func (f *Fan) auto(ctx context.Context, who string, force bool) (string, error) {
 	mode, err := ipmi.GetFanMode(ctx, f.t)
 	if err == nil && !force && mode != "full" {
 		return mode, nil
@@ -271,6 +286,74 @@ func (f *Fan) Auto(ctx context.Context, who string, force bool) (string, error) 
 	}
 	f.event("mode="+want+" (BMC automatic)", who)
 	return want, nil
+}
+
+func stoppingBody() map[string]any {
+	return map[string]any{"error": "the agent is stopping; the fans are handed back to the BMC", "code": "stopping"}
+}
+
+// FanStopLimit is how long handing the fans back may take when the agent stops.
+const FanStopLimit = 10 * time.Second
+
+// Shutdown is for the process that runs the watchdog, when it stops: from now on SetMode and SetDuty are
+// refused (503), then the fans go back to the BMC's automatic mode as with Auto(ctx, who, false), so no fixed
+// duty stays set with nothing watching the temperature. If the BMC does not take the automatic mode, both zones
+// are sent to 100 % instead. It returns the mode the fans are in afterwards.
+func (f *Fan) Shutdown(ctx context.Context, who string) (string, error) {
+	f.mu.Lock()
+	f.closed = true
+	f.mu.Unlock()
+	mode, err := f.Auto(ctx, who, false)
+	if err != nil {
+		fctx, cancel := context.WithTimeout(context.Background(), FanStopLimit/2)
+		defer cancel()
+		f.mu.Lock()
+		f.failSafe(fctx, who+": the BMC did not take its automatic mode")
+		f.mu.Unlock()
+	}
+	return mode, err
+}
+
+// Run is the watchdog's goroutine in the process that owns the fans. A fixed duty found at the start was left
+// by a process that ended without handing the fans back (killed, crashed, power cut): it goes back to the BMC's
+// automatic mode first, as it would have on a clean stop (not if a request already changed the fans in the
+// meantime). Then it checks every WatchdogInterval until ctx ends.
+func (f *Fan) Run(ctx context.Context) {
+	actx, cancel := ctxTimeout(ctx)
+	f.mu.Lock()
+	var err error
+	if !f.changed && !f.closed {
+		_, err = f.auto(actx, "agent starting", false)
+	}
+	f.mu.Unlock()
+	cancel()
+	if err != nil && ctx.Err() == nil {
+		slog.Warn("fan control: could not hand the fans back to the BMC at start; the watchdog is running", "error", safeErr(err))
+	}
+	f.RunWatchdog(ctx)
+}
+
+// ipmiTransport builds the BMC connection (a fake in tests).
+var ipmiTransport = IPMITransport
+
+// FansAuto is `fairy-agent fans-auto`, which systemd runs after the agent has ended for any reason
+// (ExecStopPost): with fan control on, it hands the fans back to the BMC's automatic mode if a fixed duty may
+// be in effect, exactly as the agent does itself on a clean stop. It takes nothing but the agent's own config.
+// done is false when fan control is not switched on (nothing was sent to the BMC).
+func FansAuto(ctx context.Context, cfg *Config) (mode string, done bool, err error) {
+	if !cfg.FanControl.Enabled || !cfg.IPMI.Enabled {
+		return "", false, nil
+	}
+	if _, err := LoadEnvFile(cfg.EnvFile); err != nil {
+		return "", true, err
+	}
+	t, err := ipmiTransport(cfg.IPMI)
+	if err != nil {
+		return "", true, err
+	}
+	defer t.Close()
+	mode, err = NewFan(t, nil, cfg.FanControl, nil).Shutdown(ctx, "fans-auto (the agent has ended)")
+	return mode, true, err
 }
 
 // WatchdogInterval is how often the watchdog looks at the temperature while a manual duty is set.

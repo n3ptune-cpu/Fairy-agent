@@ -16,6 +16,12 @@ Wants=network-online.target
 [Service]
 Type=simple
 ExecStart=/usr/local/bin/fairy-agent run --config /etc/fairy-agent/config.yaml
+# Fan control (fan_control.enabled): the temperature watchdog for a fan speed set by hand lives in the agent.
+# When the agent has ended for ANY reason (stopped, restarted, updated, crashed, killed for memory), this hands
+# the fans back to the BMC's automatic mode, so no fixed speed stays set with nothing watching. It runs as the
+# same user with the same limits, takes no arguments, reads /etc/fairy-agent/config.yaml and does nothing when
+# fan control is off. "-": its result never changes the state of the unit.
+ExecStopPost=-/usr/local/bin/fairy-agent fans-auto
 User=fairy-agent
 Group=fairy-agent
 Restart=on-failure
@@ -35,7 +41,8 @@ TasksMax=64
 
 # Hardening. The agent only reads /proc and /sys, talks HTTP on its listen address and (only if enabled) runs
 # nvidia-smi, ipmitool, `systemctl poweroff|reboot` and `systemctl start fairy-agent-update.service`. It needs NO
-# capabilities. AMD GPUs are read from plain
+# capabilities. `fairy-agent fans-auto` (ExecStopPost) runs under the same limits and only ever runs ipmitool.
+# AMD GPUs are read from plain
 # sysfs files (/sys/class/drm/card*/device), not device nodes: DevicePolicy below does not affect them and
 # ProtectKernelTunables leaves /sys readable.
 NoNewPrivileges=yes

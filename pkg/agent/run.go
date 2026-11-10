@@ -11,6 +11,7 @@ import (
 	"runtime"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/n3ptune-cpu/Fairy-agent/pkg/agent/api"
@@ -170,6 +171,8 @@ func Run(ctx context.Context, cfg *Config, b Build) error {
 		}
 	}
 	var a *Agent
+	// stopFans hands in-process fan control back to the BMC; it runs once, whichever way Run ends.
+	stopFans := func() {}
 	interval := time.Duration(cfg.IPMI.SensorIntervalS * float64(time.Second))
 	switch {
 	case cfg.IPMI.Enabled && viaHelper && cfg.IPMI.Transport == "wmi":
@@ -182,7 +185,7 @@ func Run(ctx context.Context, cfg *Config, b Build) error {
 			d.HelperSources = append(d.HelperSources, api.FeatureFans)
 		}
 	case cfg.IPMI.Enabled:
-		t, err := IPMITransport(cfg.IPMI)
+		t, err := ipmiTransport(cfg.IPMI)
 		if err != nil {
 			return err
 		}
@@ -192,8 +195,19 @@ func Run(ctx context.Context, cfg *Config, b Build) error {
 		d.BMC = bmc
 		if cfg.FanControl.Enabled {
 			fan := NewFan(t, bmc, cfg.FanControl, func() []collect.Temp { return a.LocalTemps() })
-			go fan.RunWatchdog(ctx)
+			go fan.Run(ctx)
 			d.Fan = fan
+			// The watchdog lives in this process: when it ends, a fixed duty must not stay behind.
+			stopFans = sync.OnceFunc(func() {
+				sctx, scancel := context.WithTimeout(context.Background(), FanStopLimit)
+				defer scancel()
+				if mode, err := fan.Shutdown(sctx, "agent stopping"); err != nil {
+					slog.Error("agent stopping: could not hand the fans back to the BMC", "error", safeErr(err))
+				} else {
+					slog.Info("agent stopping: fans in BMC mode", "mode", mode)
+				}
+			})
+			defer stopFans()
 		}
 	}
 	if cfg.PowerControl.Enabled {
@@ -292,6 +306,7 @@ func Run(ctx context.Context, cfg *Config, b Build) error {
 			return err
 		}
 	}
+	stopFans() // first: the fans do not wait for open requests
 	sctx, scancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer scancel()
 	_ = srv.Shutdown(sctx)

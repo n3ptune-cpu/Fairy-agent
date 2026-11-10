@@ -11,6 +11,7 @@
 //	fairy-agent gen-token                  print a new random token (for the token files)
 //	fairy-agent update [--check] [--yes] [--force]  install the latest signed release by hand (root / Administrator)
 //	fairy-agent apply-update [--config path]  install the release the agent staged (run by the updater, see AGENT.md)
+//	fairy-agent fans-auto                  hand the fans back to the BMC's automatic mode (systemd runs it after the agent ends)
 //	fairy-agent setup-self-update [--helper]  Windows: move to NT SERVICE\fairy-agent, permissions, updater, helper
 //	fairy-agent helper-status              Windows: the helper service and what it serves
 //	fairy-agent remove-helper              Windows: remove the helper service
@@ -73,6 +74,10 @@ const usage = `fairy-agent: reports this machine's metrics to the Fairy panel (s
   fairy-agent apply-update [--config PATH]  install the update the agent staged (started by the panel's
                                             Update button through fairy-agent-update.service (Linux) or the
                                             fairy-agent-update service (Windows))
+  fairy-agent fans-auto                     with fan control on: hand the fans back to the BMC's automatic mode if
+                                            a fixed speed may be set (what the agent does itself when it stops).
+                                            Linux: fairy-agent.service runs it after the agent has ended for any
+                                            reason (ExecStopPost). No options: it reads the installed config.yaml
   fairy-agent setup-self-update [--helper]  Windows (Administrator), safe to run again: moves the agent to its
                                             own account NT SERVICE\fairy-agent (from LocalService or LocalSystem),
                                             sets the folder permissions, the fairy-agent-update service, and the
@@ -152,6 +157,8 @@ func main() {
 	case "apply-update":
 		_ = fs.Parse(args)
 		os.Exit(applyUpdate(*cfgPath))
+	case "fans-auto":
+		os.Exit(fansAutoCmd(args, os.Stdout, os.Stderr))
 	case "setup-self-update":
 		_ = fs.Parse(args)
 		if err := setup(*cfgPath, *withHelper, true); err != nil {
@@ -299,6 +306,39 @@ func applyUpdateCtx(ctx context.Context, cfgPath string) int {
 	if err := agent.ApplyUpdate(ctx, cfg, version, releaseKey); err != nil {
 		fmt.Fprintln(os.Stderr, "fairy-agent apply-update:", err)
 		return 1
+	}
+	return 0
+}
+
+// fansAutoCmd is `fairy-agent fans-auto`. It does one fixed thing and takes no arguments at all: no path, mode
+// or program a caller writes on the command line can reach the BMC or be run. It always reads the installed
+// config.yaml (the one place the agent's own settings are).
+func fansAutoCmd(args []string, stdout, stderr io.Writer) int {
+	if len(args) != 0 {
+		fmt.Fprintln(stderr, "fairy-agent fans-auto takes no arguments (it reads "+agent.DefaultConfigPath()+")")
+		return 2
+	}
+	return fansAuto(agent.DefaultConfigPath(), stdout, stderr)
+}
+
+// fansAuto hands the fans of the agent configured in cfgPath back to the BMC's automatic mode (agent.FansAuto).
+func fansAuto(cfgPath string, stdout, stderr io.Writer) int {
+	cfg, err := agent.Load(cfgPath)
+	if err != nil {
+		fmt.Fprintln(stderr, "fairy-agent fans-auto:", err)
+		return 1
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*agent.FanStopLimit)
+	defer cancel()
+	mode, done, err := agent.FansAuto(ctx, cfg)
+	switch {
+	case err != nil:
+		fmt.Fprintln(stderr, "fairy-agent fans-auto: could not hand the fans back to the BMC:", err)
+		return 1
+	case !done:
+		fmt.Fprintln(stdout, "fan control is not switched on in config.yaml: nothing to do")
+	default:
+		fmt.Fprintln(stdout, "fans are in the BMC's mode:", mode)
 	}
 	return 0
 }
