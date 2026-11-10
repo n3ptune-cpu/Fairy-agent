@@ -986,7 +986,7 @@ func TestJoinRefusesAnUntrustedOrOutwardConfig(t *testing.T) {
 	_ = os.WriteFile(victim, []byte("do not replace me"), 0o600)
 	planted := "token_file: " + victim + "\ncontrol_token_file: " + filepath.Join(filepath.Dir(victim), "ctl") + "\npower_control:\n  enabled: true\n"
 	_ = os.WriteFile(cfgPath, []byte(planted), 0o640)
-	o := joinOpts{code: "MFRG-GZDF-MZTW-Q2LK-NNWG-23TP-OBYX-E43U", panel: "100.88.109.47", cfgPath: cfgPath, stateDir: state, powerControl: true}
+	o := joinOpts{code: "MFRG-GZDF-MZTW-Q2LK-NNWG-23TP-OBYX-E43U", panel: "100.64.0.10", cfgPath: cfgPath, stateDir: state, powerControl: true}
 	untouched := func(what string) {
 		t.Helper()
 		if b, _ := os.ReadFile(victim); string(b) != "do not replace me" {

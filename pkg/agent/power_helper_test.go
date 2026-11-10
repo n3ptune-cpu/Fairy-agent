@@ -73,7 +73,7 @@ func TestWindowsCancelAfterBothServicesRestarted(t *testing.T) {
 	store := agent.PowerFile{Path: filepath.Join(t.TempDir(), "power-pending.json")}
 
 	base, stop := startPair(t, windows, store)
-	st, b := do(t, base, "POST", "/power", ctlTok, map[string]any{"action": "shutdown", "delay_s": 3600, "requested_by": "neptune@example.com"})
+	st, b := do(t, base, "POST", "/power", ctlTok, map[string]any{"action": "shutdown", "delay_s": 3600, "requested_by": "alice@example.com"})
 	if st != 200 {
 		t.Fatal(st, b)
 	}
@@ -84,7 +84,7 @@ func TestWindowsCancelAfterBothServicesRestarted(t *testing.T) {
 	defer stop()
 	p := pendingIn(t, base, true)
 	// the same moment, give or take the milliseconds between the agent's and the helper's reading of the clock
-	if d := p["at"].(float64) - first["at"].(float64); p["action"] != "shutdown" || p["requested_by"] != "neptune@example.com" ||
+	if d := p["at"].(float64) - first["at"].(float64); p["action"] != "shutdown" || p["requested_by"] != "alice@example.com" ||
 		p["delay_s"] != 3600.0 || d < -1 || d > 1 {
 		t.Fatalf("after the restart the panel sees %v, before it saw %v", p, first)
 	}

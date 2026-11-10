@@ -65,13 +65,13 @@ func TestRememberedShutdownSurvivesARestart(t *testing.T) {
 	if _, ok := r1.PendingAction(); ok {
 		t.Fatal("pending before anything was scheduled")
 	}
-	if err := r1.ScheduleBy("shutdown", time.Hour, "neptune@example.com"); err != nil {
+	if err := r1.ScheduleBy("shutdown", time.Hour, "alice@example.com"); err != nil {
 		t.Fatal(err)
 	}
-	if len(win.scheduled) != 1 || win.scheduled[0] != "shutdown@1h0m0s Fairy: shutdown requested by neptune@example.com in 3600 seconds." {
+	if len(win.scheduled) != 1 || win.scheduled[0] != "shutdown@1h0m0s Fairy: shutdown requested by alice@example.com in 3600 seconds." {
 		t.Fatal(win.scheduled)
 	}
-	want := Pending{Action: "shutdown", At: float64(c.now.Unix() + 3600), DelayS: 3600, RequestedBy: "neptune@example.com"}
+	want := Pending{Action: "shutdown", At: float64(c.now.Unix() + 3600), DelayS: 3600, RequestedBy: "alice@example.com"}
 	if p, ok := r1.PendingAction(); !ok || p != want {
 		t.Fatalf("%+v %v", p, ok)
 	}
@@ -440,14 +440,14 @@ func TestPowerAdoptsWhatTheExecRemembers(t *testing.T) {
 	}
 	a1 := newAgent()
 	d := 3600
-	if st, b := a1.Handle(PowerRequest{Action: "shutdown", DelayS: &d, RequestedBy: "neptune@example.com"}); st != 200 {
+	if st, b := a1.Handle(PowerRequest{Action: "shutdown", DelayS: &d, RequestedBy: "alice@example.com"}); st != 200 {
 		t.Fatal(st, b)
 	}
 	c.advance(time.Minute)
 
 	a2 := newAgent() // the agent (and with it the exec) restarted
 	pend, _ := a2.State()["pending"].(Pending)
-	if pend.Action != "shutdown" || pend.RequestedBy != "neptune@example.com" || pend.DelayS != 3600 || pend.At != float64(c.now.Unix()+3540) {
+	if pend.Action != "shutdown" || pend.RequestedBy != "alice@example.com" || pend.DelayS != 3600 || pend.At != float64(c.now.Unix()+3540) {
 		t.Fatalf("after the restart /metrics shows %+v", a2.State()["pending"])
 	}
 	if !a2.Scheduled() {

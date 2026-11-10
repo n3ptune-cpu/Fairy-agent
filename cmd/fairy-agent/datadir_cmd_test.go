@@ -100,7 +100,7 @@ func TestTypedCommandsRefuseAnUntrustedDataFolder(t *testing.T) {
 	out.Reset()
 	errb.Reset()
 	in := strings.NewReader("s3cret pass!\n")
-	code = secretCmd([]string{"set", "BMC_CYRENE_PASSWORD", "--config", p}, in, &out, &errb)
+	code = secretCmd([]string{"set", "BMC_SERVER_PASSWORD", "--config", p}, in, &out, &errb)
 	refused("secret set", code, out.String(), errb.String(), p)
 	if in.Len() != len("s3cret pass!\n") {
 		t.Fatal("secret set read the value before it refused")
@@ -111,8 +111,8 @@ func TestTypedCommandsRefuseAnUntrustedDataFolder(t *testing.T) {
 
 	out.Reset()
 	errb.Reset()
-	code = bmcRelayCmd([]string{"add", "--config", p, "--id", "cyrene-bmc", "--backend", "ipmitool", "--host", "192.168.254.254",
-		"--username", "fairy", "--password-env", "BMC_CYRENE_PASSWORD"}, &out, &errb)
+	code = bmcRelayCmd([]string{"add", "--config", p, "--id", "server-bmc", "--backend", "ipmitool", "--host", "192.168.1.5",
+		"--username", "fairy", "--password-env", "BMC_SERVER_PASSWORD"}, &out, &errb)
 	refused("bmc-relay add", code, out.String(), errb.String(), p)
 
 	// fans-auto always reads the installed config.yaml: that is the path it asks about
@@ -178,9 +178,9 @@ func TestTypedCommandsAskOnceAboutTheirConfig(t *testing.T) {
 	var out, errb bytes.Buffer
 	once("config set", configCmd([]string{"set", "fan_control.auto_mode", "standard", "--config=" + p}, &out, &errb), errb.String())
 	// secret set writes secrets.env and then sets env_file through configSet: still one question
-	once("secret set", secretCmd([]string{"set", "BMC_CYRENE_PASSWORD", "--config", p}, strings.NewReader("s3cret\n"), &out, &errb), errb.String())
-	once("bmc-relay add", bmcRelayCmd([]string{"add", "--config", p, "--id", "cyrene-bmc", "--backend", "ipmitool", "--host", "192.168.254.254",
-		"--username", "fairy", "--password-env", "BMC_CYRENE_PASSWORD"}, &out, &errb), errb.String())
+	once("secret set", secretCmd([]string{"set", "BMC_SERVER_PASSWORD", "--config", p}, strings.NewReader("s3cret\n"), &out, &errb), errb.String())
+	once("bmc-relay add", bmcRelayCmd([]string{"add", "--config", p, "--id", "server-bmc", "--backend", "ipmitool", "--host", "192.168.1.5",
+		"--username", "fairy", "--password-env", "BMC_SERVER_PASSWORD"}, &out, &errb), errb.String())
 	cfg, err := agent.Load(p)
 	if err != nil || !cfg.BMCRelay.Enabled || cfg.EnvFile != filepath.Join(dir, "secrets.env") {
 		t.Fatal(err, cfg)
@@ -222,7 +222,7 @@ func TestTypedCommandsDoNotCheckWithoutAdminRights(t *testing.T) {
 		t.Fatal(code, errb.String())
 	}
 	errb.Reset()
-	if code := secretCmd([]string{"set", "BMC_CYRENE_PASSWORD", "--config", p}, strings.NewReader("x\n"), &out, &errb); code != 1 || !strings.Contains(errb.String(), "run it") {
+	if code := secretCmd([]string{"set", "BMC_SERVER_PASSWORD", "--config", p}, strings.NewReader("x\n"), &out, &errb); code != 1 || !strings.Contains(errb.String(), "run it") {
 		t.Fatal(code, errb.String())
 	}
 	errb.Reset()
