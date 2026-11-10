@@ -5,6 +5,7 @@ import (
 	"crypto/ed25519"
 	"crypto/sha256"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -93,6 +94,41 @@ func TestParseSums(t *testing.T) {
 		if _, err := release.ParseSums([]byte(bad)); err == nil {
 			t.Fatalf("accepted %q", bad)
 		}
+	}
+}
+
+// I14: a line longer than the reader's buffer used to end the list there without a word: every file listed
+// after it was "not in the release". It is an error now, wherever the long line stands.
+func TestParseSumsOverLongLine(t *testing.T) {
+	h := strings.Repeat("ab", 32)
+	long := strings.Repeat("x", 70<<10)
+	for name, in := range map[string]string{
+		"first":  long + "\n" + h + "  later\n",
+		"middle": h + "  first\n" + long + "\n" + h + "  later\n",
+		"last":   h + "  first\n" + h + "  second\n" + long,
+		"name":   h + "  first\n" + h + "  " + long + "\n",
+	} {
+		s, err := release.ParseSums([]byte(in))
+		if err == nil {
+			t.Fatalf("%s: accepted, %d entries", name, len(s))
+		}
+		if !strings.Contains(err.Error(), "over-long line") {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if _, err := release.VerifySums(nil, []byte(in), nil); err == nil {
+			t.Fatalf("%s: VerifySums accepted", name)
+		}
+	}
+	// just under the limit is an ordinary bad line, and long lists of ordinary lines are fine
+	if _, err := release.ParseSums([]byte(h + "  " + strings.Repeat("x", 60<<10) + "\n")); err == nil || strings.Contains(err.Error(), "over-long") {
+		t.Fatal(err)
+	}
+	var b strings.Builder
+	for i := 0; i < 5000; i++ {
+		fmt.Fprintf(&b, "%s  file-%d\n", h, i)
+	}
+	if s, err := release.ParseSums([]byte(b.String())); err != nil || len(s) != 5000 {
+		t.Fatal(len(s), err)
 	}
 }
 

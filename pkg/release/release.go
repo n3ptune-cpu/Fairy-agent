@@ -116,7 +116,9 @@ func ValidName(s string) bool { return nameRe.MatchString(s) && !strings.Contain
 func ParseSums(b []byte) (Sums, error) {
 	out := Sums{}
 	sc := bufio.NewScanner(bytes.NewReader(b))
+	seen := 0 // lines read so far
 	for n := 1; sc.Scan(); n++ {
+		seen = n
 		line := strings.TrimRight(sc.Text(), "\r")
 		if line == "" {
 			continue
@@ -131,6 +133,14 @@ func ParseSums(b []byte) (Sums, error) {
 			return nil, fmt.Errorf("%s lists %s twice", SumsFile, name)
 		}
 		out[name] = [32]byte(raw)
+	}
+	// A line longer than the scanner's buffer ends the loop early. Without this check everything after it was
+	// dropped without a word, and a file "missing" from the list looked like a release that never had it.
+	if err := sc.Err(); err != nil {
+		if errors.Is(err, bufio.ErrTooLong) {
+			return nil, fmt.Errorf("%s has an over-long line after line %d (a line is \"<sha256>  <file>\", under 200 characters)", SumsFile, seen)
+		}
+		return nil, fmt.Errorf("%s: %w", SumsFile, err)
 	}
 	if len(out) == 0 {
 		return nil, errors.New(SumsFile + " is empty")
