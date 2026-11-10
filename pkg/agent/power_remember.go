@@ -30,7 +30,8 @@ import (
 // second one, so while Fairy's record is valid the pending shutdown is Fairy's.
 //
 // A record ends when its time has passed, when it is cancelled, and when the machine has been started again
-// since it was written (the countdown died with the old Windows session; see sameBoot).
+// since it was written (the countdown died with the old Windows session). Both are decided by the operating
+// system's own count of the time since it started (uptime), not by the clock: see ended.
 
 // PowerRecord is the remembered action.
 type PowerRecord struct {
@@ -38,16 +39,17 @@ type PowerRecord struct {
 	At     float64 `json:"at"`      // when it happens, unix seconds
 	DelayS int     `json:"delay_s"` // the delay it was asked with
 	By     string  `json:"by"`      // who asked (cleaned)
-	Boot   float64 `json:"boot"`    // when the operating system started, unix seconds; 0 = not known
+	// Up is how long the operating system had been running when the action was scheduled, in seconds
+	// (Windows: GetTickCount64); 0 = not known. Unlike the clock it does not move when the time is corrected.
+	Up float64 `json:"up"`
 }
 
 // powerRecordGrace is how long after its time a record is still reported (as Power does for its own).
 const powerRecordGrace = 60 * time.Second
 
-// bootSlack is how far two readings of the operating system's start time may differ and still mean the same
-// start. The start time is "now minus uptime", so it moves when the clock is corrected; a real restart moves
-// it by the time the machine was up before plus the time it took to start again.
-const bootSlack = 30 * time.Second
+// atSlack is how far the time an action happens, counted by the uptime, may be from the time on record before
+// the uptime's is reported instead (the clock was corrected since).
+const atSlack = 2 * time.Second
 
 var powerRecordActions = []string{"shutdown", "reboot", "sleep"}
 
@@ -55,16 +57,48 @@ var powerRecordActions = []string{"shutdown", "reboot", "sleep"}
 func (r *PowerRecord) valid() bool {
 	return r != nil && slices.Contains(powerRecordActions, r.Action) &&
 		!math.IsNaN(r.At) && !math.IsInf(r.At, 0) && r.At > 0 && r.At < 1e11 &&
-		r.DelayS >= 0 && r.DelayS <= 86400 && !math.IsNaN(r.Boot) && !math.IsInf(r.Boot, 0) && r.Boot >= 0
+		r.DelayS >= 0 && r.DelayS <= 86400 && !math.IsNaN(r.Up) && !math.IsInf(r.Up, 0) && r.Up >= 0
 }
 
-// sameBoot reports whether the operating system has not been started again since a record with start time
-// recorded was written (both in unix seconds; 0 = unknown, which never ends a record).
-func sameBoot(recorded, now float64) bool {
-	if recorded == 0 || now == 0 {
-		return true
+// ended reports whether a record no longer stands for a pending action. now is the clock in unix seconds; up
+// is the operating system's uptime in seconds (upKnown false: there is none to ask).
+//
+// With an uptime on record and one to compare it with, only those two decide, never the clock:
+//   - the uptime is smaller than the one on record: the operating system was started again since, and the
+//     countdown died with the old session;
+//   - more uptime has passed than the delay plus the minute of grace: its time has passed.
+//
+// Before, "started again" was read off "clock minus uptime", which moves with every correction of the clock:
+// a first time synchronisation after a start with a wrong hardware clock, a dual-boot PC, a virtual machine
+// resumed from a snapshot. A correction of more than 30 seconds while a shutdown was pending dropped the
+// record, the panel showed nothing and Cancel answered ok without aborting anything, while Windows went on
+// counting down. A clock set forward past the action's time did the same.
+//
+// What the uptime cannot tell: a restart after which the machine has again been up for longer than it had been
+// when the action was scheduled, inside the delay. The record then stays until that time has passed, and
+// Cancel asks Windows to abort (it answers "nothing in progress", unless someone else scheduled a shutdown in
+// that very time). That is the smaller harm of the two: a Cancel that does nothing lets the PC shut down.
+//
+// Without an uptime (not Windows, where the agent itself waits for the time and the record lives in memory)
+// the clock decides, as before.
+func (rec *PowerRecord) ended(now, up float64, upKnown bool) bool {
+	grace := powerRecordGrace.Seconds()
+	if upKnown && rec.Up > 0 {
+		return up < rec.Up || up-rec.Up > float64(rec.DelayS)+grace
 	}
-	return math.Abs(now-recorded) <= bootSlack.Seconds()
+	return now > rec.At+grace
+}
+
+// at is when the action happens, in unix seconds: the time on record, or, when the clock was corrected since
+// the action was scheduled, the time by today's clock (what is left of the delay by the uptime).
+func (rec *PowerRecord) at(now, up float64, upKnown bool) float64 {
+	if !upKnown || rec.Up <= 0 {
+		return rec.At
+	}
+	if at := now + float64(rec.DelayS) - (up - rec.Up); math.Abs(at-rec.At) > atSlack.Seconds() {
+		return math.Round(at*1000) / 1000
+	}
+	return rec.At
 }
 
 // PowerStore keeps the record across restarts of the program. Save(nil) removes it; Load returns nil, nil when
@@ -171,34 +205,35 @@ type RememberedPower struct {
 	// program restarts (Windows: shutdown and reboot). Only those are written to the store; the others live in
 	// this process (a timer) and end with it.
 	kept func(action string) bool
-	// boot is when the operating system started (false: unknown).
-	boot func() (time.Time, bool)
-	now  func() time.Time
+	// uptime is how long the operating system has been running (false: unknown). It must not move when the
+	// clock is corrected (Windows: GetTickCount64).
+	uptime func() (time.Duration, bool)
+	now    func() time.Time
 
 	mu  sync.Mutex
 	rec *PowerRecord
 }
 
-// RememberPower wraps exec. store may be nil (nothing survives a restart); kept and boot may be nil.
-func RememberPower(exec PowerExec, store PowerStore, kept func(action string) bool, boot func() (time.Time, bool)) *RememberedPower {
-	return rememberPower(exec, store, kept, boot, time.Now)
+// RememberPower wraps exec. store may be nil (nothing survives a restart); kept and uptime may be nil.
+func RememberPower(exec PowerExec, store PowerStore, kept func(action string) bool, uptime func() (time.Duration, bool)) *RememberedPower {
+	return rememberPower(exec, store, kept, uptime, time.Now)
 }
 
-func rememberPower(exec PowerExec, store PowerStore, kept func(action string) bool, boot func() (time.Time, bool), now func() time.Time) *RememberedPower {
-	r := &RememberedPower{exec: exec, store: store, kept: kept, boot: boot, now: now}
+func rememberPower(exec PowerExec, store PowerStore, kept func(action string) bool, uptime func() (time.Duration, bool), now func() time.Time) *RememberedPower {
+	r := &RememberedPower{exec: exec, store: store, kept: kept, uptime: uptime, now: now}
 	r.restore()
 	return r
 }
 
-func (r *RememberedPower) bootUnix() float64 {
-	if r.boot == nil {
-		return 0
+// clocks reads the clock (unix seconds) and the uptime (seconds).
+func (r *RememberedPower) clocks() (now, up float64, upKnown bool) {
+	now = float64(r.now().UnixMilli()) / 1000
+	if r.uptime != nil {
+		if d, ok := r.uptime(); ok && d > 0 {
+			return now, d.Seconds(), true
+		}
 	}
-	t, ok := r.boot()
-	if !ok {
-		return 0
-	}
-	return float64(t.UnixMilli()) / 1000
+	return now, 0, false
 }
 
 // restore reads the stored record when the program starts.
@@ -218,8 +253,9 @@ func (r *RememberedPower) restore() {
 	defer r.mu.Unlock()
 	r.rec = rec
 	if r.current() != nil {
+		now, up, upKnown := r.clocks()
 		slog.Warn("power: an action scheduled before this start is still pending", "action", rec.Action,
-			"at", time.Unix(int64(rec.At), 0).Format(time.RFC3339), "requested_by", rec.By)
+			"at", time.Unix(int64(rec.at(now, up, upKnown)), 0).Format(time.RFC3339), "requested_by", rec.By)
 	}
 }
 
@@ -228,8 +264,7 @@ func (r *RememberedPower) current() *PowerRecord {
 	if r.rec == nil {
 		return nil
 	}
-	now := float64(r.now().UnixMilli()) / 1000
-	if now > r.rec.At+powerRecordGrace.Seconds() || !sameBoot(r.rec.Boot, r.bootUnix()) {
+	if r.rec.ended(r.clocks()) {
 		r.forget()
 	}
 	return r.rec
@@ -254,7 +289,7 @@ func (r *RememberedPower) PendingAction() (Pending, bool) {
 	if rec == nil {
 		return Pending{}, false
 	}
-	return Pending{Action: rec.Action, At: rec.At, DelayS: rec.DelayS, RequestedBy: rec.By}, true
+	return Pending{Action: rec.Action, At: rec.at(r.clocks()), DelayS: rec.DelayS, RequestedBy: rec.By}, true
 }
 
 // powerMessage is the text Windows shows to whoever is signed in.
@@ -280,8 +315,9 @@ func (r *RememberedPower) schedule(action string, delay time.Duration, message, 
 	if err := r.exec.Schedule(action, delay, message); err != nil {
 		return err
 	}
-	at := float64(r.now().UnixMilli())/1000 + delay.Seconds()
-	r.rec = &PowerRecord{Action: action, At: math.Round(at*1000) / 1000, DelayS: int(delay / time.Second), By: who, Boot: r.bootUnix()}
+	now, up, _ := r.clocks()
+	at := now + delay.Seconds()
+	r.rec = &PowerRecord{Action: action, At: math.Round(at*1000) / 1000, DelayS: int(delay / time.Second), By: who, Up: math.Round(up*1000) / 1000}
 	if r.store != nil && (r.kept == nil || r.kept(action)) {
 		if err := r.store.Save(r.rec); err != nil {
 			// the action is scheduled all the same; only a restart of this program would forget it

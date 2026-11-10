@@ -41,13 +41,13 @@ const powerRecordFile = "power-pending.json"
 // the action, as before.
 func systemPowerAt(dir string) PowerExec {
 	store := PowerFile{Path: filepath.Join(dir, powerRecordFile), Check: collect.TrustedFolder}
-	return RememberPower(&systemPower{}, store, func(action string) bool { return action != "sleep" }, windowsBoot)
+	return RememberPower(&systemPower{}, store, func(action string) bool { return action != "sleep" }, windowsUptime)
 }
 
-// windowsBoot is when Windows started: now minus the time since then (GetTickCount64, which goes on counting
-// while the PC sleeps).
-func windowsBoot() (time.Time, bool) {
-	return time.Now().Add(-windows.DurationSinceBoot()), true
+// windowsUptime is how long Windows has been running (GetTickCount64: milliseconds since the system was
+// started). A correction of the clock does not move it.
+func windowsUptime() (time.Duration, bool) {
+	return windows.DurationSinceBoot(), true
 }
 
 var (

@@ -35,9 +35,14 @@ type clock struct {
 	boot time.Time
 }
 
-func (c *clock) Now() time.Time          { return c.now }
-func (c *clock) Boot() (time.Time, bool) { return c.boot, !c.boot.IsZero() }
-func (c *clock) advance(d time.Duration) { c.now = c.now.Add(d) }
+func (c *clock) Now() time.Time { return c.now }
+
+// Uptime is the operating system's own count of the time since it started (boot zero: there is none).
+func (c *clock) Uptime() (time.Duration, bool) { return c.now.Sub(c.boot), !c.boot.IsZero() }
+func (c *clock) advance(d time.Duration)       { c.now = c.now.Add(d) }
+
+// correct sets the clock forward (or back) by d; the machine goes on running, so its uptime is what it was.
+func (c *clock) correct(d time.Duration) { c.now, c.boot = c.now.Add(d), c.boot.Add(d) }
 func notSleep(action string) bool        { return action != "sleep" }
 func newClock() *clock {
 	now := time.Unix(1_800_000_000, 0)
@@ -46,7 +51,7 @@ func newClock() *clock {
 
 // start is one run of the program (the helper service): it reads what the previous run remembered.
 func start(os PowerExec, store PowerStore, c *clock) *RememberedPower {
-	return rememberPower(os, store, notSleep, c.Boot, c.Now)
+	return rememberPower(os, store, notSleep, c.Uptime, c.Now)
 }
 
 // L21: a shutdown scheduled on Windows goes on counting down while the service restarts. The next run must
@@ -147,30 +152,128 @@ func TestRememberedRecordEnds(t *testing.T) {
 		t.Fatal("Cancel reached the operating system after a reboot")
 	}
 
-	// the clock was corrected by a few seconds: the same start, the record stays
+	// the uptime is not known at all (not Windows): the clock decides, as before
 	win, c, store = &fakeOS{}, newClock(), newStore()
+	c.boot = time.Time{}
 	_ = start(win, store, c).ScheduleBy("shutdown", time.Hour, "panel")
 	c.advance(time.Minute)
-	c.boot = c.boot.Add(20 * time.Second)
 	if _, ok := start(win, store, c).PendingAction(); !ok {
-		t.Fatal("a clock correction of 20 s dropped the record")
+		t.Fatal("dropped because the uptime is unknown")
 	}
-	// the start time is not known at all: never a reason to drop
-	c.boot = time.Time{}
-	if _, ok := start(win, store, c).PendingAction(); !ok {
-		t.Fatal("dropped because the start time is unknown")
+	c.advance(time.Hour + time.Minute)
+	if _, ok := start(win, store, c).PendingAction(); ok {
+		t.Fatal("a record whose time has passed by the clock is still there")
 	}
 }
 
-func TestSameBoot(t *testing.T) {
-	for _, c := range []struct {
-		rec, now float64
-		same     bool
-	}{{1000, 1000, true}, {1000, 1030, true}, {1000, 970, true}, {1000, 1031, false}, {1000, 969, false},
-		{0, 5000, true}, {5000, 0, true}, {1000, 90000, false}} {
-		if got := sameBoot(c.rec, c.now); got != c.same {
-			t.Errorf("sameBoot(%v, %v) = %v", c.rec, c.now, got)
+// N6 (review of the Windows side; L21 again): the record must not depend on the clock. Windows counts a
+// shutdown down by its own time; a correction of the clock while it is pending changes nothing about it.
+func TestClockCorrectionsDoNotEndTheRecord(t *testing.T) {
+	for _, step := range []time.Duration{31 * time.Second, 5 * time.Minute, 3 * time.Hour, 400 * 24 * time.Hour,
+		-31 * time.Second, -5 * time.Minute, -3 * time.Hour, -400 * 24 * time.Hour} {
+		win, c := &fakeOS{}, newClock()
+		store := PowerFile{Path: filepath.Join(t.TempDir(), "power-pending.json")}
+		p := start(win, store, c)
+		if err := p.ScheduleBy("shutdown", 10*time.Minute, "panel"); err != nil {
+			t.Fatal(err)
 		}
+		c.advance(time.Minute)
+		c.correct(step)
+		for name, r := range map[string]*RememberedPower{"the same run": p, "after a restart of the service": start(win, store, c)} {
+			got, ok := r.PendingAction()
+			if !ok {
+				t.Fatalf("clock corrected by %s, %s: the pending shutdown is no longer shown (Windows still counts it down)", step, name)
+			}
+			// ... and the time shown is the time it happens by the corrected clock: nine minutes from now
+			if want := float64(c.now.Add(9*time.Minute).UnixMilli()) / 1000; got.At != want || got.DelayS != 600 {
+				t.Errorf("clock corrected by %s, %s: shown for %v, want %v", step, name, got.At, want)
+			}
+		}
+		// its time passes by the machine's own count, wherever the clock is: gone a minute after
+		c.advance(9*time.Minute + 59*time.Second)
+		if _, ok := p.PendingAction(); !ok {
+			t.Fatalf("clock corrected by %s: dropped inside the minute of grace", step)
+		}
+		if err := p.Cancel(); err != nil || win.cancels != 1 {
+			t.Fatalf("clock corrected by %s: Cancel asked Windows to abort %d times (%v): the PC still shuts down", step, win.cancels, err)
+		}
+		// a second one: not cancelled, its time passes
+		if err := p.ScheduleBy("reboot", 10*time.Minute, "panel"); err != nil {
+			t.Fatal(err)
+		}
+		c.correct(-step)
+		c.advance(11*time.Minute + time.Second)
+		if _, ok := p.PendingAction(); ok {
+			t.Fatalf("clock corrected by %s: a record whose time has passed is still shown", step)
+		}
+		if _, err := os.Stat(store.Path); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("clock corrected by %s: the record's file is still there", step)
+		}
+		if p.Cancel() != nil || win.cancels != 1 {
+			t.Fatalf("clock corrected by %s: Cancel reached Windows for a record whose time has passed", step)
+		}
+	}
+	// the other half stays true with a corrected clock: Windows was restarted, the record is from before
+	win, c := &fakeOS{}, newClock()
+	store := PowerFile{Path: filepath.Join(t.TempDir(), "power-pending.json")}
+	_ = start(win, store, c).ScheduleBy("shutdown", 12*time.Hour, "panel")
+	c.advance(20 * time.Minute)
+	c.boot = c.now.Add(-90 * time.Second) // restarted: up for 90 seconds
+	c.correct(-20 * time.Minute)          // and the clock went back to where it was when the record was written
+	r := start(win, store, c)
+	if _, ok := r.PendingAction(); ok || r.Cancel() != nil || win.cancels != 0 {
+		t.Fatal("a record from before the last start of Windows was believed because the clock agreed with it")
+	}
+}
+
+// The review's proof of N6, as it was written (it failed before the fix): one minute after a shutdown in ten
+// minutes was scheduled, the clock is set forward by five minutes; the PC was not restarted.
+func TestCancelAfterAClockCorrection(t *testing.T) {
+	c, osx := newClock(), &fakeOS{}
+	store := PowerFile{Path: t.TempDir() + "/power-pending.json"}
+	p := start(osx, store, c)
+	if err := p.ScheduleBy("shutdown", 10*time.Minute, "nika"); err != nil {
+		t.Fatal(err)
+	}
+	c.advance(time.Minute)
+	c.now, c.boot = c.now.Add(5*time.Minute), c.boot.Add(5*time.Minute)
+	if _, ok := p.PendingAction(); !ok {
+		t.Errorf("the pending shutdown is no longer shown after a clock correction (Windows still counts it down)")
+	}
+	if err := p.Cancel(); err != nil {
+		t.Fatal(err)
+	}
+	if osx.cancels != 1 {
+		t.Errorf("Cancel answered ok but asked Windows to abort %d times: the PC still shuts down", osx.cancels)
+	}
+}
+
+func TestPowerRecordEnded(t *testing.T) {
+	rec := &PowerRecord{Action: "shutdown", At: 10_000, DelayS: 600, Up: 5000}
+	for _, c := range []struct {
+		name    string
+		now, up float64
+		known   bool
+		ended   bool
+	}{
+		{"just scheduled", 9400, 5000, true, false},
+		{"half way", 9700, 5300, true, false},
+		{"inside the minute of grace", 10_059, 5659, true, false},
+		{"its time has passed", 10_061, 5661, true, true},
+		{"restarted: the uptime is smaller", 9700, 90, true, true},
+		{"the clock says long past, the uptime does not", 99_999, 5300, true, false},
+		{"the clock says not yet, the uptime says past", 9500, 5661, true, true},
+		{"no uptime to ask: the clock, not yet", 10_059, 0, false, false},
+		{"no uptime to ask: the clock, past", 10_061, 0, false, true},
+	} {
+		if got := rec.ended(c.now, c.up, c.known); got != c.ended {
+			t.Errorf("%s: ended = %v", c.name, got)
+		}
+	}
+	// a record without an uptime (written where there is none): the clock
+	old := &PowerRecord{Action: "shutdown", At: 10_000, DelayS: 600}
+	if old.ended(9700, 123456, true) || !old.ended(10_061, 123456, true) {
+		t.Error("a record without an uptime is not decided by the clock")
 	}
 }
 
@@ -228,7 +331,7 @@ func TestPowerFile(t *testing.T) {
 	if r, err := (PowerFile{Path: filepath.Join(dir, "missing", "p.json"), Check: func(string) error { return errors.New("x") }}).Load(); r != nil || err != nil {
 		t.Fatal("a folder that does not exist is not an error:", r, err)
 	}
-	rec := &PowerRecord{Action: "reboot", At: 1_800_000_600, DelayS: 600, By: "panel", Boot: 1_799_990_000}
+	rec := &PowerRecord{Action: "reboot", At: 1_800_000_600, DelayS: 600, By: "panel", Up: 10_800}
 	if err := f.Save(rec); err != nil {
 		t.Fatal(err)
 	}
