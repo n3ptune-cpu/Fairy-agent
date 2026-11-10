@@ -949,3 +949,64 @@ func TestRepairLimits(t *testing.T) {
 		t.Fatal("fixture")
 	}
 }
+
+// L2: before a folder's permissions are set (Windows passes them on to what is inside), every link below it is
+// removed, without entering one: nothing a link points to can be reached by the change. The compromised agent
+// account can create links in its own folders (logs\, state\, update\stage\) at any time.
+func TestLinksAreRemovedBeforePermissionsAreSet(t *testing.T) {
+	p := newPC(t)
+	p.installed(t)
+	program := filepath.Join(p.root, "Program Files", "Fairy")
+	if err := os.MkdirAll(program, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	_ = os.WriteFile(filepath.Join(program, "fairy-agent.exe"), []byte("MZ"), 0o644)
+	p.fs.sddl[program] = sddlProgramFiles
+	state := filepath.Join(p.dir, "state")
+	_ = os.MkdirAll(filepath.Join(state, "a", "b"), 0o755)
+	p.fs.sddl[filepath.Join(state, "a")] = sddlAgentFile // folders the agent's account made
+	p.fs.sddl[filepath.Join(state, "a", "b")] = sddlAgentFile
+	links := []string{filepath.Join(state, "junction"), filepath.Join(state, "a", "b", "deep")}
+	for _, l := range links {
+		if err := os.Symlink(program, l); err != nil {
+			t.Skip("no symbolic links here:", err)
+		}
+	}
+	// state\ needs its permissions set (here: it belongs to the agent's account)
+	p.fs.sddl[state] = strings.Replace(sddlAgentDir, "O:BA", "O:"+tSvc, 1)
+	var notes []string
+	f := folders{fs: p.fs, note: func(format string, a ...any) { notes = append(notes, format) }}
+	if err := f.ensure(state, folderSpec{tSvc, true}); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"remove " + links[1], "remove " + links[0], "secure " + state}
+	if strings.Join(p.fs.calls, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("calls:\n%s\nwant:\n%s", strings.Join(p.fs.calls, "\n"), strings.Join(want, "\n"))
+	}
+	if len(notes) != 2 {
+		t.Fatalf("the removed links were not reported: %v", notes)
+	}
+	// what the links pointed to: untouched, content and permissions
+	if b, _ := os.ReadFile(filepath.Join(program, "fairy-agent.exe")); string(b) != "MZ" || p.fs.sddl[program] != sddlProgramFiles {
+		t.Fatal("the program folder was touched through a link")
+	}
+	if ents, _ := os.ReadDir(program); len(ents) != 1 {
+		t.Fatalf("something was put into the program folder: %v", ents)
+	}
+
+	// a folder that already has its permissions is not written to at all, link inside or not (the install /
+	// setup-self-update walk removes that link; see TestPlantedThingsInAKeptFolder)
+	p.fs.calls = nil
+	_ = os.Symlink(program, links[0])
+	if err := f.ensure(state, folderSpec{tSvc, true}); err != nil || len(p.fs.calls) != 0 {
+		t.Fatal(err, p.fs.calls)
+	}
+
+	// another --config folder: a link inside stops the change instead of being removed
+	p.fs.calls = nil
+	p.fs.sddl[state] = strings.Replace(sddlAgentDir, "O:BA", "O:"+tSvc, 1)
+	err := folders{fs: p.fs, keepLinks: true}.ensure(state, folderSpec{tSvc, true})
+	if err == nil || !strings.Contains(err.Error(), "is a link") || len(p.fs.calls) != 0 {
+		t.Fatal(err, p.fs.calls)
+	}
+}

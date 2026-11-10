@@ -361,6 +361,20 @@ func setupFolders(cfgPath string) error {
 // SDDL names one), on the object opened itself: a link is refused, never followed.
 func applyACL(path, sddl string) error { return winFS{}.Secure(path, sddl) }
 
+// withObject opens path itself (never what a link points to) with access, refuses a link, and runs f on the
+// handle: security is read and set on what was opened, not by name.
+func withObject(path string, access uint32, f func(h windows.Handle) error) error {
+	h, info, err := openObject(path, access)
+	if err != nil {
+		return err
+	}
+	defer windows.CloseHandle(h)
+	if isLink(info) {
+		return fmt.Errorf("%s is a link (a junction or symbolic link): remove it", path)
+	}
+	return f(h)
+}
+
 // grantACE adds (or widens) one allow entry for sid to an object's DACL, keeping everything else (inherited
 // entries included). Running it again changes nothing.
 func grantACE(name string, typ windows.SE_OBJECT_TYPE, handle windows.Handle, sid *windows.SID, mask windows.ACCESS_MASK, inherit uint32) error {
@@ -390,10 +404,10 @@ func grantACE(name string, typ windows.SE_OBJECT_TYPE, handle windows.Handle, si
 	return windows.SetNamedSecurityInfo(name, typ, windows.DACL_SECURITY_INFORMATION, nil, nil, acl, nil)
 }
 
-// revokeSID removes every explicit allow entry for sid from a file system object's DACL (inherited entries of
-// objects inside follow when Windows propagates the change).
-func revokeSID(path string, sid *windows.SID) error {
-	sd, err := windows.GetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
+// revokeSID removes every explicit allow entry for sid from the DACL of an open file or folder (inherited
+// entries of objects inside follow when Windows propagates the change).
+func revokeSID(h windows.Handle, sid *windows.SID) error {
+	sd, err := windows.GetSecurityInfo(h, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
 	if err != nil {
 		return err
 	}
@@ -401,13 +415,19 @@ func revokeSID(path string, sid *windows.SID) error {
 	if err != nil {
 		return err
 	}
+	if old == nil {
+		return nil // no permission list at all: nothing of sid's to remove (and never write a NULL list back)
+	}
 	acl, err := windows.ACLFromEntries([]windows.EXPLICIT_ACCESS{{AccessMode: windows.REVOKE_ACCESS,
 		Trustee: windows.TRUSTEE{TrusteeForm: windows.TRUSTEE_IS_SID, TrusteeType: windows.TRUSTEE_IS_WELL_KNOWN_GROUP,
 			TrusteeValue: windows.TrusteeValueFromSID(sid)}}}, old)
 	if err != nil {
 		return err
 	}
-	return windows.SetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION, nil, nil, acl, nil)
+	if acl == nil {
+		return errors.New("no permission list to set")
+	}
+	return windows.SetSecurityInfo(h, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION, nil, nil, acl, nil)
 }
 
 // secureProgramFolder takes back the write access to the program folder (and the files in it) that fairy-agent
@@ -430,18 +450,26 @@ func secureProgramFolder(dir string, sid *windows.SID) error {
 		paths = append(paths, filepath.Join(dir, e.Name()))
 	}
 	for _, p := range paths {
-		if err := revokeSID(p, sid); err != nil {
-			return fmt.Errorf("%s: %w", p, err)
-		}
-		sd, err := windows.GetNamedSecurityInfo(p, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION)
+		// each object is opened itself and changed through that handle: a link put there (by the service's
+		// account, while it could still write here) is refused, and nothing it points to is touched
+		err := withObject(p, windows.READ_CONTROL|windows.WRITE_DAC|windows.WRITE_OWNER, func(h windows.Handle) error {
+			if err := revokeSID(h, sid); err != nil {
+				return err
+			}
+			sd, err := windows.GetSecurityInfo(h, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION)
+			if err != nil {
+				return err
+			}
+			if owner, _, err := sd.Owner(); err == nil && owner != nil && collect.TrustedOwner(owner.String()) {
+				return nil
+			}
+			if err := windows.SetSecurityInfo(h, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION, admins, nil, nil, nil); err != nil {
+				return fmt.Errorf("making Administrators the owner: %w", err)
+			}
+			return nil
+		})
 		if err != nil {
 			return fmt.Errorf("%s: %w", p, err)
-		}
-		if owner, _, err := sd.Owner(); err == nil && owner != nil && collect.TrustedOwner(owner.String()) {
-			continue
-		}
-		if err := windows.SetNamedSecurityInfo(p, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION, admins, nil, nil, nil); err != nil {
-			return fmt.Errorf("%s: making Administrators the owner: %w", p, err)
 		}
 	}
 	return nil

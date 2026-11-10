@@ -430,8 +430,8 @@ func checkDataDir(fs dataFS, cfgPath, agentSID string, alsoDirs ...string) error
 // folders does the folder work of this file on one file system.
 type folders struct {
 	fs dataFS
-	// keepLinks: a link found in the folder is an error instead of being removed (a --config folder that is
-	// not Fairy's own).
+	// keepLinks: a link found inside a folder whose permissions are about to be set is an error instead of
+	// being removed (a --config folder that is not Fairy's own).
 	keepLinks bool
 	// note is told what was changed besides permissions (may be nil).
 	note func(format string, a ...any)
@@ -488,8 +488,14 @@ func (f folders) make(path string, spec folderSpec) error {
 	return f.secure(path, spec)
 }
 
-// secure sets the spec on the opened folder and checks the result.
+// secure sets the spec on the opened folder and checks the result. Before that, every link (junction,
+// symbolic link) below the folder is removed, without ever entering one: Windows passes a folder's new
+// permissions on to what is inside, and nothing a link points to may be reached that way.
 func (f folders) secure(path string, spec folderSpec) error {
+	var seen int
+	if err := f.unlink(path, 0, &seen); err != nil {
+		return err
+	}
 	if err := f.fs.Secure(path, spec.sddl()); err != nil {
 		return fmt.Errorf("setting the permissions of %s: %w", path, err)
 	}
@@ -499,6 +505,41 @@ func (f folders) secure(path string, spec folderSpec) error {
 	}
 	if lv, why := judge(o, true, spec.write, true, spec.agentSID); lv != lvOK {
 		return fmt.Errorf("%s still %s after its permissions were set", path, why)
+	}
+	return nil
+}
+
+// unlink removes every link below folder d (see secure).
+func (f folders) unlink(d string, depth int, seen *int) error {
+	if depth > repairMaxDepth {
+		return fmt.Errorf("%s: folders nested too deep; delete what does not belong there and run this again", d)
+	}
+	names, err := f.fs.List(d)
+	if err != nil {
+		return fmt.Errorf("%s: cannot list it: %w", d, err)
+	}
+	for _, name := range names {
+		if *seen++; *seen > repairMaxEntries {
+			return fmt.Errorf("%s holds more than %d files: delete what does not belong there and run this again", d, repairMaxEntries)
+		}
+		p := filepath.Join(d, name)
+		o, err := f.fs.Stat(p)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return fmt.Errorf("%s: cannot read its permissions: %w", p, err)
+		}
+		switch {
+		case o.Reparse:
+			if err := f.removeLink(p); err != nil {
+				return err
+			}
+		case o.Dir:
+			if err := f.unlink(p, depth+1, seen); err != nil {
+				return err
+			}
+		}
 	}
 	return nil
 }
