@@ -268,17 +268,42 @@ it is not a sign of a failed check.)
 | What failed | What the installer does | What you see |
 | --- | --- | --- |
 | the data folder itself (someone else owns it or can change it) | renames the whole folder to `C:\ProgramData\fairy-agent.untrusted-<UTC date and time>`, makes a new one, writes a starter `config.yaml` with everything that can change the PC switched off, and new tokens | `repaired:` lines, then `IMPORTANT: config.yaml could not be trusted and was replaced by a starter ...` |
-| a file or folder inside (someone else owns it or can change it) | renames it to `<its name>.untrusted-<UTC date and time>` next to where it was, and makes Fairy's own folders anew | a `repaired:` line for each |
+| a file or folder inside (someone else owns it or can change it) | moves it, as it is, into `C:\ProgramData\fairy-agent\untrusted-<UTC date and time>\` (a folder only administrators can open), and makes Fairy's own folders anew | a `repaired:` line for each |
 | a link or junction inside | removes the link (not what it points to) | a `repaired:` line |
 | a file that another account could read, but not change | writes it anew with the folder's permissions | a `repaired:` line |
+| anything at all that does not belong in `logs\`, `state\` or `update\stage\` (a link, a file of another account, a file with a second name, folders nested more than 8 deep), or one of these three folders with other permissions | moves **that whole folder** into `untrusted-<UTC date and time>\` and makes a new, empty one. See "The agent's three folders" below | a `repaired:` line that names what was found and says what went with the folder |
 | a token file that another account could read, or that went aside | writes a new token | `IMPORTANT: the tokens are new. Pair this PC with the panel again (Re-pair in the panel).` |
 
 If a rename fails (for example because a program holds a file in the folder open), the installer stops and
-says so. The installer only repairs a folder named `fairy-agent`. With another `--config` folder it reports
-what is wrong and changes nothing in it.
+says so: stop the two services (`Stop-Service fairy-agent, fairy-agent-helper`) and run it again. The installer
+only repairs a folder named `fairy-agent`. With another `--config` folder it reports what is wrong and moves
+nothing in it.
 
-**What "moved aside" means.** Nothing was deleted. The folder or file is still on the disk under its new name,
-for example `C:\ProgramData\fairy-agent.untrusted-20261110-142530`. Fairy never reads it again. It was moved
+**The agent's three folders.** `logs\`, `state\` and `update\stage\` are the folders the agent's own
+low-rights account writes. The installer runs as Administrator, so it changes nothing inside them, ever: a
+program running under the agent's account could swap a folder there for a link in the instant between the
+installer's look at a name and its use of it, and the administrator's change would then land somewhere else
+on the disk. The installer only looks. A healthy folder is left exactly as it is. When something in one of
+the three is not as it should be, the whole folder is moved aside and a new, empty one is made. What that
+costs you:
+
+| Folder replaced | What went with it | What to do |
+| --- | --- | --- |
+| `logs\` | the old log files (they are in the moved folder) | nothing; the agent starts a new `agent.log` |
+| `state\` | the pairing state: a join code that was waiting, and the panel's address | run the panel's Add host / Re-pair command once if a code was waiting or `only_from_panel` is on. The tokens are not affected: the PC stays paired |
+| `update\stage\` | a downloaded update that was waiting to be installed | press Update in the panel again |
+
+`config.yaml` and the tokens are never in these folders and are not touched by this.
+
+For the same reason the installer sets a folder's permissions only while nothing below that folder can be
+changed by another account (Windows passes a folder's new permissions on to everything inside). If the data
+folder's own permissions have to be set, the three folders are moved next to it for that moment
+(`C:\ProgramData\fairy-agent.parked-<time>-logs` and so on) and put back straight away, with everything in them.
+If the installer is interrupted in that moment, it says where they are; move them back with `Move-Item`.
+
+**What "moved aside" means.** Nothing was deleted. The folder or file is still on the disk: the whole old data
+folder as, for example, `C:\ProgramData\fairy-agent.untrusted-20261110-142530`, single things from inside it in
+`C:\ProgramData\fairy-agent\untrusted-20261110-142530\`. Fairy never reads it again. It was moved
 because Fairy could not tell who had prepared it: an untrusted `config.yaml` can name another token file or
 switch features on, and the services that read it run with high rights. What to do:
 
@@ -290,13 +315,16 @@ switch features on, and the services that read it run with high rights. What to 
 
    ```powershell
    Get-ChildItem C:\ProgramData -Force -Filter 'fairy-agent.untrusted-*'
-   Get-ChildItem C:\ProgramData\fairy-agent -Recurse -Force -Filter '*.untrusted-*'
+   Get-ChildItem C:\ProgramData\fairy-agent -Force -Filter 'untrusted-*'
    ```
 
-4. When you no longer need it, delete it. The name below is an **example**: use a name from step 3.
+4. When you no longer need it, delete it. The names below are **examples**: use a name from step 3. Use
+   `rd` as shown, not `Remove-Item -Recurse`: what was moved aside may hold links that another account made,
+   and `rd /s` removes a link itself, never what the link points to.
 
    ```powershell
-   Remove-Item -Recurse -Force 'C:\ProgramData\fairy-agent.untrusted-20261110-142530'
+   cmd /c rd /s /q "C:\ProgramData\fairy-agent.untrusted-20261110-142530"
+   cmd /c rd /s /q "C:\ProgramData\fairy-agent\untrusted-20261110-142530"
    ```
 
 5. If you did not expect this on that PC, treat it as a finding: some other account or program had prepared or

@@ -6,6 +6,13 @@ package main
 // symbolic link is opened as the link, never followed), its kind is read from that handle, and security is read
 // and set on that handle (GetSecurityInfo / SetSecurityInfo), never by name: what was checked is what is
 // changed, and nothing a link points to is ever given new permissions.
+//
+// What that does not cover, and datadir.go therefore rules out (its two rules): a full path is resolved name
+// by name, so opening "the object itself" only holds for the last name; a folder in the middle that the
+// agent's account can turn into a junction leads the whole path elsewhere. And SetSecurityInfo on a folder
+// does more than set that folder: "the system automatically propagates any inheritable access control entries
+// (ACEs) to existing child objects" (Microsoft, SetSecurityInfo). Whether that walk stops at a junction is
+// not documented, so it is never started on a folder with anything below that someone else can change.
 
 import (
 	"errors"
@@ -178,8 +185,9 @@ func cutOwner(sddl string) (string, bool) {
 }
 
 // Secure sets the owner (when sddl names one) and the protected DACL of sddl on the opened object. It refuses
-// a link. For a folder Windows passes the inheritable entries on to what is inside (the handle may list the
-// folder for that).
+// a link. For a folder Windows passes the inheritable entries on to everything below it (the handle may list
+// the folder for that): the caller has made sure that nothing below can be changed by anyone but
+// administrators (folders.secure).
 //
 // When this account may not make Administrators the owner (the object does not allow it, or Windows does not
 // accept that owner from this account), the permissions are set all the same and the owner stays; the caller
@@ -238,31 +246,53 @@ type linkError struct{}
 
 func (linkError) Error() string { return "" }
 
-// Aside renames path to path.untrusted-<UTC time>. A link is renamed as the link. A file moved aside is made
-// administrators-only (best effort); a folder is left exactly as it is: its permissions are not touched, so
-// nothing Windows would pass on reaches whatever was prepared inside it.
-func (fs winFS) Aside(path string) (string, error) {
-	base := path + asideMark + time.Now().UTC().Format("20060102-150405")
-	to := base
-	for i := 2; ; i++ {
-		if _, err := os.Lstat(to); errors.Is(err, os.ErrNotExist) {
-			break
-		}
-		if i > 50 {
-			return "", fmt.Errorf("no free name next to %s", path)
-		}
-		to = fmt.Sprintf("%s-%d", base, i)
+// SetOwner makes Administrators the owner of the opened object, which must not be a link. Only the owner is
+// set: SetSecurityInfo passes entries on to what is inside a folder when the DACL or SACL is set, and neither
+// is touched here.
+func (winFS) SetOwner(path string) error {
+	admins, err := windows.CreateWellKnownSid(windows.WinBuiltinAdministratorsSid)
+	if err != nil {
+		return err
 	}
-	if err := os.Rename(path, to); err != nil {
-		return "", err
+	h, fi, err := openObject(path, windows.READ_CONTROL|windows.WRITE_OWNER)
+	if err != nil {
+		return err
 	}
-	if st, err := os.Lstat(to); err == nil && st.Mode().IsRegular() {
-		_ = fs.Secure(to, "O:BAD:PAI(A;;FA;;;SY)(A;;FA;;;BA)")
+	defer windows.CloseHandle(h)
+	if isLink(fi) {
+		return fmt.Errorf("%s is a link (a junction or symbolic link): its owner is not changed", path)
 	}
-	return to, nil
+	if err := windows.SetSecurityInfo(h, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION, admins, nil, nil, nil); err != nil {
+		return &os.PathError{Op: "set the owner of", Path: path, Err: err}
+	}
+	return nil
 }
 
+// Move renames from to to, which must not exist (MoveFileEx without MOVEFILE_REPLACE_EXISTING: an existing
+// name is an error, whatever it is). The last name of from is what is renamed: a junction or symbolic link is
+// moved as the link, a folder with everything in it, and nothing in it is opened. Windows refuses to rename a
+// folder while a file in it is open; the caller says what to stop.
+func (winFS) Move(from, to string) error {
+	f, err := windows.UTF16PtrFromString(from)
+	if err != nil {
+		return err
+	}
+	t, err := windows.UTF16PtrFromString(to)
+	if err != nil {
+		return err
+	}
+	if err := windows.MoveFileEx(f, t, 0); err != nil {
+		return &os.LinkError{Op: "rename", Old: from, New: to, Err: err}
+	}
+	return nil
+}
+
+// Stamp is the time in the names of what is moved aside.
+func (winFS) Stamp() string { return time.Now().UTC().Format("20060102-150405") }
+
 // Remove deletes a link: os.Remove takes away the junction or symbolic link itself, never what it points to.
+// The look and the removal are two calls by name; the caller only removes links in folders that nobody but
+// administrators can change, where the name stands for the same thing in both.
 func (winFS) Remove(path string) error {
 	h, info, err := openObject(path, windows.READ_CONTROL)
 	if err != nil {
@@ -378,9 +408,13 @@ func ensureFolders(cfgPath string, rels ...string) error {
 	return nil
 }
 
+// agentIsSelf is set by the agent while it moves its own service from LocalSystem to the low-rights account
+// (migrate_windows.go): see folders.agentIsSelf. It is never set in a program an administrator runs.
+var agentIsSelf bool
+
 // winFolders is the folder work on this machine; a removed link is reported on standard output and in the log.
 func winFolders() folders {
-	return folders{fs: winFS{}, note: func(format string, a ...any) {
+	return folders{fs: winFS{}, hint: repairHint, agentIsSelf: agentIsSelf, note: func(format string, a ...any) {
 		msg := fmt.Sprintf(format, a...)
 		fmt.Println("repaired:", msg)
 		slog.Warn("data folder: " + msg)

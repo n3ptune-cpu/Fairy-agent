@@ -278,7 +278,7 @@ func TestInstallOnACleanPC(t *testing.T) {
 	if got := p.fs.did("mkdir"); len(got) != 6 || got[0] != p.dir {
 		t.Fatalf("created: %v", got)
 	}
-	if n := len(p.fs.did("secure")) + len(p.fs.did("aside")) + len(p.fs.did("remove")) + len(p.fs.did("rewrite")); n != 0 {
+	if n := len(p.fs.did("secure")) + len(p.fs.did("setowner")) + len(p.fs.did("move")) + len(p.fs.did("remove")) + len(p.fs.did("rewrite")); n != 0 {
 		t.Fatalf("something was changed after it was created: %v", p.fs.calls)
 	}
 	tok, _ := p.usable(t)
@@ -348,8 +348,16 @@ func TestReinstallOnAHealthyPCChangesNothing(t *testing.T) {
 	if strings.Contains(out, "IMPORTANT") || strings.Contains(out, "token") || rep.ConfigAside || rep.Replaced != "" {
 		t.Fatalf("leftovers of Fairy's own unpaired the PC:\n%s", out)
 	}
-	if got := p.fs.did("aside"); len(got) != 1 || !strings.HasSuffix(got[0], "result.json") {
+	if got := p.fs.did("move"); len(got) != 1 || !strings.HasSuffix(got[0], "result.json") {
 		t.Fatalf("moved aside: %v", got)
+	}
+	// the two folders of the agent's own got Administrators as their owner, on the folder itself: nothing in
+	// them was touched, and no permissions were set (Windows would pass those on into them)
+	if got := p.fs.did("setowner"); len(got) != 2 || len(p.fs.did("secure")) != 0 {
+		t.Fatalf("owner set on %v, permissions on %v", got, p.fs.did("secure"))
+	}
+	if p.read(t, "state/pairing.json") != before["state/pairing.json"] || p.read(t, "logs/agent.log") != before["logs/agent.log"] {
+		t.Fatal("the content of the agent's folders was not kept")
 	}
 	if p.read(t, "logs/agent.log.1") != "from 0.4\n" || p.read(t, "token") != before["token"] || p.read(t, "config.yaml") != before["config.yaml"] {
 		t.Fatal("something of the healthy PC was lost")
@@ -470,8 +478,31 @@ func TestPlantedThingsInAKeptFolder(t *testing.T) {
 			t.Errorf("%s is still in place", g)
 		}
 	}
-	if len(p.fs.did("remove")) != 3 || len(p.fs.did("aside")) != 7 {
-		t.Fatalf("removed %v\nmoved aside %v", p.fs.did("remove"), p.fs.did("aside"))
+	// Where only administrators can change things, each planted thing is dealt with on its own: the link
+	// update\installer.log is removed; control-token, secrets.env, helper\, extra\ and migration\state.json are
+	// moved aside. The agent's own folders are never gone through like that: logs\, state\ and update\stage\
+	// each hold something that does not belong there, so each is moved aside as a whole and made anew.
+	if len(p.fs.did("remove")) != 1 || len(p.fs.did("move")) != 8 || len(rep.Zones) != 3 {
+		t.Fatalf("removed %v\nmoved aside %v\nreplaced %v", p.fs.did("remove"), p.fs.did("move"), rep.Zones)
+	}
+	// everything moved aside is in one folder of this run, which only administrators can open
+	asideAt := filepath.Join(p.dir, asideDir+p.fs.Stamp())
+	if o, err := p.fs.Stat(asideAt); err != nil || !(folderSpec{}).matches(o) {
+		t.Fatalf("%s: %+v %v", asideAt, o, err)
+	}
+	for _, to := range rep.Aside {
+		if filepath.Dir(to) != asideAt {
+			t.Errorf("moved aside to %s, not into %s", to, asideAt)
+		}
+	}
+	// ... with what was in it, untouched: the old logs can still be read there
+	if b, _ := os.ReadFile(filepath.Join(asideAt, "logs", "agent.log")); string(b) != "log\n" {
+		t.Errorf("the old log is not in the folder moved aside: %q", b)
+	}
+	for _, z := range []string{"logs", "state", "update/stage"} {
+		if ents, err := os.ReadDir(filepath.Join(p.dir, filepath.FromSlash(z))); err != nil || len(ents) != 0 {
+			t.Errorf("%s was not made anew, empty: %v %v", z, ents, err)
+		}
 	}
 	// links were removed, not followed: what they pointed to is as it was, with its permissions
 	if b, _ := os.ReadFile(filepath.Join(outside, "keep.dll")); string(b) != "system" || p.fs.sddl[outside] != sddlSystem32 {
@@ -493,6 +524,17 @@ func TestPlantedThingsInAKeptFolder(t *testing.T) {
 	}
 	if !strings.Contains(out, "was a link") || !strings.Contains(out, "more than one name") || !strings.Contains(out, "owned by "+tUser) {
 		t.Fatalf("the administrator is not told what was found:\n%s", out)
+	}
+	// ... and what is gone with each of the agent's folders
+	for _, want := range []string{"the old log files are in the moved folder", "Re-pair command is run on this PC again", "press Update in the panel again"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("the output does not say %q:\n%s", want, out)
+		}
+	}
+	// the next run finds nothing to do, and does not look into what was moved aside
+	p.fs.calls = nil
+	if _, out, err := p.run(t); err != nil || out != "" || len(p.fs.calls) != 0 {
+		t.Fatalf("second run: %v %q %v", err, out, p.fs.calls)
 	}
 }
 
@@ -538,7 +580,7 @@ func TestReadableByOthers(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := p.fs.did("rewrite"); len(got) != 2 || len(p.fs.did("aside")) != 0 {
+	if got := p.fs.did("rewrite"); len(got) != 2 || len(p.fs.did("move")) != 0 {
 		t.Fatalf("%v", p.fs.calls)
 	}
 	if p.read(t, "config.yaml") != "self_update:\n  enabled: true\n" || rep.ConfigAside {
@@ -565,6 +607,28 @@ func TestReadableByOthers(t *testing.T) {
 		t.Fatalf("%+v\n%s", rep, out)
 	}
 	p.usable(t)
+	// The data folder's permissions were set, and Windows passes them on to everything below. The agent's own
+	// folders were not below it in that moment: each was moved out next to the data folder and put back, with
+	// what is in it (the test file system fails the test if anything the agent's account can write is below).
+	if got := p.fs.did("secure"); len(got) != 1 || got[0] != p.dir {
+		t.Fatalf("permissions set on %v", got)
+	}
+	if len(p.fs.moves) != 6 || len(rep.Zones) != 0 || len(rep.Aside) != 0 {
+		t.Fatalf("moves %v, replaced %v", p.fs.moves, rep.Zones)
+	}
+	for i, z := range []string{"logs", "state", "update/stage"} {
+		away, back := p.fs.moves[i], p.fs.moves[len(p.fs.moves)-1-i]
+		at := filepath.Join(p.dir, filepath.FromSlash(z))
+		if away[0] != at || filepath.Dir(away[1]) != p.pd || !strings.Contains(away[1], parkMark) || back != [2]string{away[1], away[0]} {
+			t.Errorf("%s: moved %v, back %v", z, away, back)
+		}
+	}
+	if p.read(t, "logs/agent.log") != "log\n" || p.read(t, "state/pairing.json") != `{"closed":"paired"}` || p.read(t, "update/stage/request.json") != "{}" {
+		t.Fatal("the agent's folders did not come back as they were")
+	}
+	if ents, _ := os.ReadDir(p.pd); len(ents) != 1 {
+		t.Fatalf("something was left next to the data folder: %v", ents)
+	}
 }
 
 // Only the standard folder is repaired by moving things. With another --config folder (say, someone's
@@ -587,7 +651,7 @@ func TestOtherConfigFolderIsNotRepaired(t *testing.T) {
 	p.fs.sddl[other] = sddlDataDir
 	p.fs.sddl[filepath.Join(other, "thesis.docx")] = sddlPlantedFile
 	_, err = repairDataDir(p.fs, filepath.Join(other, "config.yaml"), tSvc)
-	if err == nil || !strings.Contains(err.Error(), "thesis.docx") || len(p.fs.did("aside")) != 0 {
+	if err == nil || !strings.Contains(err.Error(), "thesis.docx") || len(p.fs.did("move")) != 0 {
 		t.Fatalf("%v %v", err, p.fs.calls)
 	}
 	if b, _ := os.ReadFile(filepath.Join(other, "thesis.docx")); string(b) != "x" {
@@ -600,7 +664,7 @@ func TestRepairStopsWithAClearMessage(t *testing.T) {
 	p := newPC(t)
 	p.put(t, "", sddlUserMadeDir, "")
 	p.put(t, "config.yaml", sddlPlantedFile, "x: 1\n")
-	p.fs.asideErr = errors.New("Access is denied.")
+	p.fs.moveErr = errors.New("Access is denied.")
 	_, err := repairDataDir(p.fs, p.cfgPath, tSvc)
 	if err == nil || !strings.Contains(err.Error(), "Stop-Service") || !strings.Contains(err.Error(), "owned by "+tUser) {
 		t.Fatal(err)
@@ -706,17 +770,19 @@ func TestCheckDataDir(t *testing.T) {
 }
 
 // One of Fairy's folders (the migration's, the state folder for join, update\ and its stage): made with its
-// permissions when missing, taken over on the opened folder when it is Fairy's own, refused when it is not.
+// permissions when missing, corrected on the opened folder as far as that is safe, refused when it is not
+// Fairy's own.
 func TestEnsureFolder(t *testing.T) {
 	p := newPC(t)
 	p.installed(t)
-	f := folders{fs: p.fs}
+	f := folders{fs: p.fs, hint: repairHint}
 	state := filepath.Join(p.dir, "state")
 	write, read := folderSpec{tSvc, true}, folderSpec{tSvc, false}
 
 	if err := f.ensure(state, write); err != nil || len(p.fs.calls) != 0 { // as it should be: nothing written
 		t.Fatal(err, p.fs.calls)
 	}
+	pairing := p.read(t, "state/pairing.json")
 	_ = os.RemoveAll(state)
 	delete(p.fs.sddl, state)
 	if err := f.ensure(state, write); err != nil || len(p.fs.did("mkdir")) != 1 || len(p.fs.did("secure")) != 0 {
@@ -725,28 +791,75 @@ func TestEnsureFolder(t *testing.T) {
 	if o, _ := p.fs.Stat(state); !write.matches(o) {
 		t.Fatalf("%+v", o)
 	}
-	// Fairy's own, but not as it should be: permissions and owner set on the folder
+	p.put(t, "state/pairing.json", sddlAgentFile, pairing)
+	// Fairy's own with the right permissions, only the owner is another: Administrators become the owner on
+	// the folder itself. No permissions are set (Windows would pass them on to what is inside), and nothing
+	// inside is touched.
 	for name, s := range map[string]string{
 		"owned by the agent's account":         strings.Replace(sddlAgentDir, "O:BA", "O:"+tSvc, 1),
 		"owned by LocalService (before 0.5)":   strings.Replace(sddlAgentDir, "O:BA", "O:LS", 1),
-		"inherits from the data folder":        "O:BAD:AI(A;OICIID;FA;;;SY)(A;OICIID;FA;;;BA)(A;OICIID;0x1200a9;;;" + tSvc + ")",
-		"readable by Users":                    sddlAgentDir + "(A;OICI;0x1200a9;;;BU)",
 		"owner SYSTEM (made by the old agent)": strings.Replace(sddlAgentDir, "O:BA", "O:SY", 1),
 	} {
 		p.fs.calls, p.fs.sddl[state] = nil, s
-		if err := f.ensure(state, write); err != nil || len(p.fs.did("secure")) != 1 {
+		if err := f.ensure(state, write); err != nil || strings.Join(p.fs.calls, ",") != "setowner "+state {
 			t.Errorf("%s: %v %v", name, err, p.fs.calls)
 		}
 		if o, _ := p.fs.Stat(state); !write.matches(o) {
 			t.Errorf("%s: not corrected: %+v", name, o)
 		}
 	}
-	// update\ that the agent's account may still write (0.4.2): corrected in place
-	upd := filepath.Join(p.dir, "update")
-	p.fs.calls, p.fs.sddl[upd] = nil, sddlAgentDir
-	if err := f.ensure(upd, read); err != nil || len(p.fs.did("secure")) != 1 {
+	// One of the agent's own folders whose permissions differ: they are not set in place (rule 1). install /
+	// setup-self-update replace such a folder as a whole; everyone else is told to run that.
+	for name, s := range map[string]string{
+		"inherits from the data folder":             "O:BAD:AI(A;OICIID;FA;;;SY)(A;OICIID;FA;;;BA)(A;OICIID;0x1200a9;;;" + tSvc + ")",
+		"readable by Users":                         sddlAgentDir + "(A;OICI;0x1200a9;;;BU)",
+		"owned by the agent, and readable by Users": strings.Replace(sddlAgentDir, "O:BA", "O:"+tSvc, 1) + "(A;OICI;0x1200a9;;;BU)",
+	} {
+		p.fs.calls, p.fs.sddl[state] = nil, s
+		if err := f.ensure(state, write); err == nil || !strings.Contains(err.Error(), "setup-self-update") || len(p.fs.calls) != 0 {
+			t.Errorf("%s: %v %v", name, err, p.fs.calls)
+		}
+	}
+	p.fs.sddl[state] = sddlAgentDir
+	// helper\ (only administrators change it, and so everything in it): permissions set on the folder
+	helper := filepath.Join(p.dir, "helper")
+	p.fs.calls, p.fs.sddl[helper] = nil, sddlDataDir+"(A;OICI;0x1200a9;;;BU)"
+	if err := f.ensure(helper, read); err != nil || strings.Join(p.fs.calls, ",") != "secure "+helper {
 		t.Fatal(err, p.fs.calls)
 	}
+	// ... but not while something below it could be changed by someone else, or is a link: Windows passes the
+	// new permissions on to everything below (rule 2). Nothing is set then.
+	p.fs.sddl[helper] = sddlDataDir + "(A;OICI;0x1200a9;;;BU)"
+	planted := p.put(t, "helper/sub/x", sddlPlantedFile, "x")
+	p.fs.calls = nil
+	if err := f.ensure(helper, read); err == nil || !strings.Contains(err.Error(), planted) || !strings.Contains(err.Error(), "setup-self-update") || len(p.fs.calls) != 0 {
+		t.Fatal(err, p.fs.calls)
+	}
+	_ = os.Remove(planted)
+	if err := os.Symlink(p.root, planted); err != nil {
+		t.Skip(err)
+	}
+	if err := f.ensure(helper, read); err == nil || !strings.Contains(err.Error(), "is a link") || len(p.fs.calls) != 0 {
+		t.Fatal(err, p.fs.calls)
+	}
+	_ = os.RemoveAll(filepath.Dir(planted))
+	p.fs.sddl[helper] = sddlDataDir
+	// update\ that the agent's account may still write (0.4.2), with the agent's stage folder below it. Typed
+	// by an administrator this is refused: the agent's account is someone else, and install /
+	// setup-self-update move such an update\ aside as a whole (TestUpdateFolderOf042IsReplaced).
+	upd := filepath.Join(p.dir, "update")
+	p.fs.calls, p.fs.sddl[upd] = nil, sddlAgentDir
+	if err := f.ensure(upd, read); err == nil || !strings.Contains(err.Error(), "setup-self-update") || len(p.fs.calls) != 0 {
+		t.Fatal(err, p.fs.calls)
+	}
+	// Inside the agent itself, moving its own service to the low-rights account (it still is LocalSystem, and
+	// the agent's account is nobody else), it is corrected in place as before.
+	self := folders{fs: p.fs, hint: repairHint, agentIsSelf: true}
+	p.fs.agentIsSelf = true
+	if err := self.ensure(upd, read); err != nil || strings.Join(p.fs.calls, ",") != "secure "+upd {
+		t.Fatal(err, p.fs.calls)
+	}
+	p.fs.agentIsSelf = false
 	// someone else's: refused, with the way out, and nothing written
 	for name, s := range map[string]string{
 		"owned by a user":        sddlUserMadeDir,
@@ -933,80 +1046,30 @@ func TestRewriteFile(t *testing.T) {
 	}
 }
 
-// The walk is bounded: a folder stuffed with files or nested without end stops the installer with a message.
+// The walk is bounded. Where only administrators can change things, folders nested without end stop the
+// installer with a message. In one of the agent's own folders they cannot do that (the agent's account could
+// make every installer run fail): the folder is replaced as a whole.
 func TestRepairLimits(t *testing.T) {
+	deep := func(top string) string {
+		for i := 0; i < repairMaxDepth+2; i++ {
+			top += "/d"
+		}
+		return top + "/"
+	}
 	p := newPC(t)
 	p.installed(t)
-	deep := "logs"
-	for i := 0; i < repairMaxDepth+2; i++ {
-		deep += "/d"
-	}
-	p.put(t, deep+"/", "", "")
+	p.put(t, deep("helper"), sddlDataDir, "")
 	if _, err := repairDataDir(p.fs, p.cfgPath, tSvc); err == nil || !strings.Contains(err.Error(), "nested too deep") {
 		t.Fatal(err)
 	}
+	p = newPC(t)
+	p.installed(t)
+	p.put(t, deep("logs"), "", "")
+	rep, err := repairDataDir(p.fs, p.cfgPath, tSvc)
+	if err != nil || len(rep.Zones) != 1 || rep.Zones[0] != "logs" || !strings.Contains(strings.Join(rep.Notes, "\n"), "nested more than") {
+		t.Fatal(err, rep.Zones, rep.Notes)
+	}
 	if collect.TrustedOwner(tUser) { // the fixtures' user is an ordinary one
 		t.Fatal("fixture")
-	}
-}
-
-// L2: before a folder's permissions are set (Windows passes them on to what is inside), every link below it is
-// removed, without entering one: nothing a link points to can be reached by the change. The compromised agent
-// account can create links in its own folders (logs\, state\, update\stage\) at any time.
-func TestLinksAreRemovedBeforePermissionsAreSet(t *testing.T) {
-	p := newPC(t)
-	p.installed(t)
-	program := filepath.Join(p.root, "Program Files", "Fairy")
-	if err := os.MkdirAll(program, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	_ = os.WriteFile(filepath.Join(program, "fairy-agent.exe"), []byte("MZ"), 0o644)
-	p.fs.sddl[program] = sddlProgramFiles
-	state := filepath.Join(p.dir, "state")
-	_ = os.MkdirAll(filepath.Join(state, "a", "b"), 0o755)
-	p.fs.sddl[filepath.Join(state, "a")] = sddlAgentFile // folders the agent's account made
-	p.fs.sddl[filepath.Join(state, "a", "b")] = sddlAgentFile
-	links := []string{filepath.Join(state, "junction"), filepath.Join(state, "a", "b", "deep")}
-	for _, l := range links {
-		if err := os.Symlink(program, l); err != nil {
-			t.Skip("no symbolic links here:", err)
-		}
-	}
-	// state\ needs its permissions set (here: it belongs to the agent's account)
-	p.fs.sddl[state] = strings.Replace(sddlAgentDir, "O:BA", "O:"+tSvc, 1)
-	var notes []string
-	f := folders{fs: p.fs, note: func(format string, a ...any) { notes = append(notes, format) }}
-	if err := f.ensure(state, folderSpec{tSvc, true}); err != nil {
-		t.Fatal(err)
-	}
-	want := []string{"remove " + links[1], "remove " + links[0], "secure " + state}
-	if strings.Join(p.fs.calls, "\n") != strings.Join(want, "\n") {
-		t.Fatalf("calls:\n%s\nwant:\n%s", strings.Join(p.fs.calls, "\n"), strings.Join(want, "\n"))
-	}
-	if len(notes) != 2 {
-		t.Fatalf("the removed links were not reported: %v", notes)
-	}
-	// what the links pointed to: untouched, content and permissions
-	if b, _ := os.ReadFile(filepath.Join(program, "fairy-agent.exe")); string(b) != "MZ" || p.fs.sddl[program] != sddlProgramFiles {
-		t.Fatal("the program folder was touched through a link")
-	}
-	if ents, _ := os.ReadDir(program); len(ents) != 1 {
-		t.Fatalf("something was put into the program folder: %v", ents)
-	}
-
-	// a folder that already has its permissions is not written to at all, link inside or not (the install /
-	// setup-self-update walk removes that link; see TestPlantedThingsInAKeptFolder)
-	p.fs.calls = nil
-	_ = os.Symlink(program, links[0])
-	if err := f.ensure(state, folderSpec{tSvc, true}); err != nil || len(p.fs.calls) != 0 {
-		t.Fatal(err, p.fs.calls)
-	}
-
-	// another --config folder: a link inside stops the change instead of being removed
-	p.fs.calls = nil
-	p.fs.sddl[state] = strings.Replace(sddlAgentDir, "O:BA", "O:"+tSvc, 1)
-	err := folders{fs: p.fs, keepLinks: true}.ensure(state, folderSpec{tSvc, true})
-	if err == nil || !strings.Contains(err.Error(), "is a link") || len(p.fs.calls) != 0 {
-		t.Fatal(err, p.fs.calls)
 	}
 }

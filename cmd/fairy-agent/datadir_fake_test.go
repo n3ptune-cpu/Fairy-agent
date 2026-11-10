@@ -183,10 +183,17 @@ const (
 	sddlHandRead = "O:BAD:AI(A;;0x1200a9;;;" + tUser + ")(A;ID;FA;;;SY)(A;ID;FA;;;BA)(A;ID;0x1200a9;;;" + tSvc + ")"
 )
 
+// defaultDirSDDL: a folder that is not in the table inherits everything from a healthy data folder.
+const defaultDirSDDL = "O:BAD:AI(A;OICIID;FA;;;SY)(A;OICIID;FA;;;BA)(A;OICIID;0x1200a9;;;" + tSvc + ")"
+
 // fakeFS is a dataFS over a real temporary folder. What exists, listing, renaming and removing are the real
 // file system's; owner and permissions come from the table sddl (path -> SDDL), with the "everything
 // inherited from a healthy data folder" lists for paths that are not in it. A symbolic link stands for any
 // link (junction, symbolic link).
+//
+// It also watches the two rules of datadir.go on every call that changes something, and fails the test when
+// one is broken (guard): nothing is changed by a name that leads through one of the agent's own folders, and
+// a folder's permissions are set only while nothing below it is a link or could be changed by someone else.
 type fakeFS struct {
 	t     testing.TB
 	sddl  map[string]string
@@ -194,9 +201,14 @@ type fakeFS struct {
 	// mkdirIgnoresSecurity: the create call does not apply the security it is given; the new folder gets what
 	// it would inherit under C:\ProgramData (the case makeFolder must cope with)
 	mkdirIgnoresSecurity bool
-	asideErr             error
-	calls                []string // every call that changes something
+	moveErr              error
+	calls                []string    // every call that changes something
+	moves                [][2]string // from, to
 	elevations           int
+	// dataDir, when set, is the data folder the two rules are watched for (newPC sets it)
+	dataDir string
+	// agentIsSelf: the test plays the agent's own self-migration (folders.agentIsSelf)
+	agentIsSelf bool
 }
 
 func newFakeFS(t testing.TB) *fakeFS {
@@ -225,7 +237,7 @@ func (f *fakeFS) Stat(path string) (secObj, error) {
 	if !ok {
 		s = sddlDataFile
 		if st.IsDir() {
-			s = "O:BAD:AI(A;OICIID;FA;;;SY)(A;OICIID;FA;;;BA)(A;OICIID;0x1200a9;;;" + tSvc + ")"
+			s = defaultDirSDDL
 		}
 	}
 	o := parseSDDL(f.t, s)
@@ -249,6 +261,7 @@ func (f *fakeFS) List(dir string) ([]string, error) {
 }
 
 func (f *fakeFS) Mkdir(path, sddl string) error {
+	f.guard("mkdir", path)
 	if err := os.Mkdir(path, 0o700); err != nil {
 		return err
 	}
@@ -268,6 +281,7 @@ func (f *fakeFS) Secure(path, sddl string) error {
 	if st.Mode()&os.ModeSymlink != 0 {
 		return fmt.Errorf("%s is a link", path)
 	}
+	f.guard("secure", path)
 	if !strings.HasPrefix(sddl, "O:") { // only the permissions: the owner stays
 		o, _ := f.Stat(path)
 		sddl = "O:" + o.Owner + sddl
@@ -277,28 +291,104 @@ func (f *fakeFS) Secure(path, sddl string) error {
 	return nil
 }
 
-func (f *fakeFS) Aside(path string) (string, error) {
-	if f.asideErr != nil {
-		return "", f.asideErr
+func (f *fakeFS) Move(from, to string) error {
+	if f.moveErr != nil {
+		return f.moveErr
 	}
-	to := path + asideMark + "20270101-000000"
-	for i := 2; ; i++ {
-		if _, err := os.Lstat(to); errors.Is(err, os.ErrNotExist) {
-			break
+	f.guard("move", from)
+	f.guard("move", to)
+	if _, err := os.Lstat(to); !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("%s exists", to)
+	}
+	if err := os.Rename(from, to); err != nil {
+		return err
+	}
+	f.log("move", from)
+	f.moves = append(f.moves, [2]string{from, to})
+	for _, m := range []map[string]string{f.sddl} { // owners and permissions move with the objects
+		for p, s := range m {
+			if p == from || strings.HasPrefix(p, from+string(filepath.Separator)) {
+				delete(m, p)
+				m[to+strings.TrimPrefix(p, from)] = s
+			}
 		}
-		to = fmt.Sprintf("%s%s20270101-000000-%d", path, asideMark, i)
 	}
-	if err := os.Rename(path, to); err != nil {
-		return "", err
-	}
-	f.log("aside", path)
-	for p, s := range f.sddl { // owners and permissions move with the objects
-		if p == path || strings.HasPrefix(p, path+string(filepath.Separator)) {
-			delete(f.sddl, p)
-			f.sddl[to+strings.TrimPrefix(p, path)] = s
+	for p, n := range f.links {
+		if p == from || strings.HasPrefix(p, from+string(filepath.Separator)) {
+			delete(f.links, p)
+			f.links[to+strings.TrimPrefix(p, from)] = n
 		}
 	}
-	return to, nil
+	return nil
+}
+
+func (f *fakeFS) Stamp() string { return "20270101-000000" }
+
+func (f *fakeFS) SetOwner(path string) error {
+	st, err := os.Lstat(path)
+	if err != nil {
+		return err
+	}
+	if st.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("%s is a link", path)
+	}
+	f.guard("setowner", path)
+	s, ok := f.sddl[path]
+	if !ok {
+		s = sddlDataFile
+		if st.IsDir() {
+			s = defaultDirSDDL
+		}
+	}
+	rest := s // everything after the owner part
+	if strings.HasPrefix(s, "O:") {
+		i := len(s)
+		for _, tag := range []string{"G:", "D:"} {
+			if j := strings.Index(s[2:], tag); j >= 0 && j+2 < i {
+				i = j + 2
+			}
+		}
+		rest = s[i:]
+	}
+	f.log("setowner", path)
+	f.sddl[path] = "O:BA" + rest
+	return nil
+}
+
+// guard watches the two rules (see fakeFS) for one changing call.
+func (f *fakeFS) guard(op, path string) {
+	if f.dataDir == "" {
+		return
+	}
+	f.t.Helper()
+	rel := relOf(f.dataDir, path)
+	if agentZone, zoneRoot := zoneOf(rel); agentZone && !zoneRoot {
+		f.t.Errorf("rule 1 broken: %s %s changes something by a name that leads through one of the agent's own folders", op, path)
+	}
+	// what was moved aside is never changed either, except by being put there
+	if first, more, ok := strings.Cut(rel, "/"); ok && isAsideDir(first) && strings.Contains(more, "/") {
+		f.t.Errorf("%s %s changes something inside what was moved aside", op, path)
+	}
+	if op != "secure" {
+		return
+	}
+	if st, err := os.Lstat(path); err != nil || !st.IsDir() {
+		return
+	}
+	_ = filepath.WalkDir(path, func(p string, d os.DirEntry, err error) error {
+		if err != nil || p == path {
+			return nil
+		}
+		o, err := f.Stat(p)
+		if err != nil {
+			return nil
+		}
+		if lv, why := judge(o, o.Dir, false, false, tSvc); lv == lvForeign || (lv == lvAgent && !f.agentIsSelf) {
+			f.t.Errorf("rule 2 broken: the permissions of %s are set (Windows passes them on) while %s %s", path, p, why)
+			return filepath.SkipAll
+		}
+		return nil
+	})
 }
 
 func (f *fakeFS) Remove(path string) error {
@@ -309,11 +399,13 @@ func (f *fakeFS) Remove(path string) error {
 	if st.Mode()&os.ModeSymlink == 0 {
 		return fmt.Errorf("%s is not a link", path)
 	}
+	f.guard("remove", path)
 	f.log("remove", path)
 	return os.Remove(path)
 }
 
 func (f *fakeFS) Rewrite(path string) error {
+	f.guard("rewrite", path)
 	if err := rewriteFile(path); err != nil {
 		return err
 	}
@@ -341,6 +433,7 @@ func newPC(t testing.TB) *pc {
 	root := t.TempDir()
 	p := &pc{fs: newFakeFS(t), root: root, pd: filepath.Join(root, "ProgramData")}
 	p.dir = filepath.Join(p.pd, "fairy-agent")
+	p.fs.dataDir = p.dir
 	p.cfgPath = filepath.Join(p.dir, "config.yaml")
 	if err := os.Mkdir(p.pd, 0o755); err != nil {
 		t.Fatal(err)
@@ -430,7 +523,9 @@ func (m memFS) Stat(path string) (secObj, error) {
 func (memFS) List(string) ([]string, error) { panic("read-only") }
 func (memFS) Mkdir(string, string) error    { panic("read-only") }
 func (memFS) Secure(string, string) error   { panic("read-only") }
-func (memFS) Aside(string) (string, error)  { panic("read-only") }
+func (memFS) SetOwner(string) error         { panic("read-only") }
+func (memFS) Move(string, string) error     { panic("read-only") }
+func (memFS) Stamp() string                 { panic("read-only") }
 func (memFS) Remove(string) error           { panic("read-only") }
 func (memFS) Rewrite(string) error          { panic("read-only") }
 func (memFS) Elevate() func()               { panic("read-only") }

@@ -284,8 +284,14 @@ func (o *winMigrationOps) Step(ctx context.Context, step string) error {
 	case migrate.StepFolders:
 		// permissions of the folder, logs\ and helper\, on the opened folders. Nothing is moved or replaced
 		// here (that is install / setup-self-update, run by an administrator): this runs inside the agent.
+		// The agent itself is LocalSystem at this point, so what its own account can change below a folder is
+		// nobody else's (agentIsSelf): an update\ that 0.4.2 left writable for the service is corrected in place.
+		agentIsSelf = true
+		defer func() { agentIsSelf = false }()
 		return ensureFolders(o.cfgPath, "", "logs", "helper")
 	case migrate.StepUpdater:
+		agentIsSelf = true
+		defer func() { agentIsSelf = false }()
 		return setupSelfUpdate(o.cfgPath)
 	case migrate.StepFans:
 		if o.fans == nil {

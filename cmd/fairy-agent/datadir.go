@@ -23,8 +23,20 @@ package main
 //     config.yaml (adminDataDirTrusted).
 //   - folders.ensure: one of Fairy's own folders exists as a plain folder with its permissions.
 //   - repairDataDir: `install` and `setup-self-update` (an administrator). What cannot be trusted is never
-//     adopted: it is moved aside (name.untrusted-<time>) and made anew; links are removed.
-
+//     adopted: it is moved aside and made anew; links are removed.
+//
+// Two rules hold for everything here that changes something (they are what closes the audit's L2 for good):
+//
+//  1. Nothing is ever changed inside a folder the agent's own account can write (logs\, state\,
+//     update\stage\). A path through such a folder is not a fixed thing: the agent's account can turn a folder
+//     there into a junction between the moment a name is looked at and the moment it is used, and an
+//     administrator's change would then land somewhere else on the disk. Such a folder is only looked at. When
+//     something in it is not as it should be, the whole folder is moved away by its name in the folder above
+//     (which only administrators can change) and a new, empty one is made in its place.
+//  2. Windows passes a folder's new permissions on to everything below it. So a folder's permissions are set
+//     only while nothing below it can be changed by anyone but administrators: the agent's folders below are
+//     moved out for that moment and put back afterwards, and what was moved aside does not stay below either.
+//
 import (
 	"errors"
 	"fmt"
@@ -44,7 +56,14 @@ const (
 	sidLocalService = "S-1-5-19" // the agent's account before 0.5: files it made in the agent's folders remain
 
 	dataFolderName = "fairy-agent"
-	asideMark      = ".untrusted-"
+	// asideMark is in the name of everything moved aside. A data folder that cannot be trusted as a whole
+	// becomes fairy-agent.untrusted-<UTC time> next to itself; single things inside a data folder that is kept
+	// go into <data folder>\untrusted-<UTC time>\ (asideDir + the time).
+	asideMark = ".untrusted-"
+	asideDir  = "untrusted-"
+	// parkMark is in the name the agent's folders have, next to the data folder, for the moment the
+	// permissions of the folder above them are set.
+	parkMark = ".parked-"
 )
 
 // secObj is what the checks need of one file or folder, read from the object itself (never through a link).
@@ -253,6 +272,15 @@ next:
 	return true
 }
 
+// ownerOnly reports whether a folder differs from the spec in its owner alone.
+func (s folderSpec) ownerOnly(o secObj) bool {
+	if o.Owner == sidAdmins {
+		return false
+	}
+	o.Owner = sidAdmins
+	return s.matches(o)
+}
+
 // dataFolders are Fairy's own folders in the data folder, in the order they are made.
 var dataFolders = []struct {
 	rel   string
@@ -282,10 +310,18 @@ type dataFS interface {
 	List(dir string) ([]string, error)
 	// Mkdir creates one folder with its final security in the same call (os.ErrExist when it exists).
 	Mkdir(path, sddl string) error
-	// Secure sets owner and permissions on the opened object; it refuses a link.
+	// Secure sets owner and permissions on the opened object; it refuses a link. For a folder Windows passes
+	// the permissions on to everything below it, so the caller first makes sure that nothing below can be
+	// changed by anyone but administrators (folders.secure does).
 	Secure(path, sddl string) error
-	// Aside renames an object to <name>.untrusted-<time> next to it and returns the new path.
-	Aside(path string) (string, error)
+	// SetOwner makes Administrators the owner of the opened object and changes nothing else: nothing is passed
+	// on to what is inside. It refuses a link.
+	SetOwner(path string) error
+	// Move renames an object as it is (a link as the link, a folder with everything in it) to a name that
+	// does not exist yet, on the same drive. Both names are in folders only administrators can change.
+	Move(from, to string) error
+	// Stamp is the time that goes into the names of things moved aside (UTC, yyyymmdd-hhmmss).
+	Stamp() string
 	// Remove deletes a link (the link, not what it points to).
 	Remove(path string) error
 	// Rewrite replaces a file by a new one with the same content, which takes its permissions from the folder.
@@ -449,9 +485,15 @@ func checkDataDir(fs dataFS, cfgPath, agentSID string, alsoDirs ...string) error
 // folders does the folder work of this file on one file system.
 type folders struct {
 	fs dataFS
-	// keepLinks: a link found inside a folder whose permissions are about to be set is an error instead of
-	// being removed (a --config folder that is not Fairy's own).
+	// keepLinks: a link found in a folder is an error instead of being removed (a --config folder that is not
+	// Fairy's own).
 	keepLinks bool
+	// agentIsSelf: this process is the agent itself, still running as LocalSystem and moving its own service
+	// to the low-rights account (the self-migration from 0.4). The agent's account is then nobody else: what
+	// only it can change below a folder does not keep that folder's permissions from being set.
+	agentIsSelf bool
+	// hint is added to a refusal: what to run to have the folder repaired ("" inside the repair itself).
+	hint string
 	// note is told what was changed besides permissions (may be nil).
 	note func(format string, a ...any)
 }
@@ -463,10 +505,10 @@ func (f folders) say(format string, a ...any) {
 }
 
 // ensure makes sure one of Fairy's folders exists as a plain folder with its security. A folder that is
-// missing is created with it in the same call; an existing one must not be a link, a file, or controlled by
+// missing is created with it in the same call. An existing one must not be a link, a file, or controlled by
 // someone other than administrators and the agent's account (then it is refused: only install /
-// setup-self-update replace such a folder), and gets owner and permissions set on the opened folder when
-// they differ. The folder above must exist.
+// setup-self-update replace such a folder). What differs is corrected on the opened folder, as far as the two
+// rules at the top of this file allow (settle). The folder above must exist.
 func (f folders) ensure(path string, spec folderSpec) error {
 	o, err := f.fs.Stat(path)
 	if errors.Is(err, os.ErrNotExist) {
@@ -478,10 +520,7 @@ func (f folders) ensure(path string, spec folderSpec) error {
 	if lv, why := judge(o, true, spec.write, true, spec.agentSID); lv == lvForeign {
 		return fmt.Errorf("%s %s%s", path, why, repairHint)
 	}
-	if spec.matches(o) {
-		return nil
-	}
-	return f.secure(path, spec)
+	return f.settle(path, spec, o, false)
 }
 
 // make creates a folder with its final security, then looks at the result: whatever the create call did with
@@ -501,19 +540,57 @@ func (f folders) make(path string, spec folderSpec) error {
 			return fmt.Errorf("%s appeared while this was running and %s: run this again", path, why)
 		}
 	}
-	if spec.matches(o) {
+	return f.settle(path, spec, o, made)
+}
+
+// settle brings an existing folder of Fairy's own (o is what it looks like; it is not someone else's) to its
+// spec. fresh: this call created it a moment ago.
+//
+//   - Only the owner differs: Administrators become the owner on the opened folder. Nothing is passed on.
+//   - The permissions differ, and it is one of the agent's own folders: refused. Windows would pass the new
+//     permissions on to everything inside, where the agent's account can put a link at any moment (rule 1).
+//     install / setup-self-update replace such a folder as a whole. A folder made a moment ago is still empty
+//     and gets them.
+//   - The permissions differ on a folder only administrators change: set on the opened folder, after a look
+//     that nothing below it could be changed by someone else (secure, rule 2).
+func (f folders) settle(path string, spec folderSpec, o secObj, fresh bool) error {
+	switch {
+	case spec.matches(o):
 		return nil
+	case spec.ownerOnly(o):
+		return f.own(path, spec)
+	case spec.write && !fresh:
+		return fmt.Errorf("%s does not have the permissions of one of fairy-agent's own folders, and they are not set in place "+
+			"(Windows would pass them on to everything inside, where the agent's own account can put links)%s", path, repairHint)
 	}
 	return f.secure(path, spec)
 }
 
-// secure sets the spec on the opened folder and checks the result. Before that, every link (junction,
-// symbolic link) below the folder is removed, without ever entering one: Windows passes a folder's new
-// permissions on to what is inside, and nothing a link points to may be reached that way.
+// own makes Administrators the owner of a folder whose permissions already are as they should be. Only the
+// owner is set, on the opened folder: nothing is passed on to what is inside.
+func (f folders) own(path string, spec folderSpec) error {
+	if err := f.fs.SetOwner(path); err != nil {
+		return fmt.Errorf("making Administrators the owner of %s: %w", path, err)
+	}
+	o, err := f.fs.Stat(path)
+	if err != nil {
+		return fmt.Errorf("%s: cannot read its permissions: %w", path, err)
+	}
+	if !spec.matches(o) {
+		return fmt.Errorf("%s is still not as it should be after Administrators were made its owner%s", path, f.hint)
+	}
+	return nil
+}
+
+// secure sets the spec on the opened folder and checks the result. Windows passes a folder's permissions on to
+// everything below it, and nothing a link points to, and nothing someone else could swap for a link, may be
+// reached that way. So first comes a look at everything below (it changes nothing): a link, or anything
+// someone other than administrators owns or may change, and nothing is set. The repair moves such things out
+// of the way before it comes here; everyone else gets the refusal with the way out.
 func (f folders) secure(path string, spec folderSpec) error {
 	var seen int
-	if err := f.unlink(path, 0, &seen); err != nil {
-		return err
+	if why := f.below(path, spec.agentSID, 0, &seen); why != "" {
+		return fmt.Errorf("%s needs its permissions set, which Windows passes on to everything inside, and %s. Nothing was changed%s", path, why, f.hint)
 	}
 	if err := f.fs.Secure(path, spec.sddl()); err != nil {
 		return fmt.Errorf("setting the permissions of %s: %w", path, err)
@@ -528,18 +605,21 @@ func (f folders) secure(path string, spec folderSpec) error {
 	return nil
 }
 
-// unlink removes every link below folder d (see secure).
-func (f folders) unlink(d string, depth int, seen *int) error {
+// below looks for anything under folder d that is a link, or that someone other than administrators owns or
+// may change: "" when there is nothing of the kind. It only reads. With agentIsSelf the agent's own account is
+// not "someone other".
+func (f folders) below(d, agentSID string, depth int, seen *int) string {
 	if depth > repairMaxDepth {
-		return fmt.Errorf("%s: folders nested too deep; delete what does not belong there and run this again", d)
+		return fmt.Sprintf("%s holds folders nested more than %d deep", d, repairMaxDepth)
 	}
 	names, err := f.fs.List(d)
 	if err != nil {
-		return fmt.Errorf("%s: cannot list it: %w", d, err)
+		return fmt.Sprintf("%s cannot be listed (%v)", d, err)
 	}
+	sort.Strings(names)
 	for _, name := range names {
 		if *seen++; *seen > repairMaxEntries {
-			return fmt.Errorf("%s holds more than %d files: delete what does not belong there and run this again", d, repairMaxEntries)
+			return fmt.Sprintf("%s holds more than %d files", d, repairMaxEntries)
 		}
 		p := filepath.Join(d, name)
 		o, err := f.fs.Stat(p)
@@ -547,23 +627,22 @@ func (f folders) unlink(d string, depth int, seen *int) error {
 			continue
 		}
 		if err != nil {
-			return fmt.Errorf("%s: cannot read its permissions: %w", p, err)
+			return fmt.Sprintf("%s cannot be looked at (%v)", p, err)
 		}
-		switch {
-		case o.Reparse:
-			if err := f.removeLink(p); err != nil {
-				return err
-			}
-		case o.Dir:
-			if err := f.unlink(p, depth+1, seen); err != nil {
-				return err
+		if lv, why := judge(o, o.Dir, false, false, agentSID); lv == lvForeign || (lv == lvAgent && !f.agentIsSelf) {
+			return p + " " + why
+		}
+		if o.Dir {
+			if why := f.below(p, agentSID, depth+1, seen); why != "" {
+				return why
 			}
 		}
 	}
-	return nil
+	return ""
 }
 
-// removeLink removes one link (the link itself, never what it points to).
+// removeLink removes one link (the link itself, never what it points to). The folder it is in is one only
+// administrators can change, so the name stands for the same thing from the look to the removal.
 func (f folders) removeLink(p string) error {
 	if f.keepLinks {
 		return fmt.Errorf("%s is a link (a junction or symbolic link); this is not fairy-agent's standard data folder, so nothing in it is removed: "+
@@ -583,7 +662,8 @@ type dirReport struct {
 	ConfigAside bool            // config.yaml was moved aside
 	RootLeak    bool            // someone else could read the data folder (and with it the token files)
 	Leaked      map[string]bool // files someone else could read
-	Aside       []string        // what was moved aside
+	Aside       []string        // what was moved aside (where it is now)
+	Zones       []string        // the agent's own folders that were replaced by new, empty ones ("logs", "state", "update/stage")
 	Notes       []string        // what was found and done, one sentence each, for the administrator
 }
 
@@ -603,7 +683,11 @@ type dirRepair struct {
 	ours     bool // the folder is named fairy-agent: things in it may be moved aside
 	rep      *dirReport
 	seen     int
+	stamp    string // the time in the names of what this run moves
+	asideAt  string // <dir>\untrusted-<stamp>, once this run has made it
 }
+
+const stopServices = "stop the fairy-agent services (Stop-Service fairy-agent, fairy-agent-helper) or restart Windows, then run this again"
 
 // repairDataDir makes the data folder safe to use (as an administrator: install, setup-self-update).
 //
@@ -612,19 +696,22 @@ type dirRepair struct {
 //   - A data folder that someone else owns or can change is not adopted: it is moved aside as a whole
 //     (fairy-agent.untrusted-<time>) and a new one is made. Whoever prepared it may still hold it open, and
 //     an open handle keeps its rights whatever is set afterwards; a new folder has no such history.
-//   - Inside a folder that is kept, every file and folder is looked at: links are removed, what someone else
-//     (or, outside its own folders, the agent's account) owns or can change is moved aside, what someone else
-//     could only read is rewritten as a new file (folders: permissions reset).
+//   - Inside a folder that is kept, everything that only administrators can change is gone through by name
+//     (closed): links are removed, what someone else (or, there, the agent's account) owns or can change is
+//     moved aside into <data folder>\untrusted-<time>\, what someone else could only read is rewritten as a
+//     new file, and a folder's permissions are reset where they differ.
+//   - The agent's own folders (logs\, state\, update\stage\) are not gone through that way: each is looked at
+//     and, when anything about it is not as it should be, moved aside as a whole and made anew (zone).
 //   - Fairy's own folders are created with their final permissions where they are missing.
 //
 // Only a folder named fairy-agent is repaired this way; with another --config folder it reports what is wrong
-// and changes nothing inside.
+// and moves nothing.
 func repairDataDir(fs dataFS, cfgPath, agentSID string) (dirReport, error) {
 	dir := filepath.Dir(cfgPath)
 	rep := dirReport{Leaked: map[string]bool{}}
 	ours := strings.EqualFold(filepath.Base(dir), dataFolderName)
 	w := &dirRepair{folders: folders{fs: fs, keepLinks: !ours, note: rep.note}, dir: dir, cfgPath: cfgPath,
-		agentSID: agentSID, rep: &rep, ours: ours}
+		agentSID: agentSID, rep: &rep, ours: ours, stamp: fs.Stamp()}
 	if err := checkAncestors(fs, dir); err != nil {
 		return rep, fmt.Errorf("the folders above %s are not safe to build on: %w", dir, err)
 	}
@@ -640,14 +727,15 @@ func repairDataDir(fs dataFS, cfgPath, agentSID string) (dirReport, error) {
 	case err != nil:
 		return rep, fmt.Errorf("%s: cannot read its permissions: %w", dir, err)
 	default:
-		lv, why := judge(o, true, false, false, agentSID)
-		switch {
-		case lv >= lvAgent:
+		if lv, why := judge(o, true, false, false, agentSID); lv >= lvAgent {
 			if !w.ours {
 				return rep, fmt.Errorf("%s %s. It is not the standard data folder (...\\%s), so it is not replaced: "+
 					"make it a folder only administrators can change, or leave out --config", dir, why, dataFolderName)
 			}
-			to, err := fs.Aside(dir)
+			to, err := w.free(dir + asideMark + w.stamp)
+			if err == nil {
+				err = fs.Move(dir, to)
+			}
 			if err != nil {
 				return rep, fmt.Errorf("%s %s, and it could not be moved out of the way (%w). Something keeps it open: "+
 					"stop the fairy-agent services (Stop-Service fairy-agent, fairy-agent-helper) or restart Windows, "+
@@ -659,21 +747,21 @@ func repairDataDir(fs dataFS, cfgPath, agentSID string) (dirReport, error) {
 			if err := w.make(dir, root); err != nil {
 				return rep, err
 			}
-		case lv == lvLeak:
-			if err := w.secure(dir, root); err != nil {
-				return rep, err
-			}
-			rep.RootLeak = true
-			rep.note("%s %s: its permissions were reset.", dir, why)
-		case !root.matches(o):
-			if err := w.secure(dir, root); err != nil {
-				return rep, err
-			}
 		}
 	}
-	// what is inside, also in a folder made a moment ago (something may have been put there meanwhile)
-	if err := w.walk(dir, "", 0); err != nil {
+	// What is inside, also in a folder made a moment ago (something may have been put there meanwhile). First
+	// everything only administrators can change, each folder's own permissions after what is below it and the
+	// data folder's last; then the agent's own folders, each as a whole.
+	if o, err = fs.Stat(dir); err != nil {
+		return rep, fmt.Errorf("%s: cannot read its permissions: %w", dir, err)
+	}
+	if err := w.closed(dir, "", 0, o); err != nil {
 		return rep, err
+	}
+	for _, z := range agentZones {
+		if err := w.zone(z); err != nil {
+			return rep, err
+		}
 	}
 	for _, f := range dataFolders {
 		p := filepath.Join(dir, filepath.FromSlash(f.rel))
@@ -689,15 +777,68 @@ func (w *dirRepair) refuseElsewhere(p, why string) error {
 		p, why, w.dir, dataFolderName)
 }
 
-// aside moves an object out of the way.
-func (w *dirRepair) aside(p, why string) error {
+// free returns base, or base-2, base-3 ..., whichever name does not exist yet.
+func (w *dirRepair) free(base string) (string, error) {
+	to := base
+	for i := 2; ; i++ {
+		if _, err := w.fs.Stat(to); errors.Is(err, os.ErrNotExist) {
+			return to, nil
+		}
+		if i > 50 {
+			return "", fmt.Errorf("no free name like %s", base)
+		}
+		to = fmt.Sprintf("%s-%d", base, i)
+	}
+}
+
+// moveAside moves one thing below the data folder (rel) into <data folder>\untrusted-<time>\, which this run
+// makes when it first needs it: a folder of its own that only administrators and SYSTEM can open. The thing is
+// renamed as it is, a link as the link and a folder with everything in it; nothing in it is opened.
+func (w *dirRepair) moveAside(p, rel string) (string, error) {
+	if w.asideAt == "" {
+		only := folderSpec{} // administrators and SYSTEM, nobody else
+		base := filepath.Join(w.dir, asideDir+w.stamp)
+		for i := 1; ; i++ {
+			name := base
+			if i > 1 {
+				name = fmt.Sprintf("%s-%d", base, i)
+			}
+			err := w.fs.Mkdir(name, only.sddl())
+			if errors.Is(err, os.ErrExist) && i < 50 {
+				continue
+			}
+			if err != nil {
+				return "", fmt.Errorf("creating %s: %w", name, err)
+			}
+			o, err := w.fs.Stat(name)
+			if err != nil {
+				return "", fmt.Errorf("%s: cannot read its permissions: %w", name, err)
+			}
+			if err := w.settle(name, only, o, true); err != nil {
+				return "", err
+			}
+			w.asideAt = name
+			break
+		}
+	}
+	to, err := w.free(filepath.Join(w.asideAt, strings.ReplaceAll(rel, "/", "-")))
+	if err != nil {
+		return "", err
+	}
+	if err := w.fs.Move(p, to); err != nil {
+		return "", err
+	}
+	return to, nil
+}
+
+// aside moves one thing in a folder only administrators can change out of the way.
+func (w *dirRepair) aside(p, rel, why string) error {
 	if !w.ours {
 		return w.refuseElsewhere(p, why)
 	}
-	to, err := w.fs.Aside(p)
+	to, err := w.moveAside(p, rel)
 	if err != nil {
-		return fmt.Errorf("%s %s, and it could not be moved aside (%w): stop the fairy-agent services "+
-			"(Stop-Service fairy-agent, fairy-agent-helper) or restart Windows, then run this again", p, why, err)
+		return fmt.Errorf("%s %s, and it could not be moved aside (%w): %s", p, why, err, stopServices)
 	}
 	w.rep.Aside = append(w.rep.Aside, to)
 	if strings.EqualFold(p, w.cfgPath) {
@@ -707,7 +848,17 @@ func (w *dirRepair) aside(p, why string) error {
 	return nil
 }
 
-func (w *dirRepair) walk(d, rel string, depth int) error {
+// isAsideDir: a folder an earlier run (or this one) moved things into, directly in the data folder. It is
+// never looked into again.
+func isAsideDir(rel string) bool {
+	return !strings.Contains(rel, "/") && strings.HasPrefix(strings.ToLower(rel), asideDir)
+}
+
+// closed deals with one folder that only administrators can change (o is what it looks like) and with
+// everything below it of the same kind. The agent's own folders are not entered here (zone deals with each as
+// a whole), and neither is what was moved aside. Things in the folder are dealt with by name; that is sound
+// exactly because nobody but administrators can change what a name in this folder stands for.
+func (w *dirRepair) closed(d, rel string, depth int, o secObj) error {
 	if depth > repairMaxDepth {
 		return fmt.Errorf("%s: folders nested too deep; delete what does not belong there and run this again", d)
 	}
@@ -717,17 +868,277 @@ func (w *dirRepair) walk(d, rel string, depth int) error {
 	}
 	sort.Strings(names)
 	type entry struct {
-		path, rel string
-		o         secObj
+		path, rel, why string
+		o              secObj
 	}
-	var entries []entry
-	// first the links: they are removed before anything else is touched in this folder
+	var subs, leaks []entry
 	for _, name := range names {
-		if strings.Contains(strings.ToLower(name), asideMark) {
-			continue // set aside earlier; nothing reads these
+		crel := name
+		if rel != "" {
+			crel = rel + "/" + name
+		}
+		if _, zoneRoot := zoneOf(crel); zoneRoot || isAsideDir(crel) {
+			continue
 		}
 		if w.seen++; w.seen > repairMaxEntries {
 			return fmt.Errorf("%s holds more than %d files: delete what does not belong there and run this again", w.dir, repairMaxEntries)
+		}
+		p := filepath.Join(d, name)
+		co, err := w.fs.Stat(p)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return fmt.Errorf("%s: cannot read its permissions: %w", p, err)
+		}
+		if co.Reparse {
+			if err := w.removeLink(p); err != nil {
+				return err
+			}
+			continue
+		}
+		wantDir := co.Dir
+		if _, known := knownFolder(crel, w.agentSID); known {
+			wantDir = true
+		} else if strings.EqualFold(p, w.cfgPath) || w.isTokenName(crel) {
+			wantDir = false
+		}
+		lv, why := judge(co, wantDir, false, false, w.agentSID)
+		switch {
+		case lv >= lvAgent:
+			// someone else, or the agent's account (which only reads here), owns it or may change it, or it is
+			// not the kind of thing that belongs under this name: not believed, moved aside as it is
+			if err := w.aside(p, crel, why); err != nil {
+				return err
+			}
+		case co.Dir:
+			subs = append(subs, entry{p, crel, why, co})
+		case lv == lvLeak:
+			leaks = append(leaks, entry{p, crel, why, co})
+		}
+	}
+	for _, s := range subs {
+		if err := w.closed(s.path, s.rel, depth+1, s.o); err != nil {
+			return err
+		}
+	}
+	// the folder's own permissions, now that nothing below it is left that someone else could change
+	if err := w.settleClosed(d, rel, o); err != nil {
+		return err
+	}
+	// files someone else could only read: the content is the administrator's, the file is made anew (after the
+	// folder has its permissions, which the new file takes)
+	for _, l := range leaks {
+		if !w.ours {
+			return w.refuseElsewhere(l.path, l.why)
+		}
+		if err := w.fs.Rewrite(l.path); err != nil {
+			if err := w.aside(l.path, l.rel, l.why+" (and could not be rewritten: "+err.Error()+")"); err != nil {
+				return err
+			}
+			continue
+		}
+		w.rep.Leaked[l.path] = true
+		w.rep.note("%s %s: it was written anew with the folder's permissions.", l.path, l.why)
+	}
+	return nil
+}
+
+// settleClosed gives a folder that only administrators can change its owner and permissions where they differ
+// (o is what it looked like; nobody else can change it, at most read it). Windows passes the permissions on to
+// everything below, so the agent's own folders below it, and what was moved aside, are moved out of the data
+// folder for that moment (park) and put back afterwards: nothing the agent's account can write is below the
+// folder while its permissions are set (rule 2 at the top of this file).
+func (w *dirRepair) settleClosed(d, rel string, o secObj) error {
+	spec, known := knownFolder(rel, w.agentSID)
+	if rel == "" {
+		spec, known = folderSpec{w.agentSID, false}, true
+	}
+	if !known {
+		spec = folderSpec{w.agentSID, false}
+	}
+	lv, why := judge(o, true, false, false, w.agentSID)
+	switch {
+	case lv == lvOK && (!known || spec.matches(o)):
+		return nil
+	case lv == lvOK && spec.ownerOnly(o):
+		return w.own(d, spec)
+	}
+	parked, err := w.park(d, rel)
+	if err != nil {
+		return err
+	}
+	err = w.secure(d, spec)
+	if uerr := w.unpark(parked); uerr != nil {
+		if err != nil {
+			return fmt.Errorf("%w; and %w", err, uerr)
+		}
+		return uerr
+	}
+	if err != nil {
+		return err
+	}
+	if lv != lvOK {
+		if rel == "" {
+			w.rep.RootLeak = true
+			w.rep.note("%s %s: its permissions were reset.", d, why)
+		} else {
+			w.rep.note("%s %s: owner and permissions were reset.", d, why)
+		}
+	}
+	return nil
+}
+
+type parkedDir struct{ from, to string }
+
+// park moves everything below folder d that the agent's account (or whoever owned what was moved aside) can
+// write out of the data folder, to names next to it: the agent's own folders below d and, for the data folder
+// itself, the untrusted-<time> folders. They are renamed as they are; nothing in them is opened.
+func (w *dirRepair) park(d, rel string) ([]parkedDir, error) {
+	var from []string
+	for _, z := range agentZones {
+		if rel == "" || strings.HasPrefix(z, strings.ToLower(rel)+"/") {
+			from = append(from, z)
+		}
+	}
+	if rel == "" {
+		names, err := w.fs.List(d)
+		if err != nil {
+			return nil, fmt.Errorf("%s: cannot list it: %w", d, err)
+		}
+		sort.Strings(names)
+		for _, name := range names {
+			if isAsideDir(name) {
+				from = append(from, name)
+			}
+		}
+	}
+	var out []parkedDir
+	for _, r := range from {
+		p := filepath.Join(w.dir, filepath.FromSlash(r))
+		if _, err := w.fs.Stat(p); errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		to, err := w.free(w.dir + parkMark + w.stamp + "-" + strings.ReplaceAll(r, "/", "-"))
+		if err == nil {
+			err = w.fs.Move(p, to)
+		}
+		if err != nil {
+			err = fmt.Errorf("the permissions of %s have to be set, which Windows passes on to everything inside; %s is moved out for that "+
+				"moment, and that failed (%w): %s", d, p, err, stopServices)
+			if uerr := w.unpark(out); uerr != nil {
+				err = fmt.Errorf("%w; and %w", err, uerr)
+			}
+			return nil, err
+		}
+		out = append(out, parkedDir{p, to})
+	}
+	return out, nil
+}
+
+// unpark puts back what park moved.
+func (w *dirRepair) unpark(parked []parkedDir) error {
+	var failed []string
+	for i := len(parked) - 1; i >= 0; i-- {
+		if err := w.fs.Move(parked[i].to, parked[i].from); err != nil {
+			failed = append(failed, fmt.Sprintf("%s could not be put back as %s (%v): move it back yourself (Move-Item), then run this again",
+				parked[i].to, parked[i].from, err))
+		}
+	}
+	if len(failed) > 0 {
+		return errors.New(strings.Join(failed, "; "))
+	}
+	return nil
+}
+
+// zone deals with one of the agent's own folders (logs\, state\, update\stage\) as a whole. Nothing inside it
+// is changed, by name or by what Windows passes on (rule 1 at the top of this file): the agent's account can
+// turn any folder in there into a junction between the look at a name and its use. The folder is looked at
+// (inside), and when it or anything in it is not as it should be, it is moved aside as it is, by its name in
+// the folder above, and a new, empty one is made with its permissions in the create call.
+//
+// The look itself can be led astray the same way; it only reads. The worst that follows from a wrong look is
+// that the folder is replaced although it was fine, or that it stays with a link in it, which nothing with
+// more rights than the agent's own account ever follows.
+func (w *dirRepair) zone(rel string) error {
+	p := filepath.Join(w.dir, filepath.FromSlash(rel))
+	spec := folderSpec{w.agentSID, true}
+	o, err := w.fs.Stat(p)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil // repairDataDir makes it, with its permissions
+	}
+	if err != nil {
+		return fmt.Errorf("%s: cannot read its permissions: %w", p, err)
+	}
+	why := ""
+	if lv, y := judge(o, true, true, true, w.agentSID); lv == lvForeign {
+		why = y
+	} else if !spec.matches(o) && !spec.ownerOnly(o) {
+		why = "does not have the permissions of the agent's own folders"
+		if lv != lvOK {
+			why += " (it " + y + ")"
+		}
+	} else {
+		var seen int
+		why = w.inside(p, 0, &seen)
+	}
+	if why == "" {
+		if spec.matches(o) {
+			return nil
+		}
+		// only the owner differs (the folder was made by the agent itself, or by an agent that ran as LocalSystem):
+		// set on the opened folder, nothing is passed on to what is inside
+		err := w.own(p, spec)
+		if err == nil {
+			w.rep.note("%s was owned by %s: Administrators were made its owner.", p, sidName(o.Owner))
+			return nil
+		}
+		why = "could not be given Administrators as its owner (" + err.Error() + ")"
+	}
+	if !w.ours {
+		return w.refuseElsewhere(p, why)
+	}
+	to, err := w.moveAside(p, rel)
+	if err != nil {
+		return fmt.Errorf("%s %s. Nothing inside one of the agent's own folders is changed in place; the folder is moved aside as a whole, "+
+			"and that failed (%w): %s", p, why, err, stopServices)
+	}
+	w.rep.Aside = append(w.rep.Aside, to)
+	w.rep.Zones = append(w.rep.Zones, rel)
+	w.rep.note("%s %s. Nothing inside one of the agent's own folders is changed in place, so the whole folder was moved: it is now %s "+
+		"(look at it, then delete it), and a new, empty %s was made. %s", p, why, to, p, zoneLoss(rel))
+	return w.make(p, spec)
+}
+
+// zoneLoss says what the owner is without after one of the agent's folders was replaced by an empty one.
+func zoneLoss(rel string) string {
+	switch strings.ToLower(rel) {
+	case "logs":
+		return "The agent starts a new log; the old log files are in the moved folder."
+	case "state":
+		return "The pairing state went with it: a join code that was waiting no longer works, and the agent does not know the panel's " +
+			"address until the panel's Add host / Re-pair command is run on this PC again (with only_from_panel on, it refuses the panel until then). " +
+			"The tokens are not affected."
+	case "update/stage":
+		return "A downloaded update that was waiting to be installed went with it: press Update in the panel again."
+	}
+	return ""
+}
+
+// inside looks through one of the agent's own folders: "" when everything in it is something the agent's
+// account (or an administrator) made and nobody else can change or read. It only reads.
+func (w *dirRepair) inside(d string, depth int, seen *int) string {
+	if depth > repairMaxDepth {
+		return fmt.Sprintf("holds folders nested more than %d deep (%s)", repairMaxDepth, d)
+	}
+	names, err := w.fs.List(d)
+	if err != nil {
+		return fmt.Sprintf("cannot be looked through (%s: %v)", d, err)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		if *seen++; *seen > repairMaxEntries {
+			return fmt.Sprintf("holds more than %d files", repairMaxEntries)
 		}
 		p := filepath.Join(d, name)
 		o, err := w.fs.Stat(p)
@@ -735,89 +1146,24 @@ func (w *dirRepair) walk(d, rel string, depth int) error {
 			continue
 		}
 		if err != nil {
-			return fmt.Errorf("%s: cannot read its permissions: %w", p, err)
+			return fmt.Sprintf("holds %s, which cannot be looked at (%v)", p, err)
 		}
-		if o.Reparse {
-			if err := w.removeLink(p); err != nil {
-				return err
+		if lv, why := judge(o, o.Dir, true, false, w.agentSID); lv != lvOK {
+			return fmt.Sprintf("holds %s, which %s", p, why)
+		}
+		if o.Dir {
+			if why := w.inside(p, depth+1, seen); why != "" {
+				return why
 			}
-			continue
-		}
-		crel := name
-		if rel != "" {
-			crel = rel + "/" + name
-		}
-		entries = append(entries, entry{p, crel, o})
-	}
-	for _, e := range entries {
-		agentZone, zoneRoot := zoneOf(e.rel)
-		spec, known := knownFolder(e.rel, w.agentSID)
-		wantDir := e.o.Dir
-		switch {
-		case known:
-			wantDir = true
-		case strings.EqualFold(e.path, w.cfgPath), w.isTokenName(e.rel):
-			wantDir = false
-		}
-		lv, why := judge(e.o, wantDir, agentZone, zoneRoot, w.agentSID)
-		if !e.o.Dir || !wantDir {
-			if err := w.file(e.path, agentZone, lv, why); err != nil {
-				return err
-			}
-			continue
-		}
-		// a folder. One of the agent's folders that the agent's account owns is taken over in place; anything
-		// else that is not trusted is moved aside (Fairy's own folders are made anew afterwards).
-		if lv == lvForeign || (lv == lvAgent && !(agentZone && zoneRoot)) {
-			if err := w.aside(e.path, why); err != nil {
-				return err
-			}
-			continue
-		}
-		if !known {
-			spec = folderSpec{w.agentSID, agentZone}
-		}
-		if lv != lvOK || (known && !spec.matches(e.o)) {
-			if err := w.secure(e.path, spec); err != nil {
-				return err
-			}
-			if lv != lvOK {
-				w.rep.note("%s %s: owner and permissions were reset.", e.path, why)
-			}
-		}
-		if err := w.walk(e.path, e.rel, depth+1); err != nil {
-			return err
 		}
 	}
-	return nil
+	return ""
 }
 
 // isTokenName: the default token files, which must be files.
 func (w *dirRepair) isTokenName(rel string) bool {
 	r := strings.ToLower(rel)
 	return r == "token" || r == "control-token"
-}
-
-// file handles one file (or something that sits where a file belongs).
-func (w *dirRepair) file(p string, agentZone bool, lv level, why string) error {
-	switch {
-	case lv == lvOK:
-		return nil
-	case agentZone || lv >= lvAgent:
-		// in the agent's folders nothing is worth keeping that someone else had a hand in (logs, a download,
-		// the pairing state); elsewhere what someone else could change is not believed
-		return w.aside(p, why)
-	}
-	// only readable by someone else: the content is the administrator's, the file is made anew
-	if !w.ours {
-		return w.refuseElsewhere(p, why)
-	}
-	if err := w.fs.Rewrite(p); err != nil {
-		return w.aside(p, why+" (and could not be rewritten: "+err.Error()+")")
-	}
-	w.rep.Leaked[p] = true
-	w.rep.note("%s %s: it was written anew with the folder's permissions.", p, why)
-	return nil
 }
 
 // fillDataDir puts what belongs into a data folder that repairDataDir prepared: a starter config.yaml when
