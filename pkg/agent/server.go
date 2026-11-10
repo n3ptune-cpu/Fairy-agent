@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"reflect"
 	"runtime"
 	"slices"
 	"sort"
@@ -21,6 +22,7 @@ import (
 
 	"github.com/n3ptune-cpu/Fairy-agent/pkg/agent/api"
 	"github.com/n3ptune-cpu/Fairy-agent/pkg/agent/collect"
+	"github.com/n3ptune-cpu/Fairy-agent/pkg/devices"
 	"github.com/n3ptune-cpu/Fairy-agent/pkg/enroll"
 	"github.com/n3ptune-cpu/Fairy-agent/pkg/redact"
 )
@@ -457,16 +459,25 @@ func (a *Agent) Metrics(ctx context.Context) map[string]any {
 	}
 	if a.d.GPU != nil {
 		var sum float64
-		has := false
+		has, bad := false, false
 		for _, g := range a.d.GPU.GPUs() {
+			// a GPU reader's number that cannot be a reading (NaN, an infinity, beyond devices.MaxMagnitude,
+			// negative watts) becomes unknown in the card's row; the row itself stays
+			reported := g.PowerW != nil
+			g.UtilPercent, g.TempC = devices.Num(g.UtilPercent), devices.Num(g.TempC)
+			g.PowerW = devices.NumIn(g.PowerW, 0, devices.MaxMagnitude)
 			gpus = append(gpus, g)
 			if g.PowerW != nil {
 				sum += *g.PowerW
 				has = true
+			} else if reported {
+				bad = true
 			}
 		}
-		if has {
-			pw.GPUW = collect.P(collect.Round(sum, 1))
+		// one card with impossible watts makes the total unknown (not "the sum of the rest"), and possible
+		// numbers can still add up to an impossible one
+		if sum = collect.Round(sum, 1); has && !bad && devices.Finite(sum) {
+			pw.GPUW = collect.P(sum)
 			pw.Source = append(pw.Source, "gpu")
 		}
 	}
@@ -604,15 +615,77 @@ func orEmpty[T any](s []T) []T {
 	return s
 }
 
+// DroppedSectionsKey is the one key GET /metrics gains when a part of the answer could not be written as JSON:
+// the names of the top-level sections that were shortened (a list without its unwritable entries) or replaced
+// by null. It is absent from every ordinary answer.
+const DroppedSectionsKey = "dropped_sections"
+
+// encodeMetrics writes the /metrics answer. encoding/json refuses a whole document for one value it cannot
+// write (NaN, an infinity), which used to turn one bad sensor into a 500 for the whole machine. When the
+// answer cannot be written in one piece, each top-level section is written on its own: a list of rows (sensors,
+// cards, disks) keeps the rows that can be written, any other section that cannot be written becomes null,
+// and DroppedSectionsKey names them. Every key of the ordinary answer is still there. body is nil only if
+// even that fails.
+func encodeMetrics(m map[string]any) (body []byte, dropped []string) {
+	if b, err := json.Marshal(m); err == nil {
+		return b, nil
+	}
+	out := make(map[string]json.RawMessage, len(m)+1)
+	for k, v := range m {
+		b, err := json.Marshal(v)
+		if err != nil {
+			b = writableEntries(v)
+			dropped = append(dropped, k)
+		}
+		out[k] = b
+	}
+	slices.Sort(dropped)
+	names, _ := json.Marshal(dropped)
+	out[DroppedSectionsKey] = names
+	b, err := json.Marshal(out)
+	if err != nil {
+		return nil, dropped
+	}
+	return b, dropped
+}
+
+// writableEntries is the JSON of a list of rows without the rows that cannot be written; null for anything
+// else. A list of plain values (load_avg: 1, 5 and 15 minutes) is not shortened: there the place of a value is
+// its meaning, so it is all or nothing.
+func writableEntries(v any) json.RawMessage {
+	rv := reflect.ValueOf(v)
+	if rv.Kind() != reflect.Slice && rv.Kind() != reflect.Array {
+		return json.RawMessage("null")
+	}
+	if k := rv.Type().Elem().Kind(); k != reflect.Struct && k != reflect.Map {
+		return json.RawMessage("null")
+	}
+	keep := make([]json.RawMessage, 0, rv.Len())
+	for i := 0; i < rv.Len(); i++ {
+		if b, err := json.Marshal(rv.Index(i).Interface()); err == nil {
+			keep = append(keep, b)
+		}
+	}
+	b, err := json.Marshal(keep)
+	if err != nil {
+		return json.RawMessage("null")
+	}
+	return b
+}
+
 // metrics serves GET /metrics (computed at most every 250 ms, however many panels ask).
 func (a *Agent) metrics(w http.ResponseWriter, r *http.Request) {
 	a.cacheMu.Lock()
 	defer a.cacheMu.Unlock()
 	if a.cache == nil || time.Since(a.cacheAt) > 250*time.Millisecond {
-		b, err := json.Marshal(a.Metrics(r.Context()))
-		if err != nil {
+		b, dropped := encodeMetrics(a.Metrics(r.Context()))
+		if b == nil {
 			writeJSON(w, 500, map[string]any{"error": "internal error"})
 			return
+		}
+		if len(dropped) > 0 {
+			a.logOnce("metrics-dropped", "metrics: a section could not be written as JSON (a reading that is not a number?); "+
+				"it was left out or shortened", "sections", strings.Join(dropped, ","))
 		}
 		a.cache, a.cacheAt = b, time.Now()
 	}
