@@ -52,7 +52,7 @@ dubious ownership", run the `git config --global --add safe.directory ...` line 
 
 ### 1.2 Make the key
 
-Go must be installed on the PC (`go version` shows 1.27.3 or newer).
+Go must be installed on the PC (`go version` shows 1.27.4 or newer).
 
 ```powershell
 cd E:\Projects\Fairy-agent

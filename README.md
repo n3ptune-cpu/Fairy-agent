@@ -25,7 +25,7 @@ here (`github.com/n3ptune-cpu/Fairy-agent/pkg/...`), so there is one copy of the
 
 ## Build
 
-Go 1.27.3 or newer. Releases are built with Go 1.27.3: the workflows take the Go version from the `go` line
+Go 1.27.4 or newer. Releases are built with Go 1.27.4: the workflows take the Go version from the `go` line
 in `go.mod`. One static binary per platform, no runtime dependencies:
 
 ```sh
@@ -43,11 +43,11 @@ TCP, which Go otherwise switches on for listeners on Linux. `go version -m fairy
 `DefaultGODEBUG=multipathtcp=0`. The line does not reach programs that only import the packages:
 Fairy-dashboard needs the same line in its own `go.mod`.
 
-**For maintainers: the next Go patch release.** When Go 1.27.4 is published:
+**For maintainers: the next Go patch release.** When Go 1.27.5 is published:
 
-1. Check that it can be downloaded: `GOTOOLCHAIN=go1.27.4 go version` prints `go version go1.27.4 ...`. While
+1. Check that it can be downloaded: `GOTOOLCHAIN=go1.27.5 go version` prints `go version go1.27.5 ...`. While
    it is not published, the command ends with `toolchain not available`.
-2. Set `go 1.27.4` in this repository's `go.mod` first. Fairy-dashboard depends on this module, so its own
+2. Set `go 1.27.5` in this repository's `go.mod` first. Fairy-dashboard depends on this module, so its own
    `go.mod` must then say at least the same.
 3. Run the checks: `go build ./... && go vet ./... && GOOS=windows go vet ./... && go test ./... -race`, and
    the two cross-builds `GOOS=windows GOARCH=amd64 go build ./...` and `GOOS=linux GOARCH=arm64 go build ./...`.
