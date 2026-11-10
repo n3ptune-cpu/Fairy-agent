@@ -84,7 +84,9 @@ while [ $# -gt 0 ]; do
   shift
 done
 
-# The join code: standard input, the environment, or (older panels) the command line. Never printed.
+# The join code: standard input, the environment, or (older panels, deprecated) the command line. It is never
+# printed and never written anywhere by this script: no message shows an argument, nothing is traced, and
+# fairy-agent join gets it on standard input.
 if [ "$CODE_STDIN" -eq 1 ]; then
   [ "$CODE_ARG" -eq 0 ] || die "--join and --join-stdin cannot be used together"
   if [ -t 0 ]; then printf '%s' "fairy: paste the join code from the panel and press Enter: " >&2; fi
@@ -94,8 +96,8 @@ elif [ "$CODE_ARG" -eq 0 ]; then
 fi
 unset FAIRY_JOIN_CODE # not for the programs this script starts
 if [ "$CODE_ARG" -eq 1 ]; then
-  say "note: the join code was given on the command line (--join), where other users of this machine can read it"
-  say "      while this runs. Newer panels pass it on standard input (--join-stdin)."
+  # one line, on standard error, and never the code itself
+  printf '%s\n' "fairy: warning: --join CODE on the command line is deprecated and will stop working in a later release: other users of this machine can read the code while this runs, and sudo's log and the shell history keep it. Use the command the panel shows now (--join-stdin)." >&2
 fi
 CODE="$(printf '%s' "$CODE" | tr -d '\r')"
 [ -n "$CODE" ] && [ -n "$PANEL" ] ||

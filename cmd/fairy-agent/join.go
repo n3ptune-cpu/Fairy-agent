@@ -33,8 +33,11 @@ import (
 //     v2.go), its expiry and the panel's address in the pairing state,
 //
 // and prints no secret. The running agent then answers the panel's POST /pair once (see pkg/agent/pairing.go).
-// The join code comes from standard input (--code-stdin), from FAIRY_JOIN_CODE, or from --code (older commands;
-// a command line can be read by every local user while the program runs).
+// The join code comes from standard input (--code-stdin), from FAIRY_JOIN_CODE, or from --code. --code is
+// deprecated: a command line can be read by every local user while the program runs, and sudo's log and the
+// shell history keep it. It is still accepted, with one line of warning, because the install scripts of
+// releases up to 0.5.x pass it; it goes when no supported panel names such a release any more.
+// Nothing join prints shows the code, whichever way it came and however the command was mistyped.
 
 type joinOpts struct {
 	code, panel, cfgPath, stateDir, upsName string
@@ -49,6 +52,27 @@ var upsNameRe = regexp.MustCompile(`^[A-Za-z0-9_.-]{1,64}$`)
 
 // joinCodeEnv carries the join code when it is neither on standard input nor on the command line.
 const joinCodeEnv = "FAIRY_JOIN_CODE"
+
+// codeOnArgvWarning is the one line join prints on standard error when the code came with --code.
+const codeOnArgvWarning = "fairy-agent join: warning: --code on the command line is deprecated and will be removed in a later " +
+	"release (other users of this machine can read the code while this runs): use --code-stdin or " + joinCodeEnv
+
+// joinCodeLike matches a join code in any spelling (32 letters and digits 2-7, with or without dashes).
+var joinCodeLike = regexp.MustCompile(`[A-Za-z2-7]{4}(?:-?[A-Za-z2-7]{4}){7}`)
+
+// hideCode takes anything that looks like a join code out of a message: a mistyped command can put the code
+// where an error message would repeat it (an unknown option, a value in the wrong place).
+func hideCode(s string) string { return joinCodeLike.ReplaceAllString(s, "(not shown)") }
+
+// codeHider is a writer for the flag package's own messages.
+type codeHider struct{ w io.Writer }
+
+func (h codeHider) Write(p []byte) (int, error) {
+	if _, err := io.WriteString(h.w, hideCode(string(p))); err != nil {
+		return 0, err
+	}
+	return len(p), nil
+}
 
 // joinStdin is where --code-stdin reads the join code (tests replace it).
 var joinStdin io.Reader = os.Stdin
@@ -71,8 +95,8 @@ func parseJoin(args []string, stderr io.Writer) (joinOpts, error) {
 	var o joinOpts
 	var codeStdin bool
 	fs := flag.NewFlagSet("join", flag.ContinueOnError)
-	fs.SetOutput(stderr)
-	fs.StringVar(&o.code, "code", "", "the join code shown by the panel's Add host dialog (visible to other local users while this runs: prefer --code-stdin)")
+	fs.SetOutput(codeHider{stderr})
+	fs.StringVar(&o.code, "code", "", "deprecated, will be removed: the join code on the command line (visible to other local users while this runs; use --code-stdin)")
 	fs.BoolVar(&codeStdin, "code-stdin", false, "read the join code from standard input (first line); without it and --code, from the environment variable "+joinCodeEnv)
 	fs.StringVar(&o.panel, "panel", "", "the panel's Tailscale IP address (only it may pair)")
 	fs.StringVar(&o.cfgPath, "config", agent.DefaultConfigPath(), "path of config.yaml")
@@ -90,7 +114,7 @@ func parseJoin(args []string, stderr io.Writer) (joinOpts, error) {
 		return o, err
 	}
 	if fs.NArg() > 0 {
-		return o, fmt.Errorf("unexpected %q", fs.Arg(0))
+		return o, fmt.Errorf("unexpected %q", hideCode(fs.Arg(0)))
 	}
 	switch {
 	case codeStdin && o.code != "":
@@ -102,6 +126,8 @@ func parseJoin(args []string, stderr io.Writer) (joinOpts, error) {
 		}
 	case o.code == "":
 		o.code = os.Getenv(joinCodeEnv)
+	default:
+		fmt.Fprintln(stderr, codeOnArgvWarning)
 	}
 	_ = os.Unsetenv(joinCodeEnv) // not for the programs join starts (pvesh)
 	if o.code == "" || o.panel == "" {
@@ -133,7 +159,7 @@ func joinCmd(args []string, stdout, stderr io.Writer) int {
 	o, err := parseJoin(args, stderr)
 	if err != nil {
 		if !errors.Is(err, flag.ErrHelp) {
-			fmt.Fprintln(stderr, "fairy-agent join:", err)
+			fmt.Fprintln(stderr, "fairy-agent join:", hideCode(err.Error()))
 		}
 		return 2
 	}
