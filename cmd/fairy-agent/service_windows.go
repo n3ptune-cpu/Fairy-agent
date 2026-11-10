@@ -118,12 +118,28 @@ func runService() int {
 	return 0
 }
 
+// updaterExitUntrusted is the updater service's exit code when it refused to run because the data folder
+// cannot be trusted (the reason is in the Event Log, source fairy-agent).
+const updaterExitUntrusted = 3
+
 // updaterHandler is the fairy-agent-update service: it installs what the agent staged (applyUpdateCtx) and
 // stops. The agent's own account may only start it; start parameters are ignored.
 type updaterHandler struct{ cfgPath string }
 
 func (h updaterHandler) Execute(_ []string, req <-chan svc.ChangeRequest, status chan<- svc.Status) (bool, uint32) {
 	status <- svc.Status{State: svc.StartPending}
+	// This service is LocalSystem and is started by the agent's low-rights account. Before it reads config.yaml
+	// (which names the token file it would read and the address it would send the token to) or opens its log
+	// in update\, the data folder must be one only administrators and SYSTEM can change. If it is not, nothing
+	// is opened or written there: the reason goes to the Windows Event Log and the service stops.
+	if err := trustedDataDir(h.cfgPath, "update"); err != nil {
+		if el, e := eventlog.Open(serviceName); e == nil {
+			_ = el.Error(1, "fairy-agent-update did nothing: "+err.Error())
+			el.Close()
+		}
+		status <- svc.Status{State: svc.StopPending}
+		return true, updaterExitUntrusted
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	done := make(chan int, 1)
@@ -152,20 +168,6 @@ func (h updaterHandler) Execute(_ []string, req <-chan svc.ChangeRequest, status
 			return false, 0
 		}
 	}
-}
-
-// applyACL replaces a folder's permissions (inherited by everything inside) with the given SDDL DACL.
-func applyACL(path, sddl string) error {
-	sd, err := windows.SecurityDescriptorFromString(sddl)
-	if err != nil {
-		return err
-	}
-	dacl, _, err := sd.DACL()
-	if err != nil {
-		return err
-	}
-	return windows.SetNamedSecurityInfo(path, windows.SE_FILE_OBJECT,
-		windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION, nil, nil, dacl, nil)
 }
 
 const windowsStarter = `# fairy-agent configuration (see AGENT.md). Restart the service after a change:
@@ -202,19 +204,6 @@ self_update:
 `
 
 func starterConfig() string { return strings.ReplaceAll(windowsStarter, "\n", "\r\n") }
-
-func writeIfMissing(path string, data []byte) (bool, error) {
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
-	if errors.Is(err, os.ErrExist) {
-		return false, nil
-	}
-	if err != nil {
-		return false, err
-	}
-	defer f.Close()
-	_, err = f.Write(data)
-	return true, err
-}
 
 // agentAccount is the agent's virtual service account: no password, cannot sign in, only its own rights.
 const agentAccount = `NT SERVICE\` + serviceName
@@ -266,29 +255,11 @@ func install(cfgPath, account string, withHelper bool) error {
 		return fmt.Errorf("service installed, but: %w", err)
 	}
 	_ = eventlog.InstallAsEventCreate(serviceName, eventlog.Error|eventlog.Warning|eventlog.Info)
-	dir := filepath.Dir(cfgPath)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return err
-	}
+	// The data folder: created with its final permissions, or, when something is already there, checked file
+	// by file and repaired (setupFolders). A starter config.yaml and the tokens are written when missing;
+	// existing ones are kept unless they could not be trusted.
 	if err := setupFolders(cfgPath); err != nil {
 		return err
-	}
-	if created, err := writeIfMissing(cfgPath, []byte(starterConfig())); err != nil {
-		return err
-	} else if created {
-		fmt.Println("wrote a starter", cfgPath)
-	}
-	for _, name := range []string{"token", "control-token"} {
-		tok, err := newToken()
-		if err != nil {
-			return err
-		}
-		p := filepath.Join(dir, name)
-		if created, err := writeIfMissing(p, []byte(tok+"\r\n")); err != nil {
-			return err
-		} else if created {
-			fmt.Println("created", p)
-		}
 	}
 	if err := setup(cfgPath, withHelper, false); err != nil {
 		fmt.Println("warning:", err)
@@ -370,47 +341,25 @@ func migrateAgentAccount(s *mgr.Service) (bool, error) {
 	return changed, nil
 }
 
-// setupFolders sets the permissions of C:\ProgramData\fairy-agent (idempotent): the folder (config.yaml,
-// token, control-token): administrators and SYSTEM full control, the agent's account read-only; logs\: the agent
-// may write; helper\ (the helper's audit log): the agent may only read.
+// setupFolders makes C:\ProgramData\fairy-agent safe to use and complete (as Administrator: install and
+// setup-self-update; safe to run again). See repairDataDir and fillDataDir in datadir.go:
+//   - the folder (config.yaml, token, control-token): administrators and SYSTEM full control, the agent's
+//     account read-only, owner Administrators; logs\, state\ and update\stage\: the agent may write; helper\
+//     and update\: the agent may only read. A folder that is missing is created with these permissions in the
+//     same call.
+//   - what already exists is not taken on trust: every file and folder must be a plain one owned by
+//     Administrators or SYSTEM that nobody else can change. What is not is moved aside (never used), links
+//     are removed, and what was done is printed.
+//   - a starter config.yaml and the two tokens are written when they are missing. Existing ones are kept, so
+//     a healthy PC stays paired; only when another account could have read or changed them are new tokens
+//     written (and the PC must be paired again).
 func setupFolders(cfgPath string) error {
-	sid, _, _, err := windows.LookupSID("", agentAccount)
-	if err != nil {
-		return fmt.Errorf("the service account %s was not found (is the service installed?): %w", agentAccount, err)
-	}
-	dir := filepath.Dir(cfgPath)
-	logs := filepath.Join(dir, "logs")
-	hdir := filepath.Join(dir, "helper")
-	for _, d := range []string{logs, hdir} {
-		if err := os.MkdirAll(d, 0o700); err != nil {
-			return err
-		}
-	}
-	for _, d := range []string{dir, logs, hdir} {
-		if st, err := os.Lstat(d); err != nil || !st.IsDir() || isReparse(st) {
-			return fmt.Errorf("%s is not a plain folder: remove it and run this again", d)
-		}
-	}
-	read := "D:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;" + sid.String() + ")"
-	if err := applyACL(dir, read); err != nil {
-		return fmt.Errorf("folder permissions: %w", err)
-	}
-	if err := applyACL(logs, "D:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1301bf;;;"+sid.String()+")"); err != nil {
-		return fmt.Errorf("log folder permissions: %w", err)
-	}
-	if err := applyACL(hdir, read); err != nil {
-		return fmt.Errorf("helper folder permissions: %w", err)
-	}
-	admins, err := windows.CreateWellKnownSid(windows.WinBuiltinAdministratorsSid)
-	if err != nil {
-		return err
-	}
-	// the helper (LocalSystem) writes in hdir only if an administrator owns it (collect.TrustedFolder)
-	if err := windows.SetNamedSecurityInfo(hdir, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION, admins, nil, nil, nil); err != nil {
-		return fmt.Errorf("helper folder owner: %w", err)
-	}
-	return nil
+	return repairDataFolder(cfgPath, os.Stdout)
 }
+
+// applyACL replaces the permissions of one file or folder with the given SDDL DACL (and its owner, when the
+// SDDL names one), on the object opened itself: a link is refused, never followed.
+func applyACL(path, sddl string) error { return winFS{}.Secure(path, sddl) }
 
 // grantACE adds (or widens) one allow entry for sid to an object's DACL, keeping everything else (inherited
 // entries included). Running it again changes nothing.
@@ -522,6 +471,7 @@ func enablePrivilege(name string) error {
 // administrators / SYSTEM - typically the service's own Modify entry from fairy-agent 0.4.2 after an update
 // through the panel - it removes the service's entry when it may (running as LocalSystem), else it says how to.
 func checkProgramFolder() {
+	checkDataFolder()
 	exe, err := os.Executable()
 	if err != nil {
 		return
@@ -538,6 +488,22 @@ func checkProgramFolder() {
 	}
 	err = collect.TrustedExecutable(exe)
 	slog.Warn("the fairy-agent program can be changed by others than administrators; fix it "+agent.UpdaterSetupHint, "problem", err.Error())
+}
+
+// checkDataFolder runs when the agent starts: it only looks (the agent's account can read the folder's owner
+// and permissions) and warns when config.yaml or its folder could be changed by someone other than
+// administrators and SYSTEM. The agent goes on running with what it has; the updater and the helper, which
+// are LocalSystem, refuse such a folder until an administrator has repaired it.
+func checkDataFolder() {
+	err := trustedDataDir(configArg())
+	switch {
+	case err == nil:
+	case errors.Is(err, os.ErrPermission):
+		// this account may not read some owner or permission list: that says nothing about the folder
+		slog.Info("the data folder's permissions could not be looked at with the agent's own rights", "detail", err.Error())
+	default:
+		slog.Warn("the agent's data folder is not safe: self-update and the helper will not work until it is repaired", "problem", err.Error())
+	}
 }
 
 // setupSelfUpdate sets up self-update, idempotently (as Administrator: install and install-fairy-agent.ps1 run it):
@@ -566,22 +532,11 @@ func setupSelfUpdate(cfgPath string) error {
 	}
 	upd := filepath.Join(filepath.Dir(cfgPath), "update")
 	stage := filepath.Join(upd, "stage")
-	if err := os.MkdirAll(stage, 0o700); err != nil {
-		return err
-	}
-	for _, d := range []string{upd, stage} {
-		if st, err := os.Lstat(d); err != nil || !st.IsDir() || st.Mode()&os.ModeSymlink != 0 || isReparse(st) {
-			return fmt.Errorf("%s is not a plain folder: remove it and run this again", d)
-		}
-	}
-	if err := applyACL(upd, "D:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;"+sid.String()+")"); err != nil {
-		return fmt.Errorf("update folder %s: %w", upd, err)
-	}
-	if err := applyACL(stage, "D:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1301bf;;;"+sid.String()+")"); err != nil {
-		return fmt.Errorf("stage folder %s: %w", stage, err)
-	}
-	if err := prepareStateDir(filepath.Join(filepath.Dir(cfgPath), "state")); err != nil { // pairing (Add host)
-		return fmt.Errorf("state folder: %w", err)
+	// update\ (the agent reads), update\stage\ and state\ (the agent writes; state\ holds the pairing): made
+	// with their permissions when missing; an existing one is opened itself, must be a plain folder, and gets
+	// owner Administrators and its permissions on that handle
+	if err := ensureFolders(cfgPath, "update", "update/stage", "state"); err != nil {
+		return fmt.Errorf("update and state folders: %w", err)
 	}
 	m, err := mgr.Connect()
 	if err != nil {
@@ -645,11 +600,6 @@ func revokeServiceSID(h windows.Handle, sid *windows.SID) error {
 		return err
 	}
 	return windows.SetSecurityInfo(h, windows.SE_SERVICE, windows.DACL_SECURITY_INFORMATION, nil, nil, acl, nil)
-}
-
-func isReparse(st os.FileInfo) bool {
-	d, ok := st.Sys().(*syscall.Win32FileAttributeData)
-	return ok && d.FileAttributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0
 }
 
 func uninstall() error {

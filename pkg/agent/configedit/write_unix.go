@@ -19,7 +19,8 @@ func copyAttrs(tmp *os.File, path string, st os.FileInfo) error {
 	return copyXattrs(tmp, path)
 }
 
-func sameSecurity(string, string) bool { return true } // copyAttrs made them equal
+// checkOld: nothing to check here (the config folder belongs to root).
+func checkOld(string) error { return nil }
 
 func syncDir(dir string) {
 	if d, err := os.Open(dir); err == nil {

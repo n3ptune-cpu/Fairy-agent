@@ -8,9 +8,13 @@ import (
 
 // WriteFile replaces an existing config.yaml with data in one step: a new file next to it gets the old file's
 // owner, permissions and (Linux) SELinux label / ACL, is flushed to disk, then renamed over the old one, so a
-// crash leaves either the old or the new file, never half of one. On Windows the new file inherits the folder's
-// permissions; when the old file's owner or access list differ from that (someone changed them by hand), the
-// file is rewritten in place instead, which keeps them exactly.
+// crash leaves either the old or the new file, never half of one.
+//
+// The old file is never written to. On Windows the new file takes the folder's permissions and belongs to
+// whoever runs this (an administrator); owner and permissions someone set on the old file by hand are not
+// carried over. Until 0.5.3 such a file was rewritten in place to keep them, which also kept a file that
+// another account had prepared, with that account still its owner. Such a file is now refused (checkOld):
+// replacing it would hand its content, which someone else wrote, on to a file administrators own.
 func WriteFile(path string, data []byte) error {
 	st, err := os.Stat(path)
 	if err != nil {
@@ -18,6 +22,9 @@ func WriteFile(path string, data []byte) error {
 	}
 	if !st.Mode().IsRegular() {
 		return fmt.Errorf("%s is not a regular file", path)
+	}
+	if err := checkOld(path); err != nil {
+		return err
 	}
 	tmp, err := os.CreateTemp(filepath.Dir(path), ".config.yaml.new-*")
 	if err != nil {
@@ -40,28 +47,9 @@ func WriteFile(path string, data []byte) error {
 	if err := tmp.Close(); err != nil {
 		return err
 	}
-	if !sameSecurity(name, path) {
-		return writeInPlace(path, data)
-	}
 	if err := os.Rename(name, path); err != nil {
 		return err
 	}
 	syncDir(filepath.Dir(path))
 	return nil
-}
-
-func writeInPlace(path string, data []byte) error {
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_TRUNC, 0)
-	if err != nil {
-		return err
-	}
-	if _, err := f.Write(data); err != nil {
-		f.Close()
-		return err
-	}
-	if err := f.Sync(); err != nil {
-		f.Close()
-		return err
-	}
-	return f.Close()
 }

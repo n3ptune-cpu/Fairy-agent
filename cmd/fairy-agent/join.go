@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 	"time"
 
@@ -24,7 +25,9 @@ import (
 // `fairy-agent join`: the machine side of the panel's "Add host", run by install.sh / install.ps1 (root /
 // Administrator) after the service is installed. It
 //   - writes a starter config.yaml when it is missing, and NEW read / control tokens every time (a Re-pair
-//     replaces the old ones, which stop working when the agent restarts: whoever had them loses access),
+//     replaces the old ones, which stop working when the agent restarts: whoever had them loses access). On
+//     Windows it first checks that config.yaml and its folder can only be changed by administrators and SYSTEM
+//     (datadir.go) and writes the tokens only into that folder,
 //   - switches on the features the panel's dialog asked for, through the same checked edit as `config set`,
 //   - stores the join code's verifier (with --pair-v2: the pairing key made from the code, see pkg/enroll
 //     v2.go), its expiry and the panel's address in the pairing state,
@@ -150,6 +153,12 @@ func join(o joinOpts, out io.Writer) error {
 	if st, err := os.Stat(dir); err != nil || !st.IsDir() {
 		return fmt.Errorf("%s does not exist: install the agent first (install.sh / install.ps1 do)", dir)
 	}
+	// Windows: nothing is written before the folder, config.yaml and the token files are known to be
+	// changeable by administrators and SYSTEM only. A config.yaml someone else prepared would otherwise decide
+	// where the new tokens go and which features are on.
+	if err := dataDirTrusted(o.cfgPath); err != nil {
+		return err
+	}
 	created, err := writeNew(o.cfgPath, []byte(starterConfig()))
 	if err != nil {
 		return err
@@ -160,6 +169,16 @@ func join(o joinOpts, out io.Writer) error {
 	tokFile, ctlFile := filepath.Join(dir, "token"), filepath.Join(dir, "control-token")
 	if c, err := agent.Load(o.cfgPath); err == nil {
 		tokFile, ctlFile = c.TokenFile, c.ControlTokenFile
+	}
+	if tokensInConfigDir {
+		// join runs as Administrator and replaces whatever is at these paths with a token file: only files in
+		// the config folder, never a path config.yaml points at elsewhere
+		for _, p := range []string{tokFile, ctlFile} {
+			if why := tokenPathProblem(dir, p, runtime.GOOS == "windows"); why != "" {
+				return fmt.Errorf("config.yaml names %s as a token file, which %s. join writes token files only in %s: "+
+					"take token_file / control_token_file out of config.yaml and run this again", p, why, dir)
+			}
+		}
 	}
 	for _, p := range []string{tokFile, ctlFile} {
 		tok, err := newToken()

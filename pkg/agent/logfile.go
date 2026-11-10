@@ -17,7 +17,10 @@ type LogFile struct {
 	size int64
 }
 
-// OpenLog opens (creating the folder) the log file.
+// OpenLog opens (creating the folder) the log file. On Windows the file is opened itself, never through a
+// link: a symbolic link, a junction or a file with a second name (hard link) under the log's name is refused
+// (openLogFile). The updater and the helper are LocalSystem and write their logs with this; a link there must
+// not make them write into a file somewhere else.
 func OpenLog(path string, maxBytes int64) (*LogFile, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
 		return nil, err
@@ -30,7 +33,7 @@ func OpenLog(path string, maxBytes int64) (*LogFile, error) {
 }
 
 func (l *LogFile) open() error {
-	f, err := os.OpenFile(l.Path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o640)
+	f, err := openLogFile(l.Path)
 	if err != nil {
 		return err
 	}

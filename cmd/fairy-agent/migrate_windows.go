@@ -50,34 +50,22 @@ func migrationCommand() string {
 
 // migrationStore is C:\ProgramData\fairy-agent\migration\state.json: written only by LocalSystem (the agent
 // before the switch, the updater service), read by anyone with the agent's rights; refused unless the folder
-// is administrators-only.
+// is administrators-only and the file itself is one only administrators and SYSTEM can change.
 func migrationStore(cfgPath string) *migrate.FileStore {
-	return &migrate.FileStore{Path: filepath.Join(filepath.Dir(cfgPath), "migration", "state.json"),
-		Prepare: secureMigrationDir, Check: collect.TrustedFolder}
+	path := filepath.Join(filepath.Dir(cfgPath), "migration", "state.json")
+	return &migrate.FileStore{Path: path, Prepare: secureMigrationDir, Check: func(dir string) error {
+		if err := collect.TrustedFolder(dir); err != nil {
+			return err
+		}
+		// the file too: one planted before the folder was locked keeps its own owner and permissions
+		return trustedFile(path)
+	}}
 }
 
 // secureMigrationDir: administrators and SYSTEM full control, the agent's account read-only, owner
-// Administrators, nothing inherited from above.
+// Administrators, nothing inherited from above; set on the opened folder, which must be a plain folder.
 func secureMigrationDir(dir string) error {
-	st, err := os.Lstat(dir)
-	if err != nil {
-		return err
-	}
-	if !st.IsDir() || isReparse(st) {
-		return fmt.Errorf("%s is not a plain folder", dir)
-	}
-	sddl := "D:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)"
-	if sid, _, _, err := windows.LookupSID("", agentAccount); err == nil {
-		sddl += "(A;OICI;0x1200a9;;;" + sid.String() + ")"
-	}
-	if err := applyACL(dir, sddl); err != nil {
-		return err
-	}
-	admins, err := windows.CreateWellKnownSid(windows.WinBuiltinAdministratorsSid)
-	if err != nil {
-		return err
-	}
-	if err := windows.SetNamedSecurityInfo(dir, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION, admins, nil, nil, nil); err != nil {
+	if err := winFolders().ensure(dir, folderSpec{agentSIDString(), false}); err != nil {
 		return err
 	}
 	return collect.TrustedFolder(dir)
@@ -294,7 +282,9 @@ func (o *winMigrationOps) Step(ctx context.Context, step string) error {
 		}
 		return collect.TrustedExecutable(exe)
 	case migrate.StepFolders:
-		return setupFolders(o.cfgPath)
+		// permissions of the folder, logs\ and helper\, on the opened folders. Nothing is moved or replaced
+		// here (that is install / setup-self-update, run by an administrator): this runs inside the agent.
+		return ensureFolders(o.cfgPath, "", "logs", "helper")
 	case migrate.StepUpdater:
 		return setupSelfUpdate(o.cfgPath)
 	case migrate.StepFans:
@@ -659,6 +649,14 @@ func (w winSupervisor) Finish(context.Context) error {
 // the agent's service was switched and not yet checked, it restarts and checks the agent (or rolls back) and
 // installs nothing. handled false: no migration to finish, go on with the update.
 func superviseMigration(ctx context.Context, cfg *agent.Config, cfgPath string) (bool, int) {
+	// apply-update acts on config.yaml (the token file it names is read and sent to the address it names, to
+	// check the restarted agent) and writes in update\: both must be changeable by administrators and SYSTEM
+	// only. The updater service checked this before it opened anything; this covers apply-update run by hand.
+	if err := trustedDataDir(cfgPath, "update"); err != nil {
+		slog.Error("apply-update: not started", "error", err.Error())
+		fmt.Fprintln(os.Stderr, "fairy-agent apply-update:", err)
+		return true, 1
+	}
 	sup := &migrate.Supervisor{Store: migrationStore(cfgPath), Ops: winSupervisor{cfg: cfg}, Logf: migrationLogf}
 	handled, err := sup.Run(ctx)
 	if !handled {

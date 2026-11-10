@@ -45,9 +45,21 @@ func OpenAudit(cfg *agent.Config) (*slog.Logger, io.Closer, error) {
 	return slog.New(h), f, nil
 }
 
+// TrustedConfig, when set (cmd/fairy-agent sets it), must accept config.yaml's path before the helper serves
+// anything that file switches on: the helper is LocalSystem, and config.yaml decides whether it shuts the PC
+// down, drives the fans or starts the updater for the agent. It returns an error when config.yaml or its
+// folder could have been written by someone other than administrators and SYSTEM.
+var TrustedConfig func(cfgPath string) error
+
 // Run is the helper service: it serves the pipe until ctx ends, then hands the fans back to the BMC (within
 // 20 s) and returns. logErr reports problems the service manager should see (the Event Log).
 func Run(ctx context.Context, cfg *agent.Config, version string, logErr func(string)) error {
+	if TrustedConfig != nil {
+		if err := TrustedConfig(cfg.Path()); err != nil {
+			// nothing was opened or written yet; the caller reports the error to the Event Log
+			return fmt.Errorf("not serving anything: %w", err)
+		}
+	}
 	audit, closer, err := OpenAudit(cfg)
 	if err != nil {
 		logErr(err.Error())

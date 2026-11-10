@@ -212,13 +212,36 @@ func TestWriteFileKeepsPermissions(t *testing.T) {
 	if entries, _ := os.ReadDir(dir); len(entries) != 1 {
 		t.Fatal("temporary file left behind", entries)
 	}
-	if err := writeInPlace(p, []byte("a: 3\n")); err != nil {
-		t.Fatal(err)
-	}
-	if b, _ := os.ReadFile(p); string(b) != "a: 3\n" {
-		t.Fatal(string(b))
-	}
 	if err := WriteFile(filepath.Join(dir, "missing.yaml"), nil); err == nil {
 		t.Fatal("only existing files are replaced")
+	}
+}
+
+// H1: the old file is never written to; it is replaced by a new one. A second name of the old file (which
+// stands for "the file someone else prepared and still owns") keeps the old content, and the config's name
+// now belongs to a different file.
+func TestWriteFileNeverWritesInPlace(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(p, []byte("planted: 1\n"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	old := filepath.Join(t.TempDir(), "the-old-file")
+	if err := os.Link(p, old); err != nil {
+		t.Skip("no hard links here:", err)
+	}
+	before, _ := os.Stat(p)
+	if err := WriteFile(p, []byte("a: 2\n")); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(old); string(b) != "planted: 1\n" {
+		t.Fatalf("the old file was written in place: %q", b)
+	}
+	if b, _ := os.ReadFile(p); string(b) != "a: 2\n" {
+		t.Fatalf("%q", b)
+	}
+	after, _ := os.Stat(p)
+	if os.SameFile(before, after) {
+		t.Fatal("config.yaml is still the old file")
 	}
 }
