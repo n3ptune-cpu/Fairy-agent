@@ -310,6 +310,42 @@ func dialFrom(src, addr string) (net.Conn, error) {
 	return d.Dial("tcp", addr)
 }
 
+// The flood tests and Windows' ports.
+//
+// Every outgoing connection takes a local port. Windows has one pool of them for the whole PC, 16384 by
+// default (49152 to 65535, whatever the local address), and after a connection is closed the side that closed
+// first keeps its port for minutes (TIME_WAIT). On Linux a port is only taken for its own local address, and
+// for one minute, which is why the burst test gives every round an address of its own; that does not help on
+// Windows. The burst test alone opens some 35000 connections in 13 seconds on Linux, nearly all of them closed
+// by the client. On its first run on Windows the suite got through the flood tests and then failed twenty
+// tests that came after them, each at its first connection ("connectex: Only one usage of each socket address
+// (protocol/network address/port) is normally permitted"), with the test servers on ports at the very top of
+// that range. A run could do the same to every other program on the PC for some minutes.
+//
+// So on Windows these tests open fewer connections (floodPause, floodConns). Measured on Linux with the
+// Windows numbers: some 6300 in the whole package instead of 40000, and in the burst test, whose connections
+// are the ones the client closes, some 1300 instead of 35000. What the tests judge is the same: how many
+// connections are open at a time, who is refused and who waits, and that the panel's and this machine's
+// requests are answered throughout. Elsewhere nothing changes.
+const windowsPorts = runtime.GOOS == "windows"
+
+// floodConns is how many connections a flood of n opens: all of them, a third on Windows.
+func floodConns(n int) int {
+	if windowsPorts {
+		return n / 3
+	}
+	return n
+}
+
+// floodPause is the pause between two requests of one of the burst's senders: d, on Windows half a second
+// (the senders still all ask at the same moment, a few times in a round, instead of as often as they can).
+func floodPause(d time.Duration) time.Duration {
+	if windowsPorts {
+		return 500 * time.Millisecond
+	}
+	return d
+}
+
 func waitStats(t *testing.T, ln *LimitListener, ok func(ConnStats) bool) ConnStats {
 	t.Helper()
 	deadline := time.Now().Add(10 * time.Second)

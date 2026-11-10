@@ -332,10 +332,11 @@ func panelClient(t *testing.T, panel string) *http.Client {
 
 // Review N6, on the real server with the panel's own HTTP client. Viewers' Processes tabs (or one script with
 // a viewer's session) send process requests through the panel, 12, 24, 48 and 96 at a time and some 5000 a
-// second in all, while the panel polls /metrics as it does (here every 20 ms instead of every second, each
-// with the panel's 4 s limit) and an admin sends control requests. Not one poll and not one control request
-// may fail, and no connection of the panel may be refused. On b59a2d0 twelve at a time lost 44 to 47 of 60
-// polls on the real binary.
+// second in all (on Windows each sender pauses half a second between two requests, see floodPause: as many
+// at a time, fewer in all), while the panel polls /metrics as it does (here every 20 ms instead of every
+// second, each with the panel's 4 s limit) and an admin sends control requests. Not one poll and not one
+// control request may fail, and no connection of the panel may be refused. On b59a2d0 twelve at a time lost
+// 44 to 47 of 60 polls on the real binary.
 //
 // The last round, 144 at a time, is at the edge of what the agent takes (32 slots and 128 waiting): it is
 // run and reported, not judged. On a slow run a few of its connections find the waiting room full.
@@ -390,7 +391,7 @@ func TestPanelBurstNeverStarvesItsPolls(t *testing.T) {
 						default:
 							procFailed.Add(1)
 						}
-						time.Sleep(time.Duration(parallel) * 200 * time.Microsecond) // some 5000 requests a second in all
+						time.Sleep(floodPause(time.Duration(parallel) * 200 * time.Microsecond)) // some 5000 requests a second in all
 					}
 				}()
 			}
@@ -472,7 +473,8 @@ func TestConnFloodWithPanelBurst(t *testing.T) {
 		t.Skip("opens thousands of connections")
 	}
 	ln, addr := serveLimited(t, ConnLimits{})
-	const conns, senders, workers, panelConns = 3000, 300, 24, 400
+	const senders, workers, panelConns = 300, 24, 400
+	conns := floodConns(3000)
 
 	runtime.GC()
 	var before runtime.MemStats
