@@ -148,9 +148,7 @@ type Agent struct {
 	hasCtl  bool
 	control *limiter
 	badAuth *limiter
-	// healthLim: GET /health questions per address (no token is needed for them)
-	healthLim *limiter
-	never     map[string]bool
+	never   map[string]bool
 
 	mu           sync.Mutex
 	lastLog      map[string]time.Time
@@ -175,8 +173,7 @@ type Agent struct {
 func New(cfg *Config, tokens Tokens, d Deps) *Agent {
 	a := &Agent{cfg: cfg, d: d, readH: sha256.Sum256([]byte(tokens.Read)),
 		control: newLimiter(cfg.ControlRatePerMin, time.Minute), badAuth: newLimiter(20, time.Minute),
-		healthLim: newLimiter(healthPerMin, time.Minute),
-		lastLog:   map[string]time.Time{}, never: map[string]bool{}, now: time.Now, sampling: make(chan struct{}, 1),
+		lastLog: map[string]time.Time{}, never: map[string]bool{}, now: time.Now, sampling: make(chan struct{}, 1),
 		tempWait: localTempWait, procWaiters: make(chan struct{}, maxProcessWaiters), fanStatuses: make(chan struct{}, maxFanStatus)}
 	if tokens.Control != "" {
 		a.ctlH, a.hasCtl = sha256.Sum256([]byte(tokens.Control)), true
@@ -377,9 +374,8 @@ func (a *Agent) Handler() http.Handler {
 			a.d.Pairer.ServeHTTP(w, r)
 			return
 		}
-		if r.URL.Path == HealthPath { // no bearer token: the answer proves the token without showing it (health.go)
-			a.health(w, r)
-			return
+		if r.URL.Path == HealthPath && a.health(w, r) {
+			return // the update's health check, from this machine (health.go); for everybody else there is no such path
 		}
 		rt, ok := routes[r.URL.Path]
 		if !ok {

@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"crypto/hmac"
+	"crypto/pbkdf2"
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
@@ -14,7 +15,9 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/netip"
 	"regexp"
+	"sync"
 	"time"
 
 	"github.com/n3ptune-cpu/Fairy-agent/pkg/release"
@@ -27,57 +30,129 @@ import (
 // the read token. Whatever held the port at that moment received the token: a local program that took the
 // port while the agent was restarting could read the machine's status and process list from then on.
 //
-// GET /health?c=<nonce> needs no token and gives none away. The agent answers
+// GET /health?c=<nonce>&p=<ask> sends no token. Both sides hold the same key K, made from the read token by a
+// deliberately slow function (healthKey). The checker runs as root / LocalSystem on this machine, picks a
+// fresh random nonce and sends
 //
-//	{"proof": hex(HMAC-SHA256(key = SHA-256(read token), "fairy-agent health v1" 0x00 nonce 0x00 version))}
+//	ask   = hex(HMAC-SHA256(K, "fairy-agent health ask v2" 0x00 nonce))
 //
-// The checker picks a fresh random nonce, knows the read token (it runs as root / LocalSystem) and the version
-// it expects, computes the same value and compares. A listener that does not hold the token cannot answer,
-// and an old answer is no use for a new nonce. The version is not in the answer: someone without the token
-// learns nothing from it, not even which build runs here.
+// The agent answers only a caller on this machine whose ask is right, with
+//
+//	{"proof": hex(HMAC-SHA256(K, "fairy-agent health v2" 0x00 nonce 0x00 version))}
+//
+// and the checker compares that with what it computes for the version it expects. Everybody else, and every
+// request that is not exactly this, gets the answer of a path that does not exist (404 "not found").
+//
+// What nobody gets (review N1: the first form of this endpoint answered every address, without a token, with a
+// value computed from the read token alone, which let any machine that reached the port test guesses of a
+// hand-chosen token on its own, as fast as it could hash and without the agent's limit on wrong tokens):
+//   - another machine: nothing, whatever it sends;
+//   - a caller on this machine without the token: nothing that depends on the token. It can try a guess by
+//     sending an ask made from it, which costs it one run of the slow function per guess;
+//   - a program that took the agent's port: one nonce and one ask. The ask is under K, so testing a guess of
+//     the token against it costs one run of the slow function too. With a token from `fairy-agent join` or
+//     `gen-token` (256 random bits) there is nothing to guess in any case.
+//
+// The version is not in the answer: someone without the token learns nothing from it, not even which build
+// runs here.
 
 // HealthPath is the health check's endpoint.
 const HealthPath = "/health"
 
-// healthPerMin is how many health questions one address may ask a minute (the installer asks once a second
-// for at most two health timeouts).
-const healthPerMin = 240
-
-const healthLabel = "fairy-agent health v1"
+const (
+	healthLabel    = "fairy-agent health v2"
+	healthAskLabel = "fairy-agent health ask v2"
+	// healthKeyRounds is the cost of one guess of the read token against a health question or answer:
+	// PBKDF2-HMAC-SHA256 with this many rounds (a fifth of a second on a PC, a second or two on a small ARM
+	// board). The agent and the checker each pay it once per start.
+	healthKeyRounds = 600_000
+)
 
 var healthNonceRe = regexp.MustCompile(`^[A-Za-z0-9_-]{16,64}$`)
 
-// healthProof is the answer to a health question: only a holder of the read token can compute it.
-func healthProof(readHash [32]byte, nonce, version string) string {
-	m := hmac.New(sha256.New, readHash[:])
-	m.Write([]byte(healthLabel))
-	m.Write([]byte{0})
-	m.Write([]byte(nonce))
-	m.Write([]byte{0})
-	m.Write([]byte(version))
+var (
+	healthKeysMu sync.Mutex
+	healthKeys   = map[[32]byte][32]byte{} // SHA-256(read token) -> K; one entry outside tests
+)
+
+// healthKey is the key of the health check for a read token (given as its SHA-256, which is all the agent
+// keeps of it).
+func healthKey(readHash [32]byte) [32]byte {
+	healthKeysMu.Lock()
+	defer healthKeysMu.Unlock()
+	if k, ok := healthKeys[readHash]; ok {
+		return k
+	}
+	var k [32]byte
+	b, err := pbkdf2.Key(sha256.New, string(readHash[:]), []byte(healthLabel), healthKeyRounds, len(k))
+	if err != nil { // cannot happen with these parameters; without a key nothing passes
+		_, _ = rand.Read(k[:])
+		return k
+	}
+	copy(k[:], b)
+	if len(healthKeys) >= 8 {
+		clear(healthKeys)
+	}
+	healthKeys[readHash] = k
+	return k
+}
+
+func healthMAC(key [32]byte, parts ...string) string {
+	m := hmac.New(sha256.New, key[:])
+	for i, p := range parts {
+		if i > 0 {
+			m.Write([]byte{0})
+		}
+		m.Write([]byte(p))
+	}
 	return hex.EncodeToString(m.Sum(nil))
 }
 
-// health serves GET /health?c=<nonce>. No token: see the top of this file.
-func (a *Agent) health(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		w.Header().Set("Allow", http.MethodGet)
-		writeJSON(w, 405, map[string]any{"error": "method not allowed"})
-		return
-	}
-	if !a.healthLim.allow(clientIP(r)) {
-		writeJSON(w, 429, map[string]any{"error": "too many health checks; try again in a minute"})
-		return
-	}
-	nonce := r.URL.Query().Get("c")
-	if !healthNonceRe.MatchString(nonce) {
-		writeJSON(w, 400, map[string]any{"error": "c must be 16 to 64 characters of A-Z a-z 0-9 _ -"})
-		return
-	}
-	writeJSON(w, 200, map[string]any{"proof": healthProof(a.readH, nonce, a.d.Version)})
+// healthAsk is what the checker sends with its nonce: only a holder of the read token can compute it.
+func healthAsk(key [32]byte, nonce string) string { return healthMAC(key, healthAskLabel, nonce) }
+
+// healthProof is the answer to a health question: only a holder of the read token can compute it.
+func healthProof(key [32]byte, nonce, version string) string {
+	return healthMAC(key, healthLabel, nonce, version)
 }
 
-// errNoHealth: the listener answered 404 to GET /health (a fairy-agent older than this check, or not one).
+// isThisMachine reports whether a connection comes from this machine itself: from a loopback address, or
+// from the very address it connected to.
+func isThisMachine(remote, local netip.Addr) bool {
+	return remote.IsValid() && (remote.IsLoopback() || (local.IsValid() && remote == local))
+}
+
+// health serves GET /health?c=<nonce>&p=<ask> (see the top of this file). It reports whether it answered; if
+// not, the caller answers as for any path that does not exist.
+func (a *Agent) health(w http.ResponseWriter, r *http.Request) bool {
+	if r.Method != http.MethodGet {
+		return false
+	}
+	var remote, local netip.Addr
+	if ap, err := netip.ParseAddrPort(r.RemoteAddr); err == nil {
+		remote = ap.Addr().Unmap().WithZone("")
+	}
+	if la, ok := r.Context().Value(http.LocalAddrContextKey).(net.Addr); ok {
+		local = addrOf(la)
+	}
+	if !isThisMachine(remote, local) {
+		return false
+	}
+	q := r.URL.Query()
+	nonce, ask := q.Get("c"), q.Get("p")
+	if !healthNonceRe.MatchString(nonce) || len(ask) != 2*sha256.Size {
+		return false
+	}
+	key := healthKey(a.readH)
+	if subtle.ConstantTimeCompare([]byte(ask), []byte(healthAsk(key, nonce))) != 1 {
+		return false
+	}
+	writeJSON(w, 200, map[string]any{"proof": healthProof(key, nonce, a.d.Version)})
+	return true
+}
+
+// errNoHealth: the listener answered 404 to GET /health: a fairy-agent older than this check, one that was
+// started with another read token (or does not see the checker as this machine), or no fairy-agent at all.
 var errNoHealth = errors.New("no /health")
 
 // CheckRunning asks the running agent to prove that it holds this machine's read token and runs version want
@@ -85,7 +160,8 @@ var errNoHealth = errors.New("no /health")
 func CheckRunning(ctx context.Context, cfg *Config, want string) error {
 	err := checkRunning(ctx, cfg, want)
 	if errors.Is(err, errNoHealth) {
-		return fmt.Errorf("what answers on the agent's port does not know %s: it is not fairy-agent %s", HealthPath, want)
+		return fmt.Errorf("what answers on the agent's port does not know %s or does not hold this machine's read token: "+
+			"it is not fairy-agent %s started with the token that is on disk now", HealthPath, want)
 	}
 	return err
 }
@@ -126,14 +202,15 @@ func checkRunning(ctx context.Context, cfg *Config, want string) error {
 		return err
 	}
 	nonce := hex.EncodeToString(nb)
+	key := healthKey(sha256.Sum256([]byte(tok.Read))) // before the clock of the request starts: it is slow once
 	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+addr+HealthPath+"?c="+nonce, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+addr+HealthPath+"?c="+nonce+"&p="+healthAsk(key, nonce), nil)
 	if err != nil {
 		return err
 	}
 	// No Authorization header, no proxy, no redirect followed, no connection kept: whoever holds the port gets
-	// one random nonce and nothing else.
+	// one random nonce and the ask for it, and nothing else.
 	tr := &http.Transport{Proxy: nil, DisableKeepAlives: true}
 	defer tr.CloseIdleConnections()
 	client := &http.Client{Transport: tr, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
@@ -155,7 +232,7 @@ func checkRunning(ctx context.Context, cfg *Config, want string) error {
 	if err := json.NewDecoder(io.LimitReader(resp.Body, 4<<10)).Decode(&m); err != nil {
 		return errors.New("agent answered with invalid JSON")
 	}
-	expect := healthProof(sha256.Sum256([]byte(tok.Read)), nonce, want)
+	expect := healthProof(key, nonce, want)
 	if subtle.ConstantTimeCompare([]byte(m.Proof), []byte(expect)) != 1 {
 		return fmt.Errorf("what answers on %s did not prove that it is fairy-agent %s with this machine's token "+
 			"(another version is running, or another program holds the port)", addr, want)

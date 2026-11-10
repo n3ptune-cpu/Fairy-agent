@@ -1,20 +1,28 @@
 package agent
 
 import (
+	"bytes"
 	"context"
+	"crypto/pbkdf2"
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/n3ptune-cpu/Fairy-agent/pkg/agent/agenttest"
 )
 
 // healthCfg is a config whose listen address is srv and whose token files hold the test tokens.
@@ -67,85 +75,174 @@ func (rec *recorder) leaked(t *testing.T, what string) {
 	}
 }
 
-func TestHealthEndpoint(t *testing.T) {
-	r := newUpdRig(t, "42-bbbbbbb", nil)
-	get := func(path, tok string) (int, map[string]any, string) {
-		req, _ := http.NewRequest("GET", r.srv.URL+path, nil)
-		if tok != "" {
-			req.Header.Set("Authorization", "Bearer "+tok)
-		}
-		resp, err := http.DefaultClient.Do(req)
-		if err != nil {
-			t.Fatal(err)
-		}
-		defer resp.Body.Close()
-		b, _ := io.ReadAll(resp.Body)
-		var m map[string]any
-		_ = json.Unmarshal(b, &m)
-		return resp.StatusCode, m, string(b)
+// healthRequest is a GET /health as the handler sees it, from remote to local ("" = no local address known).
+func healthRequest(method, target, remote, local string) *http.Request {
+	req := httptest.NewRequest(method, target, nil)
+	req.RemoteAddr = remote
+	if local != "" {
+		req = req.WithContext(context.WithValue(req.Context(), http.LocalAddrContextKey,
+			net.Addr(net.TCPAddrFromAddrPort(netip.MustParseAddrPort(local)))))
 	}
+	return req
+}
+
+// answerOf is everything a caller gets: status, headers, body.
+func answerOf(h http.Handler, req *http.Request) string {
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	var sb strings.Builder
+	sb.WriteString(strconv.Itoa(w.Code) + "\n")
+	_ = w.Header().Write(&sb)
+	sb.WriteString("\n" + w.Body.String())
+	return sb.String()
+}
+
+func TestHealthEndpoint(t *testing.T) {
+	h := New(mustParse(t, ""), Tokens{Read: readTok, Control: ctlTok}, Deps{Collector: agenttest.NewCollector(), Version: "42-bbbbbbb"}).Handler()
+	key := healthKey(sha256.Sum256([]byte(readTok)))
 	nonce := "0123456789abcdef0123456789abcdef"
-	want := healthProof(sha256.Sum256([]byte(readTok)), nonce, "42-bbbbbbb")
-	// no token needed, and a token changes nothing
-	for _, tok := range []string{"", readTok, ctlTok, "wrong-token-xxxxxxxxxxxxxxxxxxxxx"} {
-		st, m, raw := get("/health?c="+nonce, tok)
-		if st != 200 || m["proof"] != want || len(m) != 1 {
-			t.Fatalf("token %q: %d %s", tok, st, raw)
+	ask := healthAsk(key, nonce)
+	want := healthProof(key, nonce, "42-bbbbbbb")
+	const loop, own = "127.0.0.1:50000", "100.70.0.1:50000"
+	good := "/health?c=" + nonce + "&p=" + ask
+
+	// the checker's question, from this machine: over loopback, or from the agent's own address to itself
+	for _, c := range [][2]string{{loop, "127.0.0.1:9101"}, {"[::1]:50000", "[::1]:9101"}, {own, "100.70.0.1:9101"}, {loop, ""}} {
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, healthRequest("GET", good, c[0], c[1]))
+		var m map[string]any
+		_ = json.Unmarshal(w.Body.Bytes(), &m)
+		if w.Code != 200 || m["proof"] != want || len(m) != 1 {
+			t.Fatalf("%v: %d %s", c, w.Code, w.Body)
 		}
 		// nothing about the machine or the build is in the answer
 		for _, secret := range []string{"42", "bbbbbbb", readTok, ctlTok, "version", "hostname"} {
-			if strings.Contains(raw, secret) && !strings.Contains(want, secret) {
-				t.Fatalf("the answer shows %q: %s", secret, raw)
+			if strings.Contains(w.Body.String(), secret) && !strings.Contains(want, secret) {
+				t.Fatalf("the answer shows %q: %s", secret, w.Body)
 			}
 		}
 	}
-	// the proof depends on the nonce, the version and the token
-	if p := healthProof(sha256.Sum256([]byte(readTok)), "fedcba9876543210fedcba9876543210", "42-bbbbbbb"); p == want {
-		t.Fatal("same proof for another nonce")
-	}
-	if p := healthProof(sha256.Sum256([]byte(readTok)), nonce, "43-ccccccc"); p == want {
-		t.Fatal("same proof for another version")
-	}
-	if p := healthProof(sha256.Sum256([]byte(ctlTok)), nonce, "42-bbbbbbb"); p == want {
-		t.Fatal("same proof for another token")
+	// the proof depends on the nonce, the version and the token; question and answer are different values
+	if healthProof(key, "fedcba9876543210fedcba9876543210", "42-bbbbbbb") == want || healthProof(key, nonce, "43-ccccccc") == want ||
+		healthProof(healthKey(sha256.Sum256([]byte(ctlTok))), nonce, "42-bbbbbbb") == want || ask == want ||
+		healthProof(key, nonce, "") == ask {
+		t.Fatal("the same value for different inputs")
 	}
 	// nonce and version cannot run into each other
 	if healthProof([32]byte{}, "0123456789abcdef4", "2-b") == healthProof([32]byte{}, "0123456789abcdef", "42-b") {
 		t.Fatal("ambiguous proof input")
 	}
-	for _, bad := range []string{"/health", "/health?c=", "/health?c=short", "/health?c=" + strings.Repeat("a", 65),
-		"/health?c=0123456789abcde%00", "/health?c=0123456789abcdef%0a", "/health?c=0123456789abcdef+x", "/health?x=" + nonce} {
-		if st, _, raw := get(bad, ""); st != 400 || strings.Contains(raw, "proof") {
-			t.Fatalf("%s: %d %s", bad, st, raw)
+
+	// Everything else is the answer of a path that does not exist, to the byte.
+	notFound := answerOf(h, healthRequest("GET", "/no-such-path", loop, "127.0.0.1:9101"))
+	if !strings.HasPrefix(notFound, "404\n") || !strings.Contains(notFound, `{"error":"not found"}`) {
+		t.Fatal(notFound)
+	}
+	otherAsk := healthAsk(healthKey(sha256.Sum256([]byte("another-token-cccccccccccccccccccc"))), nonce)
+	for name, req := range map[string]*http.Request{
+		// review N1: another machine, with or without the right question
+		"another machine":                         healthRequest("GET", "/health?c="+nonce, "100.101.102.103:40000", "100.70.0.1:9101"),
+		"another machine, right question":         healthRequest("GET", good, "100.101.102.103:40000", "100.70.0.1:9101"),
+		"another machine, no local address":       healthRequest("GET", good, "100.101.102.103:40000", ""),
+		"the panel's address":                     healthRequest("GET", good, "100.88.0.7:40000", "100.70.0.1:9101"),
+		"no address at all":                       healthRequest("GET", good, "", ""),
+		"this machine, no question":               healthRequest("GET", "/health?c="+nonce, loop, "127.0.0.1:9101"),
+		"this machine, question for no nonce":     healthRequest("GET", "/health?p="+ask, loop, "127.0.0.1:9101"),
+		"this machine, wrong question":            healthRequest("GET", "/health?c="+nonce+"&p="+strings.Repeat("0", 64), loop, "127.0.0.1:9101"),
+		"this machine, another token":             healthRequest("GET", "/health?c="+nonce+"&p="+otherAsk, loop, "127.0.0.1:9101"),
+		"this machine, the answer as question":    healthRequest("GET", "/health?c="+nonce+"&p="+want, loop, "127.0.0.1:9101"),
+		"this machine, question of another nonce": healthRequest("GET", "/health?c=fedcba9876543210fedcba9876543210&p="+ask, loop, "127.0.0.1:9101"),
+		"this machine, short question":            healthRequest("GET", "/health?c="+nonce+"&p="+ask[:63], loop, "127.0.0.1:9101"),
+		"nonce too short":                         healthRequest("GET", "/health?c=short&p="+healthAsk(key, "short"), loop, "127.0.0.1:9101"),
+		"nonce too long":                          healthRequest("GET", "/health?c="+strings.Repeat("a", 65)+"&p="+healthAsk(key, strings.Repeat("a", 65)), loop, "127.0.0.1:9101"),
+		"nonce with other characters":             healthRequest("GET", "/health?c=0123456789abcdef%0a&p="+healthAsk(key, "0123456789abcdef\n"), loop, "127.0.0.1:9101"),
+		"POST":                                    healthRequest("POST", good, loop, "127.0.0.1:9101"),
+		"PUT":                                     healthRequest("PUT", good, loop, "127.0.0.1:9101"),
+		"HEAD":                                    healthRequest("HEAD", good, loop, "127.0.0.1:9101"),
+	} {
+		if got := answerOf(h, req); got != notFound {
+			t.Errorf("%s: not the answer of a path that does not exist:\n%s", name, got)
 		}
 	}
-	for _, m := range []string{"POST", "PUT", "DELETE"} {
-		req, _ := http.NewRequest(m, r.srv.URL+"/health?c="+nonce, nil)
-		resp, err := http.DefaultClient.Do(req)
-		if err != nil {
-			t.Fatal(err)
-		}
-		resp.Body.Close()
-		if resp.StatusCode != 405 {
-			t.Fatalf("%s: %d", m, resp.StatusCode)
+	// a token in the header changes nothing: /health is not asked with one
+	for _, tok := range []string{readTok, ctlTok, "wrong-token-xxxxxxxxxxxxxxxxxxxxx"} {
+		req := healthRequest("GET", "/health?c="+nonce, "100.101.102.103:40000", "100.70.0.1:9101")
+		req.Header.Set("Authorization", "Bearer "+tok)
+		if got := answerOf(h, req); got != notFound {
+			t.Errorf("another machine with token %q:\n%s", tok, got)
 		}
 	}
 	// the other paths still need their token (an old installer's check, GET /metrics, works as before)
-	if st, _, _ := get("/metrics", ""); st != 401 {
-		t.Fatal(st)
-	}
-	if st, m, _ := get("/metrics", readTok); st != 200 || m["agent_version"] != "42-bbbbbbb" {
-		t.Fatal(st, m["agent_version"])
-	}
-	// one address cannot ask without limit
-	n429 := 0
-	for i := 0; i < healthPerMin+20; i++ {
-		if st, _, _ := get("/health?c="+nonce, ""); st == 429 {
-			n429++
+	if w := httptest.NewRecorder(); true {
+		h.ServeHTTP(w, healthRequest("GET", "/metrics", loop, "127.0.0.1:9101"))
+		if w.Code != 401 {
+			t.Fatal(w.Code)
 		}
 	}
-	if n429 < 20 {
-		t.Fatalf("no limit: %d of %d refused", n429, healthPerMin+20)
+}
+
+// Review N1: what a caller without the token gets from /health does not depend on the token at all. Two agents
+// with different tokens (and versions) answer every such request with the same bytes, so there is nothing to
+// test a guess against; and the reviewer's own offline loop finds nothing.
+func TestHealthGivesNothingToTestATokenGuessAgainst(t *testing.T) {
+	a1 := New(mustParse(t, ""), Tokens{Read: readTok}, Deps{Version: "41-aaaaaaa"})
+	a2 := New(mustParse(t, ""), Tokens{Read: "hunter2-hunter2-hunter2-hunter2"}, Deps{Version: "42-bbbbbbb"})
+	const nonce = "AAAAAAAAAAAAAAAA"
+	guessKey := healthKey(sha256.Sum256([]byte("wrong-token-xxxxxxxxxxxxxxxxxxxxx")))
+	for _, from := range [][2]string{{"100.101.102.103:40000", "100.70.0.1:9101"}, {"127.0.0.1:40000", "127.0.0.1:9101"}} {
+		for _, target := range []string{"/health", "/health?c=" + nonce, "/health?c=" + nonce + "&p=" + healthAsk(guessKey, nonce),
+			"/health?c=" + nonce + "&p=" + strings.Repeat("f", 64)} {
+			r1 := answerOf(a1.Handler(), healthRequest("GET", target, from[0], from[1]))
+			r2 := answerOf(a2.Handler(), healthRequest("GET", target, from[0], from[1]))
+			if r1 != r2 || !strings.HasPrefix(r1, "404\n") || strings.Contains(r1, "proof") {
+				t.Fatalf("%s from %s: the answer depends on the agent's token:\n%s\n---\n%s", target, from[0], r1, r2)
+			}
+		}
+	}
+	// the reviewer's proof: any device on the tailnet, no token
+	w := httptest.NewRecorder()
+	a1.Handler().ServeHTTP(w, healthRequest("GET", HealthPath+"?c="+nonce, "100.101.102.103:40000", ""))
+	if w.Code == 200 {
+		t.Fatal("a caller on another machine, without a token, got HTTP 200:", w.Body)
+	}
+	// The key is not the token's hash any more, and making it is slow on purpose: a guess of the token against
+	// anything the health check ever puts on the wire costs healthKeyRounds rounds.
+	if healthKeyRounds < 600_000 {
+		t.Fatal("healthKeyRounds:", healthKeyRounds)
+	}
+	rh := sha256.Sum256([]byte(readTok))
+	slow, err := pbkdf2.Key(sha256.New, string(rh[:]), []byte("fairy-agent health v2"), 600_000, 32)
+	if k := healthKey(rh); err != nil || !bytes.Equal(k[:], slow) || k == rh {
+		t.Fatal("the health key is not PBKDF2-HMAC-SHA256 of the token's hash with 600000 rounds")
+	}
+}
+
+// Review N7: /health keeps nothing per caller (it had a limiter with up to 240 time stamps per source address
+// and no cap on addresses).
+func TestHealthKeepsNothingPerCaller(t *testing.T) {
+	r := newRig(t, "")
+	h := r.a.Handler()
+	key := healthKey(sha256.Sum256([]byte(readTok)))
+	ask := healthAsk(key, "AAAAAAAAAAAAAAAA")
+	var before, after runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&before)
+	for i := 0; i < 20000; i++ {
+		remote := fmt.Sprintf("[2001:db8:1:1:%x:%x:%x:%x]:40000", i>>12&0xfff, i>>8&0xf, i>>4&0xf, i&0xf)
+		h.ServeHTTP(httptest.NewRecorder(), healthRequest("GET", "/health?c=AAAAAAAAAAAAAAAA&p="+ask, remote, "[2001:db8:1:1::1]:9101"))
+	}
+	// and this machine may ask as often as it likes (the installer asks once a second; nothing counts it out)
+	for i := 0; i < 2000; i++ {
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, healthRequest("GET", "/health?c=AAAAAAAAAAAAAAAA&p="+ask, "127.0.0.1:40000", "127.0.0.1:9101"))
+		if w.Code != 200 {
+			t.Fatal(i, w.Code)
+		}
+	}
+	runtime.GC()
+	runtime.ReadMemStats(&after)
+	if grown := int64(after.HeapAlloc) - int64(before.HeapAlloc); grown > 1<<20 {
+		t.Fatalf("20000 source addresses: the heap grew by %d KiB", grown/1024)
 	}
 }
 
@@ -178,7 +275,7 @@ func TestCheckRunning(t *testing.T) {
 // L30: a program that took the agent's port while the agent restarted. Whatever it answers, it is never sent
 // the token and never passes for the agent.
 func TestCheckRunningSendsNoTokenToWhoeverHoldsThePort(t *testing.T) {
-	good := healthProof(sha256.Sum256([]byte(readTok)), "0123456789abcdef0123456789abcdef", "42-bbbbbbb")
+	good := healthProof(healthKey(sha256.Sum256([]byte(readTok))), "0123456789abcdef0123456789abcdef", "42-bbbbbbb")
 	answers := map[string]http.HandlerFunc{
 		"asks for the token": func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("WWW-Authenticate", `Bearer realm="fairy-agent"`)
@@ -199,6 +296,9 @@ func TestCheckRunningSendsNoTokenToWhoeverHoldsThePort(t *testing.T) {
 		},
 		"echoes the nonce": func(w http.ResponseWriter, r *http.Request) {
 			_, _ = w.Write([]byte(`{"proof":"` + r.URL.Query().Get("c") + `"}`))
+		},
+		"echoes the question": func(w http.ResponseWriter, r *http.Request) {
+			_, _ = w.Write([]byte(`{"proof":"` + r.URL.Query().Get("p") + `"}`))
 		},
 		"answers rubbish": func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte("<html>")) },
 		"answers 500":     func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(500) },

@@ -269,9 +269,7 @@ func LimitConns(ln net.Listener, o ConnLimits) *LimitListener {
 	}
 	o.LocalReserved = min(max(o.LocalReserved, 0), o.Reserved)
 	if o.Local == nil {
-		o.Local = func(remote, local netip.Addr) bool {
-			return remote.IsLoopback() || (local.IsValid() && remote == local)
-		}
+		o.Local = isThisMachine
 	}
 	return &LimitListener{Listener: ln, o: o, open: map[string]int{}, conns: map[*limitedConn]struct{}{}, ready: make(chan net.Conn, o.Total),
 		known: map[netip.Addr]time.Time{},
