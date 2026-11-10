@@ -32,7 +32,7 @@ func checkProgramFolder() {
 func setupSelfUpdate(string) error {
 	fmt.Println(`On Linux self-update needs (AGENT.md, "Updates"):
   deploy/fairy-agent.service (StateDirectory=fairy-agent), deploy/fairy-agent-update.service,
-  deploy/fairy-agent.polkit.rules as /etc/polkit-1/rules.d/49-fairy-agent.rules,
+  deploy/fairy-agent-update.polkit.rules as /etc/polkit-1/rules.d/49-fairy-agent-update.rules,
   then: systemctl daemon-reload && systemctl restart fairy-agent`)
 	return nil
 }

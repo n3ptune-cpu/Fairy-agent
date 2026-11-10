@@ -14,7 +14,7 @@ import (
 
 // systemPower waits in the agent and then asks systemd to power off, reboot or suspend (`systemctl
 // poweroff|reboot|suspend`). The agent's user needs permission for that: a polkit rule
-// (deploy/fairy-agent.polkit.rules), see AGENT.md. If the agent stops before the time comes, the action is
+// (deploy/fairy-agent-power.polkit.rules), see AGENT.md. If the agent stops before the time comes, the action is
 // dropped (the safe direction).
 type systemPower struct {
 	mu    sync.Mutex
@@ -88,6 +88,11 @@ func (s *systemPower) CanSleep() (bool, string) {
 	return sleepFromLogind(string(out))
 }
 
+// powerPolkitHint names the rule file that lets the agent's user power off, reboot and suspend, as the release
+// ships it and where install.sh puts it.
+const powerPolkitHint = "deploy/fairy-agent-power.polkit.rules as /etc/polkit-1/rules.d/49-fairy-agent-power.rules " +
+	"(the panel's Add host or Re-pair command does that when shutdown / reboot is switched on)"
+
 // sleepFromLogind reads busctl's answer to CanSuspend (`s "yes"`).
 func sleepFromLogind(out string) (bool, string) {
 	v := strings.Trim(strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(out), "s")), `" `)
@@ -95,7 +100,7 @@ func sleepFromLogind(out string) (bool, string) {
 	case "yes":
 		return true, ""
 	case "challenge", "no":
-		return false, "systemd-logind does not allow the agent to suspend (CanSuspend: " + v + "): install deploy/fairy-agent.polkit.rules"
+		return false, "systemd-logind does not allow the agent to suspend (CanSuspend: " + v + "): install " + powerPolkitHint
 	case "na":
 		return false, "this machine does not support suspend (CanSuspend: na)"
 	}

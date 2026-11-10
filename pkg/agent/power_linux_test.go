@@ -13,8 +13,14 @@ func TestLinuxSleepAnswers(t *testing.T) {
 			t.Errorf("%q: %v %q", out, ok, why)
 		}
 	}
-	if _, why := sleepFromLogind(`s "challenge"`); !strings.Contains(why, "polkit") {
-		t.Fatal(why)
+	// the message the owner sees names the rule file that exists and where the installer puts it (not the
+	// combined file of older releases, which is gone)
+	for _, v := range []string{`s "challenge"`, `s "no"`} {
+		_, why := sleepFromLogind(v)
+		if !strings.Contains(why, "deploy/fairy-agent-power.polkit.rules") || !strings.Contains(why, "/etc/polkit-1/rules.d/49-fairy-agent-power.rules") ||
+			strings.Contains(why, "fairy-agent.polkit.rules") {
+			t.Fatal(why)
+		}
 	}
 	if ok, _ := sleepFromKernel("freeze mem disk\n"); !ok {
 		t.Fatal("mem")
