@@ -447,13 +447,29 @@ systemctl status fairy-agent       # should say "fairy-agent listening" with you
 
 The service runs as the `fairy-agent` user with **no special rights** (no root, no capabilities) and is locked
 down by systemd (read-only system, no new privileges, its own /tmp, only NVIDIA and IPMI devices visible).
-Three optional extras need a small permission each, and only if you want them:
+Four optional extras need a small permission each, and only if you want them:
 
 | You want | Install | Why |
 | --- | --- | --- |
 | CPU watts (Intel/AMD "RAPL") | `deploy/fairy-agent.tmpfiles.conf` as `/etc/tmpfiles.d/fairy-agent.conf`, then `systemd-tmpfiles --create /etc/tmpfiles.d/fairy-agent.conf` | the energy counters are root-only since 2020 (a side-channel fix); this lets the agent's group read them |
-| Shutdown / reboot / sleep from the panel | `deploy/fairy-agent.polkit.rules` as `/etc/polkit-1/rules.d/49-fairy-agent.rules` | lets exactly this user power off / reboot / suspend through systemd |
+| Shutdown / reboot / sleep from the panel | `deploy/fairy-agent-power.polkit.rules` as `/etc/polkit-1/rules.d/49-fairy-agent-power.rules` | lets exactly this user power off / reboot / suspend through systemd, and nothing else |
+| Self-update from the panel's Update button | `deploy/fairy-agent-update.polkit.rules` as `/etc/polkit-1/rules.d/49-fairy-agent-update.rules` (see [Updates](#updates-the-panels-update-button)) | lets exactly this user start the installer unit `fairy-agent-update.service`, and nothing else |
 | BMC sensors / fan control in-band | `apt install ipmitool`, `deploy/fairy-agent.udev.rules` as `/etc/udev/rules.d/60-fairy-agent-ipmi.rules`, `modprobe ipmi_devintf ipmi_si`, `udevadm trigger` | lets the agent's group use /dev/ipmi0 |
+
+**One polkit rule per feature.** Until 0.5.3 there was one combined rule file,
+`/etc/polkit-1/rules.d/49-fairy-agent.rules`. It granted both rights (power and starting the installer) as soon
+as one of the two features was chosen. Since 0.6.0 each feature has its own file, and the install script
+installs a rule only for a feature that is on in `config.yaml`. It removes the rule of a feature that is off,
+and it removes the old combined file. A machine installed before 0.6.0 keeps the combined file until the
+install script runs there again: use **Re-pair** on the host's page in the panel and run the command it shows.
+Check afterwards (read-only):
+
+```sh
+ls /etc/polkit-1/rules.d | grep fairy
+```
+
+Expected: only `49-fairy-agent-power.rules` and / or `49-fairy-agent-update.rules`, matching what is switched
+on. No output means neither feature is on.
 
 Temperatures, fans and voltages of the board come from `/sys/class/hwmon` and need nothing extra. So do AMD
 graphics (built-in Radeon or a Radeon card): the agent reads the files the `amdgpu` kernel driver publishes under
@@ -601,8 +617,7 @@ the agent itself waits on Windows too and then calls `SetSuspendState` (powrprof
 `/metrics` (`power_control.sleep`, and `sleep_note` with the reason when not) whether the machine can sleep, and
 refuses with 409 `sleep_unavailable` otherwise: on Windows it needs S1-S3 in `GetPwrCapabilities` (a laptop with
 only Modern Standby cannot be put to sleep by a service; `powercfg /a` shows what is available), on Linux
-systemd-logind's `CanSuspend` must say `yes` (the polkit rule above covers `suspend` since v0.4.2: copy the new
-file over the old one). Waking it is Wake-on-LAN (the panel's "Power on"), which from sleep needs the network
+systemd-logind's `CanSuspend` must say `yes` (the power rule above covers `suspend`). Waking it is Wake-on-LAN (the panel's "Power on"), which from sleep needs the network
 card's "Allow this device to wake the computer" / "Wake on Magic Packet" (Windows Device Manager) or
 `ethtool -s <nic> wol g` (Linux).
 
@@ -726,9 +741,9 @@ self_update:
 * **Linux** also needs, once (all three files are in `deploy/`): the current `fairy-agent.service` (it gives
   the agent one folder it may write, `/var/lib/fairy-agent`, for the download), `fairy-agent-update.service`
   (the installer; it runs as root only when the agent starts it, and may only change `/usr/local/bin`), and the
-  polkit rule `fairy-agent.polkit.rules` as `/etc/polkit-1/rules.d/49-fairy-agent.rules` (lets the agent's user
-  start exactly that one unit; Debian/Proxmox: `apt install polkitd` if `/etc/polkit-1/rules.d` does not
-  exist). Then `systemctl daemon-reload && systemctl restart fairy-agent`. On Fedora with SELinux the installer
+  polkit rule `fairy-agent-update.polkit.rules` as `/etc/polkit-1/rules.d/49-fairy-agent-update.rules` (lets
+  the agent's user start exactly that one unit; Debian/Proxmox: `apt install polkitd` if
+  `/etc/polkit-1/rules.d` does not exist). Then `systemctl daemon-reload && systemctl restart fairy-agent`. On Fedora with SELinux the installer
   runs `restorecon` on the new program. The installer's messages: `journalctl -u fairy-agent-update`.
 * **Windows**: run `install-fairy-agent.ps1` (again) as Administrator, or just
   `& "C:\Program Files\Fairy\fairy-agent.exe" setup-self-update` in an Administrator PowerShell. It installs
@@ -908,8 +923,9 @@ are lists of devices: edit those in the file.
   agent, helper, updater; the fans go back to the BMC first), then
   `Remove-NetFirewallRule -DisplayName "Fairy agent (Tailscale only)", "Fairy agent helper (no network)"` and delete `C:\Program Files\Fairy` and
   `C:\ProgramData\fairy-agent`. Linux: `systemctl disable --now fairy-agent`, delete the units
-  (`fairy-agent.service`, `fairy-agent-update.service`), `/etc/polkit-1/rules.d/49-fairy-agent.rules`,
-  `/usr/local/bin/fairy-agent` (and `.old`), `/etc/fairy-agent`, `/var/lib/fairy-agent*`, and `userdel fairy-agent`.
+  (`fairy-agent.service`, `fairy-agent-update.service`), the polkit rules (`rm -f
+  /etc/polkit-1/rules.d/49-fairy-agent*.rules`), `/usr/local/bin/fairy-agent` (and `.old`), `/etc/fairy-agent`,
+  `/var/lib/fairy-agent*`, and `userdel fairy-agent`.
 
 ## Security in short
 

@@ -85,7 +85,7 @@ Each folder is one Go package; inside a package, files are named after what they
 | `pkg/tuya` | The Tuya 3.3/3.4/3.5 local protocol (encryption, frames, one persistent connection per plug). |
 | `pkg/redact` | Removes passwords/tokens from process command lines (in the agent, and again in the panel). |
 | `pkg/configutil` | The id rule (`ValidID`) and secrets referenced by environment variable name (`EnvSecret`). |
-| `deploy/` | `install.sh` / `install.ps1` (the one-line Add host installers, published with every release), `fairy-agent.service` (systemd), `fairy-agent-update.service` (the self-update installer), `fairy-agent.config.example.yaml`, `install-fairy-agent.ps1` (Windows), and the optional polkit / tmpfiles / udev rules. |
+| `deploy/` | `install.sh` / `install.ps1` (the one-line Add host installers, published with every release), `fairy-agent.service` (systemd), `fairy-agent-update.service` (the self-update installer), `fairy-agent.config.example.yaml`, `install-fairy-agent.ps1` (Windows), and the optional rules: polkit (`fairy-agent-power.polkit.rules` for shutdown / reboot, `fairy-agent-update.polkit.rules` for self-update: one file per feature), tmpfiles, udev. |
 | `.github/workflows` | `release.yml` (signed release on every push to main), `ci.yml` (tests on pull requests). |
 
 ## Licence
