@@ -17,6 +17,7 @@ from source, and a map of the code, are in [README.md](README.md).
 * [Install on Windows](#install-on-windows)
   * [Two services: the agent and its helper](#two-services-the-agent-and-its-helper)
 * [Install on Linux](#install-on-linux)
+  * [Check your Linux agents: are the sandbox lines still on?](#check-your-linux-agents-are-the-sandbox-lines-still-on)
 * [Point the panel at it](#point-the-panel-at-it)
 * [Optional features](#optional-features): fan control, shutdown / reboot, Wake-on-LAN, plugs and UPSes
 * [Updates (the panel's Update button)](#updates-the-panels-update-button)
@@ -532,6 +533,43 @@ call's error), "same card" for further entries of a card, the number of cards re
 
 If the firewall on the machine is on (nftables/ufw), allow TCP 9101 only on `tailscale0`, e.g.
 `ufw allow in on tailscale0 to any port 9101 proto tcp`.
+
+### Check your Linux agents: are the sandbox lines still on?
+
+Do this once on every Linux agent. The check changes nothing.
+
+**Why.** `fairy-agent.service` locks the agent down (the lines from `NoNewPrivileges=` to `DevicePolicy=`).
+A note at the end of that file says that in an unprivileged LXC container without nesting some of these lines
+can stop the service from starting, and that they can then be commented out. Without them a fault in the
+agent reaches further. One known case: up to 0.5.3 the join step of Add host and Re-pair handed the pairing
+file to the agent's account in a way that a program already running under that account could misuse: it
+could become the owner of a file that belongs to root. With the sandbox lines on it could then read that file.
+With them commented out it could also change it, which can lead to root. 0.6.0 closes this in
+`fairy-agent join` itself. That takes effect once the panel's command installs 0.6.0 or later (an older
+install command first puts its own older agent back).
+
+1. As root on the agent:
+
+   ```sh
+   grep -nE '^[[:space:]]*#[[:space:]]*(NoNewPrivileges|CapabilityBoundingSet|AmbientCapabilities|Protect[A-Za-z]*|Private[A-Za-z]*|Restrict[A-Za-z]*|LockPersonality|MemoryDenyWriteExecute|SystemCall[A-Za-z]*|DevicePolicy)=' /etc/systemd/system/fairy-agent.service || echo "no sandbox line is commented out"
+   ls /etc/systemd/system/fairy-agent.service.d 2>/dev/null
+   ```
+
+2. Read the result:
+   * `no sandbox line is commented out` and nothing from `ls`: this agent is fine. Done.
+   * Lines such as `54:#PrivateTmp=yes`: those sandbox lines are off on this machine. Go on with step 3.
+   * `ls` lists files: someone added settings on top of the service file. Read them
+     (`systemctl cat fairy-agent`) and remove what switches a sandbox line off.
+3. Run the install script again: in the panel, open the host's page, press **Re-pair** and run the command it
+   shows on the machine. The script puts the release's `fairy-agent.service` in place and keeps yours as
+   `/etc/systemd/system/fairy-agent.service.bak`. (If the script says the installed agent `is NEWER than this
+   installer's release`, it leaves the service file alone: update the panel first, or replace the file by hand
+   as in [SETUP-UPDATES.md, 2.3](SETUP-UPDATES.md#23-by-hand-from-one-named-release-checked).)
+4. Run the two commands of step 1 again, then `systemctl status fairy-agent --no-pager`.
+5. If the agent no longer starts and the status shows `status=226/NAMESPACE`: this container cannot provide
+   what some of the lines need. Comment out only the lines the note at the end of the service file names
+   (`PrivateTmp`, the `Protect...` lines, `RestrictNamespaces`), leave every other line on, then
+   `systemctl daemon-reload && systemctl restart fairy-agent`. Keep that agent on 0.6.0 or later.
 
 ## Point the panel at it
 
