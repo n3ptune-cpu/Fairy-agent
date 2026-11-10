@@ -6,12 +6,14 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/n3ptune-cpu/Fairy-agent/internal/linktest"
 	"github.com/n3ptune-cpu/Fairy-agent/pkg/agent/api"
 )
 
@@ -461,10 +463,22 @@ func TestFileStore(t *testing.T) {
 	os.Remove(f.Path)
 	target := filepath.Join(t.TempDir(), "elsewhere.json")
 	_ = os.WriteFile(target, []byte(`{"phase":"done"}`), 0o600)
-	if err := os.Symlink(target, f.Path); err == nil {
+	if err := linktest.File(target, f.Path); err == nil {
 		if _, err := f.Load(); err == nil {
 			t.Error("followed a symlink")
 		}
+	} else if runtime.GOOS != "windows" { // Windows: a symbolic link to a file needs a privilege
+		t.Fatal(err)
+	}
+	// a link to a folder (on Windows a junction, the link every user can make) is refused the same way
+	os.Remove(f.Path)
+	if _, err := linktest.Dir(t.TempDir(), f.Path); err == nil {
+		if _, err := f.Load(); err == nil {
+			t.Error("a link to a folder was read")
+		}
+		os.Remove(f.Path)
+	} else {
+		t.Log("not covered here, no links:", err)
 	}
 	// an untrusted folder is refused
 	f.Check = func(string) error { return errors.New("others may write it") }

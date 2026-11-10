@@ -4,9 +4,12 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/n3ptune-cpu/Fairy-agent/internal/linktest"
 )
 
 // fakeOS is the operating system's side of a power action: like Windows, it goes on counting a shutdown down
@@ -373,7 +376,7 @@ func TestPowerFile(t *testing.T) {
 	target := filepath.Join(t.TempDir(), "elsewhere.json")
 	_ = os.WriteFile(target, []byte(`{"action":"shutdown","at":1800000600,"delay_s":10,"by":"x"}`), 0o600)
 	_ = os.Remove(f.Path)
-	if err := os.Symlink(target, f.Path); err == nil {
+	if err := linktest.File(target, f.Path); err == nil {
 		if r, err := f.Load(); err == nil {
 			t.Errorf("a symbolic link was read: %+v", r)
 		}
@@ -386,6 +389,27 @@ func TestPowerFile(t *testing.T) {
 		if b, _ := os.ReadFile(target); !strings.Contains(string(b), `"by":"x"`) {
 			t.Error("the link's target was changed")
 		}
+	} else if runtime.GOOS != "windows" { // Windows: a symbolic link to a file needs a privilege
+		t.Fatal(err)
+	}
+	// a link to a folder under the name (on Windows a junction, the link every user can make): not read, and
+	// Save replaces it or fails; nothing is written where it points
+	_ = os.Remove(f.Path)
+	elsewhere := t.TempDir()
+	if _, err := linktest.Dir(elsewhere, f.Path); err == nil {
+		if r, err := f.Load(); err == nil {
+			t.Errorf("a link to a folder was read: %+v", r)
+		}
+		err := f.Save(rec)
+		if st, _ := os.Lstat(f.Path); st == nil || (err == nil) != st.Mode().IsRegular() || (err != nil) != linktest.IsLink(st) {
+			t.Errorf("Save over a link to a folder: error %v, and the name is now %v", err, st)
+		}
+		if ents, _ := os.ReadDir(elsewhere); len(ents) != 0 {
+			t.Errorf("Save wrote through the link: %v", ents)
+		}
+		_ = os.Remove(f.Path)
+	} else {
+		t.Log("not covered here, no links:", err)
 	}
 	if err := f.Save(nil); err != nil {
 		t.Fatal(err)

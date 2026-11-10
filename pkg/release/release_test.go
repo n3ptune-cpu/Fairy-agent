@@ -10,10 +10,12 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/n3ptune-cpu/Fairy-agent/internal/linktest"
 	"github.com/n3ptune-cpu/Fairy-agent/pkg/release"
 	"github.com/n3ptune-cpu/Fairy-agent/pkg/release/releasetest"
 )
@@ -533,13 +535,28 @@ func TestCopyVerifiedAndReadStaged(t *testing.T) {
 		t.Fatalf("left files behind: %v", ents)
 	}
 	link := filepath.Join(dir, "link")
-	if err := os.Symlink(src, link); err == nil {
+	if err := linktest.File(src, link); err == nil {
 		if _, err := release.ReadStaged(link, 100); err == nil {
 			t.Fatal("followed a symlink")
 		}
 		if _, err := release.CopyVerified(link, dir, sha256.Sum256([]byte("payload"))); err == nil {
 			t.Fatal("copied through a symlink")
 		}
+		_ = os.Remove(link)
+	} else if runtime.GOOS != "windows" { // Windows: a symbolic link to a file needs a privilege
+		t.Fatal(err)
+	}
+	// a link to a folder (on Windows a junction, the link every user can make) is not a staged file either
+	if _, err := linktest.Dir(t.TempDir(), link); err == nil {
+		if _, err := release.ReadStaged(link, 100); err == nil {
+			t.Fatal("read through a link to a folder")
+		}
+		if _, err := release.CopyVerified(link, dir, sha256.Sum256([]byte("payload"))); err == nil {
+			t.Fatal("copied through a link to a folder")
+		}
+		_ = os.Remove(link)
+	} else {
+		t.Log("not covered here, no links:", err)
 	}
 	if _, err := release.ReadStaged(dir, 100); err == nil {
 		t.Fatal("read a directory")

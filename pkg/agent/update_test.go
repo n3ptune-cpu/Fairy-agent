@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/n3ptune-cpu/Fairy-agent/internal/linktest"
 	"github.com/n3ptune-cpu/Fairy-agent/pkg/agent/agenttest"
 	"github.com/n3ptune-cpu/Fairy-agent/pkg/release"
 	"github.com/n3ptune-cpu/Fairy-agent/pkg/release/releasetest"
@@ -383,9 +384,18 @@ func TestApplyStagedReverifiesAndRollsBack(t *testing.T) {
 	ar = newApplyRig(t, "42-bbbbbbb", []byte("new 42"))
 	p := filepath.Join(ar.stage, testAsset)
 	_ = os.Rename(p, p+".real")
-	if os.Symlink(p+".real", p) == nil {
+	if linktest.File(p+".real", p) == nil {
 		if res := ar.apply(nil); res.OK {
 			t.Fatal("followed a symlink in the stage")
+		}
+	}
+	// a link to a folder under the staged file's name (on Windows a junction, which needs no privilege)
+	ar = newApplyRig(t, "42-bbbbbbb", []byte("new 42"))
+	p = filepath.Join(ar.stage, testAsset)
+	_ = os.Remove(p)
+	if _, err := linktest.Dir(t.TempDir(), p); err == nil {
+		if res := ar.apply(nil); res.OK {
+			t.Fatal("a link in the stage was taken for the staged file")
 		}
 	}
 	// unhealthy new version: rolled back, result says so
@@ -564,7 +574,7 @@ func TestApplyStagedCooldown(t *testing.T) {
 		"link": func(p string) {
 			real := filepath.Join(t.TempDir(), "elsewhere")
 			_ = os.WriteFile(real, []byte("1800000000\n"), 0o644)
-			_ = os.Symlink(real, p)
+			_ = linktest.File(real, p) // Windows without the privilege: no link, and the case is "no time file"
 		},
 	} {
 		ar = newApplyRig(t, "42-bbbbbbb", []byte("new 42"))
@@ -747,8 +757,8 @@ func TestUpdaterNotReady(t *testing.T) {
 func TestApplyStagedRefusesLinkedStage(t *testing.T) {
 	ar := newApplyRig(t, "42-bbbbbbb", []byte("new 42"))
 	link := filepath.Join(t.TempDir(), "stage-link")
-	if err := os.Symlink(ar.stage, link); err != nil {
-		t.Skip(err)
+	if _, err := linktest.Dir(ar.stage, link); err != nil {
+		t.Skip("no links here:", err)
 	}
 	in := &release.Installer{Target: ar.target, Start: func(context.Context) error { return nil }}
 	res := ApplyStaged(context.Background(), ApplyOptions{StageDir: link, ResultPath: ar.result, Asset: testAsset,
