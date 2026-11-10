@@ -1,8 +1,9 @@
 // Command fairy-release-key makes and uses the release signing key of Fairy-agent and Fairy-dashboard.
 //
 //	go run ./cmd/fairy-release-key gen [--private FILE] [--public FILE]
-//	    new key pair: the private key (for the GitHub secret FAIRY_RELEASE_KEY in both repositories) and the
-//	    public key (commit it as release/signing.pub in both repositories). Run it once, on your own PC.
+//	    new key pair: the private key (for the secret FAIRY_RELEASE_KEY of the GitHub Environment "release"
+//	    in both repositories, never a repository secret) and the public key (commit it as release/signing.pub
+//	    in both repositories). Run it once, on your own PC.
 //	go run ./cmd/fairy-release-key sign --pub release/signing.pub FILE
 //	    writes FILE.sig; the private key comes from $FAIRY_RELEASE_KEY (or --key-file). Used by the release workflow.
 //	go run ./cmd/fairy-release-key verify --pub release/signing.pub FILE
@@ -53,6 +54,27 @@ func main() {
 	}
 }
 
+// genMessage tells the owner what to do with a new key pair. The private key belongs in the GitHub
+// Environment "release" of each repository (the release workflows run with `environment: release`, so the job
+// waits for the required reviewer before it can read the key). A repository secret can be read by every
+// workflow run of the repository, without that approval.
+func genMessage(priv, pub string) string {
+	return fmt.Sprintf(`New release key made.
+
+  private key: %s
+      Store its one line as the secret FAIRY_RELEASE_KEY of the GitHub Environment "release", in BOTH
+      repositories (Settings > Environments > release > Environment secrets > Add environment secret).
+      Do NOT add it as a repository secret (Settings > Secrets and variables > Actions): every workflow
+      run could read it there, without the approval the environment asks for. If the repository has
+      such a secret from an earlier setup, delete it. SETUP-UPDATES.md has the environment's settings.
+      Then keep this file somewhere safe and offline (or delete it: a lost key only means making a new
+      one and one more manual update). Never commit it.
+  public key:  %s
+      Commit this file in Fairy-agent AND copy it to release/signing.pub in Fairy-dashboard and commit it there.
+      Release builds carry it and accept only updates signed with the private key.
+`, priv, pub)
+}
+
 func defaultPrivate() string {
 	if h, err := os.UserHomeDir(); err == nil {
 		return filepath.Join(h, "fairy-release-key.txt")
@@ -97,17 +119,7 @@ func gen(args []string) error {
 		os.Remove(*priv)
 		return err
 	}
-	fmt.Printf(`New release key made.
-
-  private key: %s
-      Paste its one line into the GitHub secret FAIRY_RELEASE_KEY of BOTH repositories
-      (Settings > Secrets and variables > Actions > New repository secret), then keep this file somewhere
-      safe and offline (or delete it: a lost key only means making a new one and one more manual update).
-      Never commit it.
-  public key:  %s
-      Commit this file in Fairy-agent AND copy it to release/signing.pub in Fairy-dashboard and commit it there.
-      Release builds carry it and accept only updates signed with the private key.
-`, *priv, *pub)
+	fmt.Print(genMessage(*priv, *pub))
 	return nil
 }
 
