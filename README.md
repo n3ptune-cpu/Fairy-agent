@@ -38,6 +38,12 @@ go test ./... && go vet ./...
 Builds like these carry no release key (`-X main.releaseKey=...`), so they never update themselves. The
 binaries that agents install come from the release workflow below.
 
+The tests run on Windows too: `go test ./...` in a normal cmd window (not "Run as administrator"), on a PC
+with or without the agent. They install nothing, need no service and work in their own temporary folders.
+Where a test needs a link it makes a junction, which every user may create. A few tests skip themselves on
+Windows and say why (`go test -v ./... | findstr SKIP`): the ones that need administrator rights, the four
+that start the whole agent (it looks for the helper service), and the one that would ask the PC's own BMC.
+
 `go.mod` also has the line `godebug multipathtcp=0`: the programs built from this module do not use Multipath
 TCP, which Go otherwise switches on for listeners on Linux. `go version -m fairy-agent-linux-amd64` shows
 `DefaultGODEBUG=multipathtcp=0`. The line does not reach programs that only import the packages:
