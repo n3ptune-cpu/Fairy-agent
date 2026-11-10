@@ -313,7 +313,9 @@ func TestFanShutdownRefusesChanges(t *testing.T) {
 	}
 }
 
-// M4: the real Run serves behind the connection caps (here: this machine's own eight).
+// M4: the real Run serves behind the connection caps (here: this machine's own eight). A ninth connection from
+// this machine is not answered while the eight are open, and it is not reset either (review N6, N2): it waits
+// for a slot and is answered when one is free.
 func TestRunLimitsConnections(t *testing.T) {
 	addr, _ := runAgent(t, fakebmc.X11SCAF())
 	var kept []net.Conn
@@ -322,16 +324,21 @@ func TestRunLimitsConnections(t *testing.T) {
 			c.Close()
 		}
 	}()
-	for i := 0; i < 20; i++ {
+	for i := 0; i < MaxConnsPerSender; i++ {
 		c, held, err := halfOpen("127.0.0.1", addr, 100)
-		if err != nil {
-			t.Fatal(err)
+		if err != nil || !held {
+			t.Fatal(i, held, err)
 		}
-		if held {
-			kept = append(kept, c)
-		}
+		kept = append(kept, c)
 	}
-	if len(kept) != MaxConnsPerSender {
-		t.Fatalf("%d of 20 connections from one address were kept, want %d", len(kept), MaxConnsPerSender)
+	// the ninth: a complete request. No slot until the agent drops an unfinished one (two seconds after it was
+	// opened).
+	start := time.Now()
+	st, err := metricsFrom("127.0.0.1", addr)
+	if err != nil || st != 200 {
+		t.Fatalf("the ninth connection from this machine: HTTP %d, %v", st, err)
+	}
+	if took := time.Since(start); took < time.Second || took > ConnWait {
+		t.Fatalf("the ninth connection was answered after %s: it should have waited for one of the eight slots", took)
 	}
 }

@@ -21,11 +21,11 @@ import (
 	"github.com/n3ptune-cpu/Fairy-agent/pkg/enroll"
 )
 
-// The admission rules, without a network: 64 in all, 8 per sender, 16 of the 64 kept for the panel and this
-// machine.
+// The admission rules, without a network: 64 in all, 8 per sender (32 for the panel's address), 16 of the 64
+// kept for the panel and this machine.
 func TestConnLimitRules(t *testing.T) {
 	l := LimitConns(nil, ConnLimits{})
-	if l.o.Total != 64 || l.o.PerSender != 8 || l.o.Reserved != 16 {
+	if l.o.Total != 64 || l.o.PerSender != 8 || l.o.Reserved != 16 || l.o.PerPanel != 32 || l.o.Waiting != 128 || l.o.Wait != 3*time.Second {
 		t.Fatalf("defaults: %+v", l.o)
 	}
 	// one sender: 8, not 9
@@ -57,10 +57,14 @@ func TestConnLimitRules(t *testing.T) {
 			t.Fatal("local", i, why)
 		}
 	}
-	if why := l.admit("panel", true); !strings.Contains(why, "this sender") {
-		t.Fatal("ninth panel connection:", why)
+	// that is all 64: the panel's next one finds no room (on the wire it waits for one, see TestPanelConnWaits)
+	if why := l.admit("panel", true); why != "too many open connections" {
+		t.Fatal("65th connection:", why)
 	}
-	if st := l.Stats(); st.Open != 64 || st.Trusted != 16 || st.Peak != 64 || st.Refused != 3 {
+	if why := l.admit("local", true); !strings.Contains(why, "this sender") {
+		t.Fatal("ninth connection of this machine:", why)
+	}
+	if st := l.Stats(); st.Open != 64 || st.Trusted != 16 || st.Peak != 64 || st.Refused != 4 {
 		t.Fatalf("%+v", st)
 	}
 	// a closed connection frees its slot for the same and for other senders
@@ -77,6 +81,41 @@ func TestConnLimitRules(t *testing.T) {
 	// strangers never get the reserved slots, however few the panel uses
 	if why := l.admit("100.64.3.1", false); why == "" {
 		t.Fatal("a stranger got a reserved slot")
+	}
+
+	// The panel's address has its own cap, 32: what the panel can have in flight to one agent (MaxConnsPanel).
+	// With eight, as for a stranger, its ninth connection was reset (review N6).
+	l = LimitConns(nil, ConnLimits{})
+	for i := 0; i < MaxConnsPanel; i++ {
+		if why := l.admit("panel", true); why != "" {
+			t.Fatal("panel", i, why)
+		}
+	}
+	if why := l.admit("panel", true); !strings.Contains(why, "this sender") {
+		t.Fatal("33rd panel connection:", why)
+	}
+	// the cap is for the panel's address only: a stranger still has eight, and so has this machine
+	for i := 0; i < 8; i++ {
+		if why := l.admit("100.64.0.50", false); why != "" {
+			t.Fatal(i, why)
+		}
+		if why := l.admit("local", true); why != "" {
+			t.Fatal(i, why)
+		}
+	}
+	if why := l.admit("100.64.0.50", false); !strings.Contains(why, "this sender") {
+		t.Fatal("ninth connection of a stranger:", why)
+	}
+	// while the panel holds 32, strangers get what is left of the 64 after this machine's eight
+	for s := 1; s <= 2; s++ {
+		for i := 0; i < 8; i++ {
+			if why := l.admit(fmt.Sprint("100.64.1.", s), false); why != "" {
+				t.Fatal(s, i, why)
+			}
+		}
+	}
+	if why := l.admit("100.64.1.3", false); why != "too many open connections" {
+		t.Fatal("65th connection:", why)
 	}
 }
 

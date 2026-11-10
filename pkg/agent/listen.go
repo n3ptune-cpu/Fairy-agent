@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net"
 	"net/netip"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -167,15 +168,30 @@ func Listen(ctx context.Context, addr string, wait time.Duration) (net.Listener,
 	}
 }
 
-// The caps on open connections (LimitConns). The panel keeps a handful of connections to an agent; a sender
-// that opens thousands (each may hold a few KiB of unfinished request) must not be able to fill the agent's
-// memory, and must not be able to lock the panel or the update's health check out while it tries.
+// The caps on open connections (LimitConns). A sender that opens thousands (each may hold a few KiB of
+// unfinished request) must not be able to fill the agent's memory, and must not be able to lock the panel or
+// the update's health check out while it tries.
 const (
 	MaxConns          = 64 // open connections in all
 	MaxConnsPerSender = 8  // per sending address
 	// ReservedConns of MaxConns are kept for the paired panel's address and for this machine itself (the
 	// update's health check): every other sender together gets at most MaxConns - ReservedConns.
 	ReservedConns = 16
+	// MaxConnsPanel is the cap for the paired panel's address. The panel has no cap of its own: it opens one
+	// connection for every request in flight and keeps two idle ones (pkg/devices, lanTransport; the v0.5.2
+	// panel uses the same code). What it can have in flight to one agent at once: /metrics once a second with
+	// a 4.5 s limit (5 when the agent is slow), control requests (the agent accepts control_rate_per_min a
+	// minute, 6 by default, the panel waits 12 s for each), process lists (maxProcessWaiters, 16), fan status
+	// (maxFanStatus, 4) and one /pair: 32. More than that is not refused but waits (MaxWaitingConns).
+	MaxConnsPanel = 32
+	// MaxWaitingConns connections of the panel's address that are over a cap are kept waiting, unread, for a
+	// free slot (at most ConnWait) instead of being reset: they cost a socket each and nothing else. With the
+	// 32 slots that takes well over a hundred requests of the panel at the same moment (tested with 96). This machine's own connections
+	// wait in the same way, a quarter as many (the update's health check is one connection a second). Any
+	// other sender's connection over a cap is closed at once.
+	MaxWaitingConns = 128
+	// ConnWait is how long such a connection waits: less than the panel's limit for a poll (4 s).
+	ConnWait = 3 * time.Second
 )
 
 // ConnLimits configures LimitConns. Zero numbers mean the defaults above.
@@ -183,6 +199,9 @@ type ConnLimits struct {
 	Total     int
 	PerSender int
 	Reserved  int
+	PerPanel  int           // MaxConnsPanel
+	Waiting   int           // MaxWaitingConns (this machine: a quarter of it); negative: nobody waits
+	Wait      time.Duration // ConnWait
 	// Panel returns the paired panel's address ("" while there is none). See PairedPanel.
 	Panel func() string
 	// PanelOnly refuses every sender but the panel's address and this machine itself. While Panel returns no
@@ -199,9 +218,17 @@ type ConnLimits struct {
 const NoPanelRefusal = "only_from_panel is on and this agent has no panel address on record: only this machine itself is " +
 	"accepted (run the panel's Add host or Re-pair command on this machine, or remove only_from_panel from config.yaml)"
 
+// The keys the panel's and this machine's connections are counted under.
+const (
+	panelKey = "panel"
+	localKey = "local"
+)
+
 // LimitConns wraps ln so that at most o.Total connections are open, at most o.PerSender per sending address
-// (IPv6: per /64), with o.Reserved of them kept for the panel's address and this machine. A connection over a
-// cap is closed at once, before a byte is read and before the HTTP server learns of it.
+// (IPv6: per /64; o.PerPanel for the paired panel's address), with o.Reserved of them kept for the panel's
+// address and this machine. A connection over a cap is closed at once, before a byte is read and before the
+// HTTP server learns of it; one from the panel's address or from this machine waits for a slot first (o.Waiting
+// of them, for o.Wait), unread.
 func LimitConns(ln net.Listener, o ConnLimits) *LimitListener {
 	if o.Total <= 0 {
 		o.Total = MaxConns
@@ -212,14 +239,25 @@ func LimitConns(ln net.Listener, o ConnLimits) *LimitListener {
 	if o.Reserved <= 0 {
 		o.Reserved = ReservedConns
 	}
+	if o.PerPanel <= 0 {
+		o.PerPanel = MaxConnsPanel
+	}
+	if o.Waiting == 0 {
+		o.Waiting = MaxWaitingConns
+	}
+	if o.Wait <= 0 {
+		o.Wait = ConnWait
+	}
 	o.PerSender = min(o.PerSender, o.Total)
+	o.PerPanel = min(max(o.PerPanel, o.PerSender), o.Total)
 	o.Reserved = min(o.Reserved, o.Total)
 	if o.Local == nil {
 		o.Local = func(remote, local netip.Addr) bool {
 			return remote.IsLoopback() || (local.IsValid() && remote == local)
 		}
 	}
-	return &LimitListener{Listener: ln, o: o, open: map[string]int{}}
+	return &LimitListener{Listener: ln, o: o, open: map[string]int{}, ready: make(chan net.Conn, o.Total),
+		errs: make(chan error), done: make(chan struct{})}
 }
 
 // LimitListener is a listener with the caps of LimitConns.
@@ -227,45 +265,182 @@ type LimitListener struct {
 	net.Listener
 	o ConnLimits
 
+	start sync.Once     // the goroutine that takes connections from Listener
+	ready chan net.Conn // connections within the caps, for Accept
+	errs  chan error    // Listener's own Accept errors, for Accept
+	done  chan struct{} // closed by Close
+
 	mu      sync.Mutex
+	closed  bool
 	open    map[string]int // open connections per sender key
 	trusted int            // open connections of the panel and this machine
 	others  int            // open connections of everybody else
+	waiting []*waitingConn // the panel's and this machine's connections that wait for a slot, oldest first
 	peak    int
 	refused uint64
+	waited  uint64
 	logAt   time.Time
 	logged  uint64
+}
+
+// waitingConn is a connection of the panel or of this machine that found a cap reached.
+type waitingConn struct {
+	c     *limitedConn
+	why   string
+	timer *time.Timer
 }
 
 // ConnStats is a snapshot of a LimitListener.
 type ConnStats struct {
 	Open    int    // open connections now
 	Trusted int    // of them, the panel's and this machine's
+	Waiting int    // connections of the panel and this machine that wait for a slot now
 	Peak    int    // the most that were ever open at once
-	Refused uint64 // connections closed at once because a cap was reached
+	Refused uint64 // connections closed because a cap was reached
+	Waited  uint64 // connections that got their slot after waiting for it
 }
 
 // Stats returns the listener's counters.
 func (l *LimitListener) Stats() ConnStats {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	return ConnStats{Open: l.trusted + l.others, Trusted: l.trusted, Peak: l.peak, Refused: l.refused}
+	return ConnStats{Open: l.trusted + l.others, Trusted: l.trusted, Waiting: len(l.waiting), Peak: l.peak,
+		Refused: l.refused, Waited: l.waited}
 }
 
-// Accept returns the next connection that is within the caps; the others are closed here.
+// Accept returns the next connection that is within the caps. The others are closed, or kept waiting, by the
+// goroutine that takes them from the wrapped listener, so that a waiting connection gets its slot the moment
+// one is free and not only when the next connection arrives.
 func (l *LimitListener) Accept() (net.Conn, error) {
+	l.start.Do(func() { go l.take() })
+	select {
+	case <-l.done:
+		return nil, net.ErrClosed
+	default:
+	}
+	select {
+	case c := <-l.ready:
+		return c, nil
+	case err := <-l.errs:
+		return nil, err
+	case <-l.done:
+		return nil, net.ErrClosed
+	}
+}
+
+// take hands every connection of the wrapped listener to arrive, and its errors to Accept (whose caller, the
+// HTTP server, waits a moment after a passing error; this loop waits with it).
+func (l *LimitListener) take() {
 	for {
 		c, err := l.Listener.Accept()
-		if err != nil {
-			return nil, err
-		}
-		key, trusted := l.sender(c)
-		if why := l.admit(key, trusted); why != "" {
-			l.refuse(c, key, why)
+		if err == nil {
+			l.arrive(c)
 			continue
 		}
-		return &limitedConn{Conn: c, release: sync.OnceFunc(func() { l.release(key, trusted) })}, nil
+		select {
+		case l.errs <- err:
+		case <-l.done:
+			return
+		}
+		if errors.Is(err, net.ErrClosed) {
+			return
+		}
 	}
+}
+
+// Close closes the wrapped listener and every connection that waits for a slot or for Accept.
+func (l *LimitListener) Close() error {
+	err := l.Listener.Close()
+	l.mu.Lock()
+	if l.closed {
+		l.mu.Unlock()
+		return err
+	}
+	l.closed = true
+	close(l.done)
+	waiting := l.waiting
+	l.waiting = nil
+	l.mu.Unlock()
+	for _, w := range waiting {
+		w.timer.Stop()
+		reset(w.c.Conn)
+	}
+	for {
+		select {
+		case c := <-l.ready: // counted in, never handed out
+			_ = c.Close()
+		default:
+			return err
+		}
+	}
+}
+
+// arrive counts a new connection in and passes it to Accept, keeps it waiting, or closes it.
+func (l *LimitListener) arrive(c net.Conn) {
+	key, trusted := l.sender(c)
+	lc := &limitedConn{Conn: c, sender: key}
+	lc.release = sync.OnceFunc(func() { l.release(key, trusted) })
+	why := l.panelOnly(trusted)
+	l.mu.Lock()
+	if l.closed {
+		l.mu.Unlock()
+		_ = c.Close()
+		return
+	}
+	if why == "" {
+		why = l.check(key, trusted)
+	}
+	switch {
+	case why == "":
+		l.count(key, trusted)
+		l.ready <- lc // never blocks: at most Total connections are counted in
+		l.mu.Unlock()
+		return
+	case trusted && l.waitingOf(key) < l.room(key):
+		// The panel's own next connection, or the update's health check: a reset would be a failed poll, a
+		// failed "cancel shutdown", a failed update. It waits, unread, until one of its sender's requests is
+		// done.
+		w := &waitingConn{c: lc, why: why}
+		w.timer = time.AfterFunc(l.o.Wait, func() { l.giveUp(w) })
+		l.waiting = append(l.waiting, w)
+		l.mu.Unlock()
+		return
+	}
+	l.refused++
+	l.mu.Unlock()
+	l.refuse(c, key, why)
+}
+
+// room is how many connections of a trusted sender may wait at once.
+func (l *LimitListener) room(key string) int {
+	if key == localKey {
+		return l.o.Waiting / 4
+	}
+	return l.o.Waiting
+}
+
+// waitingOf counts the waiting connections of one sender. Caller holds l.mu.
+func (l *LimitListener) waitingOf(key string) (n int) {
+	for _, w := range l.waiting {
+		if w.c.sender == key {
+			n++
+		}
+	}
+	return n
+}
+
+// giveUp closes a connection that waited o.Wait for a slot in vain.
+func (l *LimitListener) giveUp(w *waitingConn) {
+	l.mu.Lock()
+	i := slices.Index(l.waiting, w)
+	if i < 0 { // it got its slot, or the listener was closed
+		l.mu.Unlock()
+		return
+	}
+	l.waiting = slices.Delete(l.waiting, i, i+1)
+	l.refused++
+	l.mu.Unlock()
+	l.refuse(w.c.Conn, w.c.sender, w.why+" (it waited "+l.o.Wait.String()+" for a free one)")
 }
 
 func addrOf(a net.Addr) netip.Addr {
@@ -287,10 +462,10 @@ func (l *LimitListener) sender(c net.Conn) (key string, trusted bool) {
 		return "unknown", false
 	}
 	if l.o.Local(remote, addrOf(c.LocalAddr())) {
-		return "local", true
+		return localKey, true
 	}
 	if panel := l.panel(); panel.IsValid() && remote == panel {
-		return "panel", true
+		return panelKey, true
 	}
 	if remote.Is6() { // one machine owns a whole /64
 		if p, err := remote.Prefix(64); err == nil {
@@ -311,28 +486,40 @@ func (l *LimitListener) panel() netip.Addr {
 	return a.Unmap().WithZone("")
 }
 
-// admit counts a connection in, or says why not.
-func (l *LimitListener) admit(key string, trusted bool) (refusal string) {
-	panelOnly := l.o.PanelOnly && !trusted
-	noPanel := panelOnly && !l.panel().IsValid()
-	l.mu.Lock()
-	defer l.mu.Unlock()
+// panelOnly is why only_from_panel refuses a sender ("" when it does not, or when the setting is off).
+func (l *LimitListener) panelOnly(trusted bool) string {
 	switch {
-	case noPanel:
-		refusal = NoPanelRefusal
-	case panelOnly:
-		refusal = "only the panel's address is accepted"
-	case l.open[key] >= l.o.PerSender:
-		refusal = "too many open connections from this sender"
+	case !l.o.PanelOnly || trusted:
+		return ""
+	case !l.panel().IsValid():
+		return NoPanelRefusal
+	}
+	return "only the panel's address is accepted"
+}
+
+// capOf is how many connections one sender key may have open.
+func (l *LimitListener) capOf(key string, trusted bool) int {
+	if trusted && key == panelKey {
+		return l.o.PerPanel
+	}
+	return l.o.PerSender
+}
+
+// check says which cap a new connection of this sender would break ("" when none). Caller holds l.mu.
+func (l *LimitListener) check(key string, trusted bool) string {
+	switch {
+	case l.open[key] >= l.capOf(key, trusted):
+		return "too many open connections from this sender"
 	case l.trusted+l.others >= l.o.Total:
-		refusal = "too many open connections"
+		return "too many open connections"
 	case !trusted && l.others >= l.o.Total-l.o.Reserved:
-		refusal = "too many open connections (the rest is kept for the panel)"
+		return "too many open connections (the rest is kept for the panel)"
 	}
-	if refusal != "" {
-		l.refused++
-		return refusal
-	}
+	return ""
+}
+
+// count counts a connection in. Caller holds l.mu.
+func (l *LimitListener) count(key string, trusted bool) {
 	l.open[key]++
 	if trusted {
 		l.trusted++
@@ -340,9 +527,25 @@ func (l *LimitListener) admit(key string, trusted bool) (refusal string) {
 		l.others++
 	}
 	l.peak = max(l.peak, l.trusted+l.others)
+}
+
+// admit counts a connection in, or says why not (the rules alone: nobody waits here).
+func (l *LimitListener) admit(key string, trusted bool) (refusal string) {
+	refusal = l.panelOnly(trusted)
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if refusal == "" {
+		refusal = l.check(key, trusted)
+	}
+	if refusal != "" {
+		l.refused++
+		return refusal
+	}
+	l.count(key, trusted)
 	return ""
 }
 
+// release gives a connection's slot back and hands it to the connections that wait for one, oldest first.
 func (l *LimitListener) release(key string, trusted bool) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -354,15 +557,35 @@ func (l *LimitListener) release(key string, trusted bool) {
 	} else {
 		l.others--
 	}
+	if l.closed || len(l.waiting) == 0 {
+		return
+	}
+	still := l.waiting[:0]
+	for _, w := range l.waiting {
+		if l.check(w.c.sender, true) != "" {
+			still = append(still, w)
+			continue
+		}
+		w.timer.Stop()
+		l.count(w.c.sender, true)
+		l.waited++
+		l.ready <- w.c
+	}
+	clear(l.waiting[len(still):])
+	l.waiting = still
 }
 
-// refuse closes a connection that is over a cap, with a reset so that nothing of it lingers in the kernel, and
-// says so in the log at most once a minute.
-func (l *LimitListener) refuse(c net.Conn, key, why string) {
+// reset closes a connection so that nothing of it lingers in the kernel.
+func reset(c net.Conn) {
 	if t, ok := c.(*net.TCPConn); ok {
 		_ = t.SetLinger(0)
 	}
 	_ = c.Close()
+}
+
+// refuse closes a connection that is over a cap, with a reset, and says so in the log at most once a minute.
+func (l *LimitListener) refuse(c net.Conn, key, why string) {
+	reset(c)
 	l.mu.Lock()
 	now := time.Now()
 	if !l.logAt.IsZero() && now.Sub(l.logAt) < time.Minute {
@@ -379,6 +602,7 @@ func (l *LimitListener) refuse(c net.Conn, key, why string) {
 // limitedConn gives its slot back when it is closed (once).
 type limitedConn struct {
 	net.Conn
+	sender  string // the key it is counted under
 	release func()
 }
 

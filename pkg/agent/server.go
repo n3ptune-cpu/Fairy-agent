@@ -152,18 +152,23 @@ type Agent struct {
 	healthLim *limiter
 	never     map[string]bool
 
-	mu          sync.Mutex
-	lastLog     map[string]time.Time
-	cache       []byte
-	cacheAt     time.Time
-	cacheMu     sync.Mutex
-	procMu      sync.Mutex
-	sampleMu    sync.Mutex
-	lastTemps   []collect.Temp
-	lastTempsAt time.Time // when lastTemps was sampled (zero: never)
-	now         func() time.Time
-	sampling    chan struct{} // holds one token while LocalTemps takes its own sample
-	tempWait    time.Duration // how long LocalTemps waits for that sample
+	mu           sync.Mutex
+	lastLog      map[string]time.Time
+	cache        []byte
+	cacheAt      time.Time
+	cacheMu      sync.Mutex
+	procMu       sync.Mutex    // guards procCall and procLast
+	procCall     *procCall     // the process listing that is being made now (nil: none)
+	procLast     *procList     // the latest finished one
+	procWaiters  chan struct{} // one token per /processes request that waits for a listing
+	procAnswerMu sync.Mutex    // one /processes answer is sorted and written as JSON at a time
+	fanStatuses  chan struct{} // one token per /fan/status request in flight
+	sampleMu     sync.Mutex
+	lastTemps    []collect.Temp
+	lastTempsAt  time.Time // when lastTemps was sampled (zero: never)
+	now          func() time.Time
+	sampling     chan struct{} // holds one token while LocalTemps takes its own sample
+	tempWait     time.Duration // how long LocalTemps waits for that sample
 }
 
 // New builds the agent. tokens come from Config.LoadTokens.
@@ -172,7 +177,7 @@ func New(cfg *Config, tokens Tokens, d Deps) *Agent {
 		control: newLimiter(cfg.ControlRatePerMin, time.Minute), badAuth: newLimiter(20, time.Minute),
 		healthLim: newLimiter(healthPerMin, time.Minute),
 		lastLog:   map[string]time.Time{}, never: map[string]bool{}, now: time.Now, sampling: make(chan struct{}, 1),
-		tempWait: localTempWait}
+		tempWait: localTempWait, procWaiters: make(chan struct{}, maxProcessWaiters), fanStatuses: make(chan struct{}, maxFanStatus)}
 	if tokens.Control != "" {
 		a.ctlH, a.hasCtl = sha256.Sum256([]byte(tokens.Control)), true
 	}
@@ -341,6 +346,11 @@ func tokenIs(r *http.Request, want [32]byte) bool {
 type route struct {
 	method  string
 	control bool
+	// busy: at most cap(busy) requests of this route are in flight; one more is answered 503 "busy" at once.
+	// For the reads that can take long (they wait for a process listing or for the BMC): however many of
+	// them the panel passes on, they never hold more than this many of its connections, so its /metrics poll
+	// and its control requests always find one.
+	busy    chan struct{}
 	feature func() bool // POST: is the feature on? (off = 404, nothing happens)
 	code    string      // the 404 code when the feature is off
 	h       func(w http.ResponseWriter, r *http.Request)
@@ -350,8 +360,8 @@ type route struct {
 func (a *Agent) Handler() http.Handler {
 	routes := map[string]route{
 		"/metrics":          {method: http.MethodGet, h: a.metrics},
-		"/processes":        {method: http.MethodGet, h: a.processes},
-		"/fan/status":       {method: http.MethodGet, h: a.fanStatus},
+		"/processes":        {method: http.MethodGet, busy: a.procWaiters, h: a.processes},
+		"/fan/status":       {method: http.MethodGet, busy: a.fanStatuses, h: a.fanStatus},
 		"/fan/mode":         {method: http.MethodPost, control: true, feature: func() bool { return a.d.Fan != nil }, code: "fan_control_disabled", h: a.fanMode},
 		"/fan/duty":         {method: http.MethodPost, control: true, feature: func() bool { return a.d.Fan != nil }, code: "fan_control_disabled", h: a.fanDuty},
 		"/power":            {method: http.MethodPost, control: true, feature: func() bool { return a.d.Power != nil }, code: "power_control_disabled", h: a.power},
@@ -415,6 +425,16 @@ func (a *Agent) Handler() http.Handler {
 				return
 			}
 			r.Body = http.MaxBytesReader(w, r.Body, 4096)
+		}
+		if rt.busy != nil {
+			select {
+			case rt.busy <- struct{}{}:
+				defer func() { <-rt.busy }()
+			default:
+				w.Header().Set("Retry-After", "1")
+				writeJSON(w, 503, map[string]any{"error": "too many of these requests at once; try again in a moment", "code": BusyCode})
+				return
+			}
 		}
 		rt.h(w, r)
 	})
@@ -704,41 +724,89 @@ func (a *Agent) metrics(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(a.cache)
 }
 
-// processes serves GET /processes?limit=N&sort=cpu|mem|gpu.
-func (a *Agent) processes(w http.ResponseWriter, r *http.Request) {
-	if !a.cfg.ProcessesEnabled() {
-		writeJSON(w, 403, map[string]any{"error": "process list disabled on this host", "code": "processes_disabled"})
-		return
-	}
-	q := r.URL.Query()
-	limit := 25
-	if v := q.Get("limit"); v != "" {
-		n, err := strconv.Atoi(v)
-		if err != nil || n < 1 || n > 200 {
-			writeJSON(w, 400, map[string]any{"error": "limit must be 1-200"})
-			return
+// How the process list is made. A listing reads all of /proc and takes half a second the first time. Requests
+// used to be served one listing each, one after the other: every viewer's open Processes tab asks through the
+// panel every two seconds, so a dozen of them (or one script with a viewer's session) had a dozen of the
+// panel's connections waiting in line here, and the panel's own next connection was over a cap.
+const (
+	// processMaxAge: a finished listing answers every request of the next second. However many ask, /proc is
+	// read once a second at most, and requests that arrive while a listing is being made share it.
+	processMaxAge = time.Second
+	// processListLimit is how long one listing may take.
+	processListLimit = 20 * time.Second
+	// maxProcessRows is the most rows a request can ask for; a kept listing holds the maxProcessRows highest by
+	// CPU, by memory and by GPU memory, which is every row any request can be answered with.
+	maxProcessRows = 200
+	// maxProcessWaiters / maxFanStatus: see route.busy.
+	maxProcessWaiters = 16
+	maxFanStatus      = 4
+)
+
+// BusyCode is the code of the 503 answer to a /processes or /fan/status request over its cap (route.busy).
+const BusyCode = "busy"
+
+// procList is one finished process listing.
+type procList struct {
+	rows  []collect.Process // not sorted; never changed once it is here
+	total int
+	at    time.Time
+}
+
+type procCall struct {
+	done chan struct{} // closed when list and err are set
+	list *procList
+	err  error
+}
+
+// processList returns the latest listing if it is at most processMaxAge old, or the one being made now, or
+// starts one. The listing itself does not belong to any request: one that gives up does not stop it for the
+// others.
+func (a *Agent) processList(ctx context.Context) (*procList, error) {
+	a.procMu.Lock()
+	if l := a.procLast; l != nil {
+		if age := time.Since(l.at); age >= 0 && age <= processMaxAge {
+			a.procMu.Unlock()
+			return l, nil
 		}
-		limit = n
 	}
-	sortBy := q.Get("sort")
-	if sortBy == "" {
-		sortBy = "cpu"
+	call := a.procCall
+	if call == nil {
+		call = &procCall{done: make(chan struct{})}
+		a.procCall = call
+		go func() {
+			lctx, cancel := context.WithTimeout(context.Background(), processListLimit)
+			defer cancel()
+			call.list, call.err = a.listProcesses(lctx)
+			a.procMu.Lock()
+			if call.err == nil {
+				a.procLast = call.list
+			}
+			a.procCall = nil
+			a.procMu.Unlock()
+			close(call.done)
+		}()
 	}
-	if sortBy != "cpu" && sortBy != "mem" && sortBy != "gpu" {
-		writeJSON(w, 400, map[string]any{"error": "sort must be cpu, mem or gpu"})
-		return
+	a.procMu.Unlock()
+	select {
+	case <-call.done:
+		return call.list, call.err
+	case <-ctx.Done():
+		return nil, ctx.Err()
 	}
-	a.procMu.Lock() // one listing at a time: the CPU sample is shared
-	defer a.procMu.Unlock()
-	mem := a.d.Collector.Sample(r.Context()).Memory.Total
+}
+
+// listProcesses makes one listing: every row a request can be answered with, numbers cleaned, command lines
+// with their secrets hidden.
+func (a *Agent) listProcesses(ctx context.Context) (*procList, error) {
+	mem := a.d.Collector.Sample(ctx).Memory.Total
 	o := collect.ProcOptions{Cmdline: a.cfg.CmdlineEnabled(), NeverOpen: a.never, MemTotal: mem, Interval: 500 * time.Millisecond}
-	procs, total, err := a.d.Collector.Processes(r.Context(), o)
+	procs, total, err := a.d.Collector.Processes(ctx, o)
 	if err != nil {
-		writeJSON(w, 503, map[string]any{"error": "could not list processes"})
-		return
+		return nil, err
 	}
+	at := time.Now()
 	if a.d.GPU != nil {
-		if apps := a.d.GPU.ComputeApps(r.Context()); apps != nil {
+		if apps := a.d.GPU.ComputeApps(ctx); apps != nil {
 			for i := range procs {
 				if by, ok := apps[procs[i].PID]; ok {
 					var sum int64
@@ -754,18 +822,81 @@ func (a *Agent) processes(w http.ResponseWriter, r *http.Request) {
 	if n := cleanProcessNumbers(procs); n > 0 {
 		a.logOnce("processes-nan", "processes: a value that is not a number was left out (null in the answer)", "values", n)
 	}
-	SortProcesses(procs, sortBy)
-	if len(procs) > limit {
-		procs = procs[:limit]
-	}
+	procs = topProcesses(procs, maxProcessRows)
 	for i := range procs {
 		if c := procs[i].Cmdline; c != nil {
 			v := redact.Cmdline(*c, 300)
 			procs[i].Cmdline = &v
 		}
 	}
-	writeJSON(w, 200, map[string]any{"sampled_at": collect.Round(float64(time.Now().UnixMilli())/1000, 3),
-		"sort": sortBy, "total_processes": total, "processes": orEmpty(procs)})
+	return &procList{rows: procs, total: total, at: at}, nil
+}
+
+// topProcesses returns the rows that are among the n highest by CPU, by memory or by GPU memory (a new slice;
+// p is sorted in place).
+func topProcesses(p []collect.Process, n int) []collect.Process {
+	if len(p) <= n {
+		return slices.Clone(p)
+	}
+	keep := make(map[int]bool, 3*n)
+	var out []collect.Process
+	for _, by := range []string{"cpu", "mem", "gpu"} {
+		SortProcesses(p, by)
+		for _, x := range p[:n] {
+			if !keep[x.PID] {
+				keep[x.PID] = true
+				out = append(out, x)
+			}
+		}
+	}
+	return out
+}
+
+// processes serves GET /processes?limit=N&sort=cpu|mem|gpu.
+func (a *Agent) processes(w http.ResponseWriter, r *http.Request) {
+	if !a.cfg.ProcessesEnabled() {
+		writeJSON(w, 403, map[string]any{"error": "process list disabled on this host", "code": "processes_disabled"})
+		return
+	}
+	q := r.URL.Query()
+	limit := 25
+	if v := q.Get("limit"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1 || n > maxProcessRows {
+			writeJSON(w, 400, map[string]any{"error": "limit must be 1-200"})
+			return
+		}
+		limit = n
+	}
+	sortBy := q.Get("sort")
+	if sortBy == "" {
+		sortBy = "cpu"
+	}
+	if sortBy != "cpu" && sortBy != "mem" && sortBy != "gpu" {
+		writeJSON(w, 400, map[string]any{"error": "sort must be cpu, mem or gpu"})
+		return
+	}
+	list, err := a.processList(r.Context())
+	if err != nil {
+		writeJSON(w, 503, map[string]any{"error": "could not list processes"})
+		return
+	}
+	// One answer is put together at a time, as one listing was made at a time before: requests without a pause
+	// keep one processor busy at most, not all of them.
+	a.procAnswerMu.Lock()
+	procs := slices.Clone(list.rows) // the listing is shared: sort a copy
+	SortProcesses(procs, sortBy)
+	if len(procs) > limit {
+		procs = procs[:limit]
+	}
+	b, err := json.Marshal(map[string]any{"sampled_at": collect.Round(float64(list.at.UnixMilli())/1000, 3),
+		"sort": sortBy, "total_processes": list.total, "processes": orEmpty(procs)})
+	a.procAnswerMu.Unlock()
+	if err != nil {
+		writeJSON(w, 500, map[string]any{"error": "internal error"})
+		return
+	}
+	writeJSON(w, 200, json.RawMessage(b))
 }
 
 // cleanProcessNumbers replaces every CPU percent, memory percent and start time that is not a number (NaN, an
