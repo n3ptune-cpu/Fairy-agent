@@ -130,18 +130,7 @@ func main() {
 		}
 	case "check-config":
 		_ = fs.Parse(args)
-		cfg, err := agent.Load(*cfgPath)
-		if err == nil {
-			err = checkConfig(cfg)
-		}
-		if err != nil {
-			fmt.Fprintln(os.Stderr, "config problem:", err)
-			os.Exit(1)
-		}
-		fmt.Println("config OK:", *cfgPath)
-		for _, n := range configNotes(cfg) {
-			fmt.Println(n)
-		}
+		os.Exit(checkConfigCmd(*cfgPath, os.Stdout, os.Stderr))
 	case "config":
 		os.Exit(configCmd(args, os.Stdout, os.Stderr))
 	case "secret":

@@ -31,9 +31,29 @@ func checkConfig(cfg *agent.Config) error {
 	return err
 }
 
+// checkConfigCmd is `fairy-agent check-config`; it returns the exit code.
+func checkConfigCmd(cfgPath string, stdout, stderr io.Writer) int {
+	cfg, err := agent.Load(cfgPath)
+	if err == nil {
+		err = checkConfig(cfg)
+	}
+	if err != nil {
+		fmt.Fprintln(stderr, "config problem:", err)
+		return 1
+	}
+	fmt.Fprintln(stdout, "config OK:", cfgPath)
+	for _, n := range configNotes(cfg) {
+		fmt.Fprintln(stdout, n)
+	}
+	return 0
+}
+
 // configNotes are what check-config says about a config that loads but will not do what its owner expects.
 func configNotes(cfg *agent.Config) []string {
 	var notes []string
+	for _, line := range cfg.Ignored() { // an old power_sources entry of type tuya: ignored, never a problem
+		notes = append(notes, "note: "+line)
+	}
 	for _, id := range cfg.BMCRelay.RedfishWithoutFingerprint() {
 		notes = append(notes, "note: bmc_relay target "+id+" has no tls_fingerprint. The agent sends the BMC's user name and password only to "+
 			"the certificate named there, so nothing is sent to this BMC yet. Ask for it once (the panel's power-on through the BMC): "+

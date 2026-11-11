@@ -111,6 +111,9 @@ func loadSecrets(cfg *Config) error {
 // Run starts every part of the agent and serves until ctx ends.
 func Run(ctx context.Context, cfg *Config, b Build) error {
 	version := b.Version
+	for _, line := range cfg.Ignored() { // e.g. an old power_sources entry of type tuya: said, never fatal
+		slog.Warn("config.yaml: " + line)
+	}
 	if err := loadSecrets(cfg); err != nil {
 		return err
 	}

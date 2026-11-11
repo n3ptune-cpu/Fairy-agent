@@ -23,6 +23,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/n3ptune-cpu/Fairy-agent/pkg/agent/collect"
+	"github.com/n3ptune-cpu/Fairy-agent/pkg/power"
 	"github.com/n3ptune-cpu/Fairy-agent/pkg/release"
 )
 
@@ -78,7 +79,8 @@ type Config struct {
 	PowerSources []map[string]any `yaml:"power_sources"`
 	UPS          []map[string]any `yaml:"ups"`
 
-	path string
+	path    string
+	ignored []string
 }
 
 // ProcessesConfig is the process list (the panel's Processes tab).
@@ -173,6 +175,12 @@ func (c *Config) Dir() string { return filepath.Dir(c.path) }
 // Path is the config file's path.
 func (c *Config) Path() string { return c.path }
 
+// Ignored is one line for each entry of config.yaml that an earlier version used and this one leaves out: a
+// power_sources entry of type tuya, which is no longer supported. Such an entry never stops the agent from
+// starting. Parse takes it out of PowerSources, so nothing else sees it; Run writes these lines to the log and
+// check-config prints them.
+func (c *Config) Ignored() []string { return c.ignored }
+
 func boolOr(p *bool, def bool) bool {
 	if p == nil {
 		return def
@@ -208,6 +216,7 @@ func Parse(data []byte, path string) (*Config, error) {
 		return nil, fmt.Errorf("%s: %w", path, err)
 	}
 	c.path = path
+	c.PowerSources, c.ignored = power.DropRemoved(c.PowerSources)
 	c.defaults()
 	if err := c.Validate(); err != nil {
 		return nil, err

@@ -52,12 +52,10 @@ func TestConfigRejectsNotANumber(t *testing.T) {
 // `fairy-agent check-config` also builds the relayed devices (NewRelay): `.nan` there fails as well.
 func TestRelayConfigRejectsNotANumber(t *testing.T) {
 	for y, want := range map[string]string{
-		"power_sources: [{id: plug, type: tasmota, url: 'http://192.0.2.1', interval: .nan}]":                                        "interval",
-		"power_sources: [{id: plug, type: shelly, url: 'http://192.0.2.1', interval: .inf}]":                                         "interval",
-		"power_sources: [{id: plug, type: shelly, url: 'http://192.0.2.1', interval: -.inf}]":                                        "interval",
-		"power_sources: [{id: bmc, type: redfish, url: 'https://192.0.2.1', password_env: X, interval: .nan}]":                       "interval",
-		"power_sources: [{id: t, type: tuya, device_id: d, ip: 192.0.2.1, local_key_env: K, dps: {power: {dp: '19', scale: .nan}}}]": "scale",
-		"power_sources: [{id: t, type: tuya, device_id: d, ip: 192.0.2.1, local_key_env: K, dps: {power: {dp: '19', scale: .inf}}}]": "scale",
+		"power_sources: [{id: plug, type: tasmota, url: 'http://192.0.2.1', interval: .nan}]":                  "interval",
+		"power_sources: [{id: plug, type: shelly, url: 'http://192.0.2.1', interval: .inf}]":                   "interval",
+		"power_sources: [{id: plug, type: shelly, url: 'http://192.0.2.1', interval: -.inf}]":                  "interval",
+		"power_sources: [{id: bmc, type: redfish, url: 'https://192.0.2.1', password_env: X, interval: .nan}]": "interval",
 	} {
 		c, err := Parse([]byte(y), "config.yaml")
 		if err != nil {
@@ -67,8 +65,7 @@ func TestRelayConfigRejectsNotANumber(t *testing.T) {
 			t.Errorf("%q: got %v, want an error naming %s", y, err, want)
 		}
 	}
-	c, err := Parse([]byte("power_sources: [{id: plug, type: tasmota, url: 'http://192.0.2.1', interval: 300},"+
-		" {id: t, type: tuya, device_id: d, ip: 192.0.2.1, local_key_env: K, dps: {power: {dp: '19', scale: 0.1}}}]"), "config.yaml")
+	c, err := Parse([]byte("power_sources: [{id: plug, type: tasmota, url: 'http://192.0.2.1', interval: 300}]"), "config.yaml")
 	if err != nil {
 		t.Fatal(err)
 	}

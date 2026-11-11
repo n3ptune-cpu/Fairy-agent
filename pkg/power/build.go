@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"net/url"
+	"slices"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -30,6 +31,38 @@ func DecodeStrict(raw map[string]any, out any) error {
 
 // Types are the built-in `type:` values of power_sources entries.
 var Types = []string{"agent", "ipmi", "nut", "redfish", "shelly", "tasmota", "tuya"}
+
+// Removed are `type:` values that earlier versions read and this one does not (tuya, the plugs' local protocol:
+// nobody had set one up). A config file that still has such an entry must never stop the agent or
+// the panel from starting: whoever loads power_sources takes these entries out with DropRemoved first and
+// shows its lines (in the log at start and in the config check).
+var Removed = []string{"tuya"}
+
+// DropRemoved returns raws without the entries of a type that is no longer supported (Removed), and one line
+// for each entry it took out, such as
+//
+//	power source "desk-plug": tuya is no longer supported and is ignored (remove the entry from config.yaml)
+//
+// Such an entry is not checked in any other way: whatever else it holds, it is only ignored. An entry without
+// an id is named by its place in the list. Without such an entry, raws comes back as it is.
+func DropRemoved(raws []map[string]any) (kept []map[string]any, notes []string) {
+	for i, raw := range raws {
+		typ, _ := raw["type"].(string)
+		if !slices.Contains(Removed, typ) {
+			kept = append(kept, raw)
+			continue
+		}
+		name := fmt.Sprintf("#%d", i+1)
+		if id, ok := raw["id"].(string); ok && id != "" {
+			name = fmt.Sprintf("%q", id)
+		}
+		notes = append(notes, fmt.Sprintf("power source %s: %s is no longer supported and is ignored (remove the entry from config.yaml)", name, typ))
+	}
+	if notes == nil {
+		return raws, nil
+	}
+	return kept, notes
+}
 
 // Extra holds additional source types (the demo simulator registers "demo").
 var Extra = map[string]func(raw map[string]any) (Source, error){}
