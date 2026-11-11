@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/n3ptune-cpu/Fairy-agent/pkg/agent/collect"
 	"github.com/n3ptune-cpu/Fairy-agent/pkg/release"
 )
 
@@ -45,7 +46,7 @@ func runSystemctl(ctx context.Context, args ...string) error {
 	}
 	ctx, cancel := context.WithTimeout(ctx, 90*time.Second)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, path, args...).CombinedOutput()
+	out, err := collect.Command(ctx, path, args...).CombinedOutput()
 	if err != nil {
 		msg := strings.TrimSpace(string(out))
 		if len(msg) > 200 {

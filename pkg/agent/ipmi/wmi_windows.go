@@ -15,6 +15,8 @@ import (
 	"time"
 
 	"golang.org/x/sys/windows"
+
+	"github.com/n3ptune-cpu/Fairy-agent/pkg/agent/collect"
 )
 
 // WMI sends raw IPMI requests through Windows' built-in IPMI driver, using the documented Microsoft_IPMI WMI
@@ -45,7 +47,7 @@ func (w *WMI) start() error {
 		return err
 	}
 	ps := filepath.Join(sys, "WindowsPowerShell", "v1.0", "powershell.exe")
-	cmd := exec.Command(ps, "-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand", EncodedWMIScript())
+	cmd := collect.Command(context.Background(), ps, "-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand", EncodedWMIScript())
 	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true,
 		CreationFlags: windows.CREATE_NO_WINDOW | windows.BELOW_NORMAL_PRIORITY_CLASS}
 	stdin, err := cmd.StdinPipe()

@@ -89,8 +89,9 @@ type Build struct {
 }
 
 // loadSecrets reads env_file into this process's environment and hides its names, the BMC relay's passwords
-// and the IPMI password from every program the agent starts (collect.HideEnv): ipmitool, nvidia-smi and the
-// others get an environment without them. It must run before a transport is built (IPMITransport copies the
+// and the IPMI password from every program the agent starts (collect.HideEnv): ipmitool, nvidia-smi,
+// systemctl, busctl and PowerShell get an environment without them (collect.MinimalEnv, collect.Command; a
+// test reads the source to keep it so). It must run before a transport is built (IPMITransport copies the
 // environment for ipmitool then).
 func loadSecrets(cfg *Config) error {
 	names, err := LoadEnvFile(cfg.EnvFile)

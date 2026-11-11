@@ -1,7 +1,9 @@
 package collect
 
 import (
+	"context"
 	"os"
+	"os/exec"
 	"strings"
 	"sync"
 )
@@ -38,3 +40,12 @@ func minimalEnv() []string {
 
 // MinimalEnv is the environment for helper processes (exported for the IPMI transports).
 func MinimalEnv() []string { return minimalEnv() }
+
+// Command is exec.CommandContext with MinimalEnv as the program's environment: what the running agent and the
+// helper use to start a system program (systemctl, busctl, PowerShell), so that none of them is handed the
+// device secrets of env_file or a FAIRY_ variable. Everything else of the environment is passed on.
+func Command(ctx context.Context, path string, args ...string) *exec.Cmd {
+	cmd := exec.CommandContext(ctx, path, args...)
+	cmd.Env = minimalEnv()
+	return cmd
+}

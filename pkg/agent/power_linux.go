@@ -3,13 +3,15 @@
 package agent
 
 import (
+	"context"
 	"errors"
 	"log/slog"
 	"os"
-	"os/exec"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/n3ptune-cpu/Fairy-agent/pkg/agent/collect"
 )
 
 // systemPower waits in the agent and then asks systemd to power off, reboot or suspend (`systemctl
@@ -55,7 +57,7 @@ func (s *systemPower) Schedule(action string, delay time.Duration, _ string) err
 	}
 	s.timer = time.AfterFunc(delay, func() {
 		slog.Warn("power: running systemctl " + verb)
-		if out, err := exec.Command(path, verb).CombinedOutput(); err != nil {
+		if out, err := collect.Command(context.Background(), path, verb).CombinedOutput(); err != nil {
 			slog.Error("power: systemctl failed (polkit rule missing?)", "verb", verb, "error", err.Error(), "output", string(out))
 		}
 	})
@@ -80,7 +82,7 @@ func (s *systemPower) CanSleep() (bool, string) {
 	if err != nil {
 		return sleepFromKernel(string(state))
 	}
-	out, err := exec.Command(busctl, "call", "--system", "org.freedesktop.login1", "/org/freedesktop/login1",
+	out, err := collect.Command(context.Background(), busctl, "call", "--system", "org.freedesktop.login1", "/org/freedesktop/login1",
 		"org.freedesktop.login1.Manager", "CanSuspend").Output()
 	if err != nil {
 		return sleepFromKernel(string(state))
