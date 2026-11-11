@@ -88,8 +88,9 @@ var pickHealthPort = func() int { return healthSourcePort(rand.IntN) }
 //
 // With a source port the socket gets SO_REUSEADDR. Two things follow, both wanted. A port that anything on
 // this machine listens on is still refused to the check (the kernel says "address in use" and the check takes
-// another port). And a service can start to listen on the port while, or right after, the check used it:
-// without the option the port was refused to a service for a minute after a check that gave up first.
+// another port). And a service that sets SO_REUSEADDR itself, as servers do, can start to listen on the port
+// while, or right after, the check used it: without the option the port was refused to it for a minute after
+// a check that gave up first. (A service that does not set it is still refused for that time, as before.)
 var dialTCP = func(ctx context.Context, network, addr string, port int) (net.Conn, error) {
 	var d net.Dialer
 	if port > 0 {

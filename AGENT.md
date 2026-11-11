@@ -1277,6 +1277,8 @@ are lists of devices: edit those in the file.
     second, every processor core busy for as long as the update runs) can keep the queue full, and then the
     check fails whatever port it comes from.
   * A program that has the right to use ports below 1024 can fill the 4 slots.
+  * Where root itself cannot use those ports (a container without `CAP_NET_BIND_SERVICE`, a firewall that
+    drops packets from them), the check comes from an ordinary port and shares the 8 connections as before.
   * There are no such slots on a machine where `net.ipv4.ip_unprivileged_port_start` was lowered below 1024,
     and none on Windows, which has no ports reserved for administrators: there a local program that keeps
     opening connections to the agent can make the check fail as before.
