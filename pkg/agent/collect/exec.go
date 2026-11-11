@@ -22,11 +22,13 @@ func HideEnv(names ...string) {
 	}
 }
 
-// minimalEnv is this process's environment without the agent's secrets, for nvidia-smi and other helpers.
+// minimalEnv is this process's environment without the agent's secrets, for nvidia-smi and other helpers. It
+// is never nil: for a nil list exec gives the child this process's whole environment, secrets included, and
+// that is what happened when nothing but secrets was in it.
 func minimalEnv() []string {
 	secretMu.Lock()
 	defer secretMu.Unlock()
-	var out []string
+	out := []string{}
 	for _, kv := range os.Environ() {
 		k, _, _ := strings.Cut(kv, "=")
 		ku := strings.ToUpper(k)
