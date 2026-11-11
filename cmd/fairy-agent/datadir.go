@@ -445,14 +445,47 @@ func configTokenFiles(cfgPath string) []string {
 	dir := filepath.Dir(cfgPath)
 	files := []string{filepath.Join(dir, "token"), filepath.Join(dir, "control-token")}
 	if c, err := agent.Load(cfgPath); err == nil {
-		files = files[:0]
-		for _, p := range []string{c.TokenFile, c.ControlTokenFile} {
-			if tokenPathProblem(dir, p, runtime.GOOS == "windows") == "" {
-				files = append(files, p)
-			}
+		files = tokenFilesNamed(dir, []string{c.TokenFile, c.ControlTokenFile}, runtime.GOOS == "windows")
+	}
+	return files
+}
+
+// tokenFilesNamed are those of the paths config.yaml names as token files that are files in its folder dir
+// (tokenPathProblem). On Windows a "." part and a doubled separator are taken out of a path first: they mean
+// nothing to the system, tokenPathProblem refuses them, and a token file named that way was left out here, so
+// the repair did not replace it when another account could read it (review of audit 4, T-38). ".." and the
+// other spellings tokenPathProblem refuses stay refused.
+func tokenFilesNamed(dir string, named []string, windows bool) (files []string) {
+	for _, p := range named {
+		if windows {
+			p = withoutDots(p)
+		}
+		if tokenPathProblem(dir, p, windows) == "" {
+			files = append(files, p)
 		}
 	}
 	return files
+}
+
+// withoutDots is a Windows path without "." parts and doubled separators. A path that has neither is returned
+// as it is; so is a network or device path (it starts with two separators) and a path that ends in a separator.
+func withoutDots(p string) string {
+	f := strings.ReplaceAll(p, "/", `\`)
+	if strings.HasPrefix(f, `\\`) || strings.HasSuffix(f, `\`) {
+		return p
+	}
+	segs := strings.Split(f, `\`)
+	out := segs[:0]
+	for i, s := range segs {
+		if i > 0 && (s == "" || s == ".") {
+			continue
+		}
+		out = append(out, s)
+	}
+	if len(out) == len(segs) {
+		return p
+	}
+	return strings.Join(out, `\`)
 }
 
 const repairHint = `; as Administrator run: & "C:\Program Files\Fairy\fairy-agent.exe" setup-self-update   (it repairs the folder; what it cannot trust is moved aside)`
@@ -1229,8 +1262,13 @@ func (r dirReport) leaked(p string, windows bool) bool {
 }
 
 // pathKey is a path in the one spelling under which two names of the same file are equal: without "."
-// segments and doubled separators, and on Windows with "\" for "/" and without regard to letter case. (A
-// file's 8.3 short name is not known here; tokenPathProblem does not accept one for a token file.)
+// segments and doubled separators, and on Windows with "\" for "/" and without regard to letter case.
+//
+// Still open: a file's own 8.3 short name (CONTRO~1 for control-token) is not known here, tokenPathProblem
+// accepts it as a token path (it refuses only the folder's short name), and so a token file that config.yaml
+// names by its short name is not found among the readable files. That needs a config.yaml written by hand in
+// that way; `join` and the installer write the full name. Letter case is folded with strings.ToLower, which is
+// not NTFS's own table (they differ for a few rare letters only).
 func pathKey(p string, windows bool) string {
 	if !windows {
 		return filepath.Clean(p)

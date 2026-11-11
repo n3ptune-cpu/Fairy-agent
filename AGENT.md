@@ -276,7 +276,7 @@ it is not a sign of a failed check.)
 | a link or junction inside | removes the link (not what it points to) | a `repaired:` line |
 | a file that another account could read, but not change | writes it anew with the folder's permissions | a `repaired:` line |
 | anything at all that does not belong in `logs\`, `state\` or `update\stage\` (a link, a file of another account, a file with a second name, folders nested more than 8 deep), or one of these three folders with other permissions | moves **that whole folder** into `untrusted-<UTC date and time>\` and makes a new, empty one. See "The agent's three folders" below | a `repaired:` line that names what was found and says what went with the folder |
-| a token file that another account could read, or that went aside (the file `token_file` / `control_token_file` name, however config.yaml spells the path) | writes a new token | `IMPORTANT: the tokens are new. Pair this PC with the panel again (Re-pair in the panel).` |
+| a token file that another account could read, or that went aside (the file `token_file` / `control_token_file` name in config.yaml, whether the path is written with `\` or `/`, in any letter case, with `.` parts or doubled separators; not if it is written with the file's short 8.3 name such as `CONTRO~1`: write the full name) | writes a new token | `IMPORTANT: the tokens are new. Pair this PC with the panel again (Re-pair in the panel).` |
 
 If a rename fails (for example because a program holds a file in the folder open), the installer stops and
 says so: stop the two services (`Stop-Service fairy-agent, fairy-agent-helper`) and run it again. The installer

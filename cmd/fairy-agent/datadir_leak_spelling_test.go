@@ -101,3 +101,68 @@ func TestLeakedLookupKnowsWindowsSpellings(t *testing.T) {
 		t.Error("an empty report")
 	}
 }
+
+// Review of the fix (R10): on Windows a token path with a "." part or a doubled separator never reached the
+// lookup above. The check of what config.yaml may name (tokenPathProblem) refuses these spellings, so the file
+// was left out of the list of token files, and a token another account could read kept its value. They mean
+// nothing to the system, so they are taken out before the check. Judged with Windows' rules on every system:
+// from the spelling in config.yaml to "is among the readable files".
+func TestTokenFilesOfConfigWithDotsAndDoubledSeparators(t *testing.T) {
+	const dir = `C:\ProgramData\fairy-agent`
+	rep := dirReport{Leaked: map[string]bool{dir + `\token`: true}} // as the repair spells the file it found readable
+	for _, s := range []string{
+		`C:\ProgramData\fairy-agent\token`,
+		`C:\ProgramData\fairy-agent\.\token`,
+		`C:\ProgramData\fairy-agent\\token`,
+		`C:\ProgramData\fairy-agent\.\.\\.\token`,
+		`C:\ProgramData\.\fairy-agent\token`,
+		`C:\\ProgramData\\fairy-agent\\token`,
+		`C:/ProgramData/fairy-agent/./token`,
+		`C:/ProgramData//fairy-agent/token`,
+		`c:\PROGRAMDATA\.\Fairy-Agent\\TOKEN`,
+	} {
+		files := tokenFilesNamed(dir, []string{s}, true)
+		if len(files) != 1 {
+			t.Errorf("%s: not taken as a token file in the folder (%v)", s, files)
+			continue
+		}
+		if why := tokenPathProblem(dir, files[0], true); why != "" {
+			t.Errorf("%s became %s, which %s", s, files[0], why)
+		}
+		if !rep.leaked(files[0], true) {
+			t.Errorf("%s (as %s): not found among the files another account could read", s, files[0])
+		}
+	}
+	// Everything else that the check refuses is still refused: nothing is opened or written at such a path.
+	for _, s := range []string{
+		`C:\ProgramData\fairy-agent\logs\..\token`, `C:\ProgramData\fairy-agent\..\fairy-agent\token`, `C:\ProgramData\fairy-agent\..`,
+		`C:\ProgramData\fairy-agent\token.`, `C:\ProgramData\fairy-agent\token `, `C:\ProgramData\fairy-agent\token::$DATA`,
+		`\\?\C:\ProgramData\fairy-agent\token`, `\\server\share\token`, `//server/share/token`, `\\.\pipe\x`,
+		`C:\PROGRA~3\fairy-agent\token`, `C:\ProgramData\fairy-agent\logs\.\token`, `C:\ProgramData\fairy-agent2\.\token`,
+		`C:\ProgramData\fairy-agent\token\`, `C:\ProgramData\fairy-agent\.`, `C:\ProgramData\fairy-agent\\`, `token`, `.\token`, ``,
+	} {
+		if files := tokenFilesNamed(dir, []string{s}, true); len(files) != 0 {
+			t.Errorf("%q is taken as a token file in the folder: %v", s, files)
+		}
+	}
+	// a path with nothing to take out is passed on letter for letter
+	if got := tokenFilesNamed(dir, []string{`C:/ProgramData/fairy-agent/token`, `c:\programdata\FAIRY-AGENT\control-token`}, true); len(got) != 2 ||
+		got[0] != `C:/ProgramData/fairy-agent/token` || got[1] != `c:\programdata\FAIRY-AGENT\control-token` {
+		t.Errorf("plain spellings were changed: %q", got)
+	}
+	// Known and still open: the file's own short (8.3) name is accepted as a token path and is not matched.
+	short := tokenFilesNamed(dir, []string{`C:\ProgramData\fairy-agent\CONTRO~1`}, true)
+	if len(short) != 1 || (dirReport{Leaked: map[string]bool{dir + `\control-token`: true}}).leaked(short[0], true) {
+		t.Errorf("the short name case changed (%v): correct the comment at pathKey and the guide", short)
+	}
+	// elsewhere nothing changes: the check there cleans the path itself
+	d := t.TempDir()
+	sep := string(filepath.Separator)
+	if runtime.GOOS != "windows" {
+		for _, s := range []string{filepath.Join(d, "token"), d + sep + "." + sep + "token", d + sep + sep + "token"} {
+			if got := tokenFilesNamed(d, []string{s}, false); len(got) != 1 || got[0] != s {
+				t.Errorf("%s: %q", s, got)
+			}
+		}
+	}
+}
