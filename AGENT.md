@@ -1235,10 +1235,9 @@ are lists of devices: edit those in the file.
     guesses of the read token there, because only the right one is answered. Each try costs it a slow
     computation, and a token made by `fairy-agent join` or `gen-token` cannot be guessed; a token you chose
     yourself should be long and random. A wrong try is written to the agent's log (at most one line a minute).
-    On Linux, after 10 wrong tries in a minute further tries from the machine are not looked at for the rest
-    of that minute. The update's own check is not held up by that: root sends it from a port only root can
-    use. On Windows wrong tries are logged but not limited (the update's check cannot be told from another
-    local program there, and it must never be refused).
+    Wrong tries are logged but not limited: the update's own check comes the same way and cannot always be
+    told from another local program's tries, so a limit would let any program on the machine make updates
+    fail with a few wrong tries.
 * The join code is never an argument of a program: the install scripts and `fairy-agent join` take it from
   standard input or from the environment, and never print it. The old form with the code as an argument
   (`--join CODE`, `-Join CODE`, `fairy-agent join --code CODE`) is still accepted, prints a deprecation line

@@ -68,10 +68,6 @@ const (
 	healthKeyRounds = 600_000
 )
 
-// healthWrongPerMin is how many /health requests with a wrong proof are looked at in a minute from callers on
-// this machine that are not root's check (where the two can be told apart).
-const healthWrongPerMin = 10
-
 var healthNonceRe = regexp.MustCompile(`^[A-Za-z0-9_-]{16,64}$`)
 
 var (
@@ -148,25 +144,14 @@ func (a *Agent) health(w http.ResponseWriter, r *http.Request) bool {
 		return false
 	}
 	// A caller on this machine can test a guess of the read token here: only the right one is answered. That
-	// was not counted and not logged (audit 4, T-25). Now a wrong ask is written to the log (once a minute),
-	// and where root's check can be told from other local connections (it comes through root's own slots, see
-	// LimitConns), other callers get healthWrongPerMin wrong asks a minute: after that their asks are not
-	// looked at, right or wrong. Root's check is never counted and never refused. Where it cannot be told
-	// apart (Windows) nothing is refused: a local program could otherwise make the update's check fail with
-	// wrong asks, which is what counting /health in the wrong-token limiter would do as well.
-	fromRoot := false
-	if c, ok := r.Context().Value(connKey{}).(interface{ Root() bool }); ok {
-		fromRoot = c.Root()
-	}
-	limited := a.rootLane && !fromRoot
-	if limited && !a.healthBad.allowPeek("this machine") {
-		return false
-	}
+	// was not logged (audit 4, T-25). Now a wrong ask is written to the log, once a minute. It is not limited:
+	// the update's check comes over this same route, and it cannot always be told from another local program's
+	// asks (not on Windows; on Linux not when root's check has to come from an ordinary port, and not when the
+	// installer is older than root's lane). A limit here made ten wrong asks of any local program enough to
+	// fail the update in those cases (review R8), which is what counting /health in the wrong-token limiter
+	// would do as well. What limits guessing is the cost of one guess (healthKeyRounds) and a random token.
 	key := healthKey(a.readH)
 	if subtle.ConstantTimeCompare([]byte(ask), []byte(healthAsk(key, nonce))) != 1 {
-		if limited {
-			a.healthBad.allow("this machine")
-		}
 		a.logOnce("health", "health check: a request from this machine carried a wrong proof (a program here asks "+
 			HealthPath+" without the read token, or tests guesses of it)", "remote", remote.String())
 		return false

@@ -1,9 +1,16 @@
 package agent
 
 // Audit 4, T-25: /health answers a caller on this machine whose proof is made from the right read token, and
-// nobody else. So a local program can test guesses of the token there: nothing was counted, nothing limited
-// and nothing logged (300 wrong asks in 0.14 s in the verifier's run). The wrong-token limiter must not count
-// them: it is keyed by the address, and the update's health check comes from the same address (T-03).
+// nobody else. So a local program can test guesses of the token there: nothing was counted and nothing logged
+// (300 wrong asks in 0.14 s in the verifier's run). Now a wrong ask is logged.
+//
+// Wrong asks are NOT limited. The first fix refused every ask from an ordinary port after ten wrong ones in a
+// minute, and let only root's check through, which comes from a port below 1024 on Linux. The review showed
+// that root's check comes from an ordinary port in three cases (root may not use low ports, packets from them
+// are dropped, the installer is older than the lane), and there ten wrong asks of any local program made the
+// update fail. No limit that sits on this route can spare a check it cannot tell from the guesses, so the
+// limit is gone (review R8). The wrong-token limiter must not count these asks either: it is keyed by the
+// address, and the update's check comes from the same address as every local program.
 
 import (
 	"bufio"
@@ -99,10 +106,9 @@ func captureLog(t *testing.T) *logBuffer {
 }
 
 // healthRig is an agent behind the real connection limiter, with the test's root ports.
-func healthRig(t *testing.T, rootLane bool) (a *Agent, addr string) {
+func healthRig(t *testing.T) (a *Agent, addr string) {
 	t.Helper()
 	r := newRig(t, "")
-	r.a.rootLane = rootLane
 	tcp, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -116,65 +122,40 @@ func healthRig(t *testing.T, rootLane bool) (a *Agent, addr string) {
 	return r.a, ln.Addr().String()
 }
 
-// Where root has a lane of its own (Linux): wrong asks from an ordinary port are counted, and after
-// healthWrongPerMin of them in a minute no ask from an ordinary port is looked at any more, right or wrong.
-// Root's check is never counted and never refused, and the wrong-token limiter is not touched.
-func TestHealthWrongAsksAreLimitedWhereRootHasItsLane(t *testing.T) {
+// Wrong asks from this machine are written to the log, at most one line a minute, without the token or the
+// guess. They never make a right ask fail, whichever port it comes from: the update's check must pass after
+// any number of wrong asks of another local program, or that program could make every update roll back.
+func TestHealthWrongAsksAreLoggedAndNeverRefuseTheCheck(t *testing.T) {
 	logs := captureLog(t)
-	_, addr := healthRig(t, true)
-	wrong := wrongHealthRequests(healthWrongPerMin)
+	_, addr := healthRig(t)
+	const n = 25
+	wrong := wrongHealthRequests(n)
 	if st := askHealth(t, addr, readTok, "aaaaaaaaaaaaaaa0", false); st != 200 {
 		t.Fatal("the right ask from an ordinary port, before any wrong one:", st)
 	}
+	start := time.Now()
 	for i, req := range wrong {
-		if st := sendHealth(t, addr, req, false); st != 404 {
+		if st := sendHealth(t, addr, req, i%5 == 4); st != 404 { // most from an ordinary port, some from root's
 			t.Fatalf("wrong ask %d: HTTP %d", i, st)
 		}
 	}
-	// the limit is reached: a guess that happens to be right gets the same answer as a wrong one
-	if st := askHealth(t, addr, readTok, "cccccccccccccccc", false); st != 404 {
-		t.Fatalf("after %d wrong asks the right one from an ordinary port was still answered: HTTP %d (no limit on guesses)", healthWrongPerMin, st)
+	// the update's check from an ordinary port: Windows, a root that may not use low ports, an older installer
+	if st := askHealth(t, addr, readTok, "cccccccccccccccc", false); st != 200 {
+		t.Fatalf("the update's check from an ordinary port after %d wrong asks of a local program: HTTP %d (a local program could make every update roll back)", n, st)
 	}
-	// root's check passes, as often as it likes
-	for i := 0; i < 3; i++ {
-		if st := askHealth(t, addr, readTok, fmt.Sprintf("dddddddddddddd%02d", i), true); st != 200 {
-			t.Fatalf("root's check %d during the limit: HTTP %d (a local program could make every update roll back again)", i, st)
-		}
-	}
-	// wrong asks through root's lane are not counted against anybody (and root needs no guess)
-	if st := askHealth(t, addr, "a-guess-of-the-read-token-0", "eeeeeeeeeeeeeeee", true); st != 404 {
-		t.Fatal(st)
+	// and from one of root's ports
+	if st := askHealth(t, addr, readTok, "dddddddddddddddd", true); st != 200 {
+		t.Fatalf("root's check after %d wrong asks: HTTP %d", n, st)
 	}
 	// the wrong-token limiter knows nothing of all this: a request with the right token is answered
 	if st, err := metricsFrom(floodLocal, addr); err != nil || st != 200 {
 		t.Fatalf("/metrics with the right token after the wrong health asks: %d %v (they were counted as wrong tokens)", st, err)
 	}
-	if n := strings.Count(logs.String(), "health check: a request from this machine"); n != 1 {
-		t.Fatalf("want one log line about the wrong asks (at most one a minute), got %d:\n%s", n, logs.String())
+	lines := strings.Count(logs.String(), "health check: a request from this machine")
+	if most := 1 + int(time.Since(start)/time.Minute); lines < 1 || lines > most {
+		t.Fatalf("want one log line a minute about the wrong asks (1 to %d here), got %d:\n%s", most, lines, logs.String())
 	}
 	if strings.Contains(logs.String(), readTok) || strings.Contains(logs.String(), "a-guess-of") {
 		t.Fatal("a token or a guess is in the log:\n" + logs.String())
-	}
-}
-
-// Where root has no lane (Windows, or Linux with the reserved ports given away): the update's check comes
-// from an ordinary port like everything else, so nothing may ever refuse a right ask there, or a local program
-// could make every update roll back with wrong asks. Wrong asks are written to the log, once a minute.
-func TestHealthWrongAsksAreOnlyLoggedWithoutRootsLane(t *testing.T) {
-	logs := captureLog(t)
-	_, addr := healthRig(t, false)
-	for i, req := range wrongHealthRequests(healthWrongPerMin + 5) {
-		if st := sendHealth(t, addr, req, false); st != 404 {
-			t.Fatalf("wrong ask %d: HTTP %d", i, st)
-		}
-	}
-	if st := askHealth(t, addr, readTok, "cccccccccccccccc", false); st != 200 {
-		t.Fatalf("the update's check after %d wrong asks of a local program: HTTP %d (updates could be blocked)", healthWrongPerMin+5, st)
-	}
-	if st, err := metricsFrom(floodLocal, addr); err != nil || st != 200 {
-		t.Fatal(st, err)
-	}
-	if n := strings.Count(logs.String(), "health check: a request from this machine"); n != 1 {
-		t.Fatalf("want one log line about the wrong asks, got %d:\n%s", n, logs.String())
 	}
 }
