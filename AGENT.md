@@ -1134,7 +1134,8 @@ the user (`sub`), the key id and the first 8 characters of the challenge. Never 
 "thumbprint"}], "users": <how many>, "fan_window_s": ..., "boot_shutdown_s": ..., "error": ...}`. No user ids
 and no keys, only how many users and each key's thumbprint. `unknown`: the Windows helper is not answering.
 `"agent_checks": [...]` (Windows): the requests the agent carries out and checks itself; `"agent_error"`: why
-it cannot (those are then refused). No `approval` block: an agent from before this, or Windows without the
+it cannot (those are then refused; only while the helper answers and says there is no trust file do they run
+as they do without trust). No `approval` block: an agent from before this, or Windows without the
 helper and without a trust file. Refusals: `403 approval_required` (none sent), `403 approval_refused` (sent,
 not accepted; the text says why), `503 approval_unavailable` (broken trust file, or nothing that could check
 is reachable). For the first-time set: `403 proof_required`, `403 proof_refused`, `409 already_set`.
