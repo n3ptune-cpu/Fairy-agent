@@ -299,6 +299,7 @@ func Run(ctx context.Context, cfg *Config, b Build) error {
 	}
 	// at most MaxConns open connections, MaxConnsPerSender per sender, some kept for the panel and this machine
 	panel := PairedPanel(pairPath)
+	d.Pairer.Panel = panel // /pair counts a request before it opens the state file
 	if cfg.OnlyFromPanel {
 		if p := panel(); p != "" {
 			slog.Info("only_from_panel: connections are accepted only from the panel and from this machine", "panel", p)

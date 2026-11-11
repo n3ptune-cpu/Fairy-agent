@@ -51,6 +51,11 @@ type Pairer struct {
 	Tokens func() (Tokens, error)
 	Info   func() enroll.Response // version, hostname, platform, features (no tokens)
 	Now    func() time.Time
+	// Panel returns the panel's address on record (PairedPanel: from the state file, read at most every five
+	// seconds). With it, who is asking is settled and the request is counted before the state file is opened:
+	// a request over its budget costs no look at the file. Without it (nil) the file is read first.
+	Panel func() string
+	read  func(path string) (enroll.State, error) // enroll.ReadState (replaced by tests that count)
 
 	mu     sync.Mutex
 	limit  *limiter // the panel's address
@@ -60,7 +65,7 @@ type Pairer struct {
 
 // NewPairer builds the /pair handler for a state file.
 func NewPairer(path string, tokens func() (Tokens, error), info func() enroll.Response) *Pairer {
-	return &Pairer{Path: path, Tokens: tokens, Info: info, Now: time.Now, limit: newLimiter(enroll.RatePerMin, time.Minute),
+	return &Pairer{Path: path, Tokens: tokens, Info: info, Now: time.Now, read: enroll.ReadState, limit: newLimiter(enroll.RatePerMin, time.Minute),
 		each: newLimiter(enroll.RatePerMin, time.Minute), others: newLimiter(pairOthersPerMin, time.Minute)}
 }
 
@@ -94,12 +99,28 @@ func (p *Pairer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ip := clientIP(r)
+	// The caller's address first: only then is the request counted, in the panel's budget or the others'. And
+	// the budget before the state file: the file used to be opened and read, under p.mu, for every request,
+	// counted or not (audit 4, T-55). The address on record may be a few seconds old; it only decides which
+	// budget counts the request. Whether pairing is open, and to whom, is read from the file below.
+	counted := false
+	if p.Panel != nil {
+		panel := p.Panel()
+		if !p.allow(ip, panel != "" && ip == panel) {
+			pairErr(w, 429, "rate_limited", "too many pairing requests; try again in a minute")
+			return
+		}
+		counted = true
+	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	now := p.Now()
-	st, err := enroll.ReadState(p.Path)
-	// The caller's address first: only then is the request counted, in the panel's budget or the others'.
-	if !p.allow(ip, err == nil && st.Panel != "" && ip == st.Panel) {
+	read := p.read
+	if read == nil { // a Pairer that was not made by NewPairer
+		read = enroll.ReadState
+	}
+	st, err := read(p.Path)
+	if !counted && !p.allow(ip, err == nil && st.Panel != "" && ip == st.Panel) {
 		pairErr(w, 429, "rate_limited", "too many pairing requests; try again in a minute")
 		return
 	}
