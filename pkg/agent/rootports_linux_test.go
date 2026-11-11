@@ -6,6 +6,7 @@ import (
 	"context"
 	"net"
 	"os"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -82,4 +83,77 @@ func TestRootsRealHealthCheckDuringALocalFlood(t *testing.T) {
 		time.Sleep(100 * time.Millisecond)
 	}
 	t.Logf("the flood opened %d connections; stats %+v", opened.Load(), ln.Stats())
+}
+
+// When the check falls back to an ordinary port, and when it does not (the dial itself is played by the test).
+func TestHealthDialFallsBackToAnOrdinaryPort(t *testing.T) {
+	old := dialTCP
+	t.Cleanup(func() { dialTCP = old })
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			c.Close()
+		}
+	}()
+	inUse := &net.OpError{Op: "dial", Err: os.NewSyscallError("bind", syscall.EADDRINUSE)}
+	denied := &net.OpError{Op: "dial", Err: os.NewSyscallError("bind", syscall.EACCES)}
+	refused := &net.OpError{Op: "dial", Err: os.NewSyscallError("connect", syscall.ECONNREFUSED)}
+	for name, c := range map[string]struct {
+		low       func(ctx context.Context) error // what a dial from one of root's ports does
+		wantLow   int                             // how many of root's ports are tried
+		wantPlain bool                            // whether an ordinary port is used then
+		wantErr   bool
+		atLeast   time.Duration
+	}{
+		"every port is taken":             {func(context.Context) error { return inUse }, 8, true, false, 0},
+		"root may not use the ports":      {func(context.Context) error { return denied }, 1, true, false, 0},
+		"the agent is not listening":      {func(context.Context) error { return refused }, 1, false, true, 0},
+		"packets from low ports are lost": {func(ctx context.Context) error { <-ctx.Done(); return ctx.Err() }, 1, true, false, rootDialWait},
+	} {
+		low, plain := 0, 0
+		dialTCP = func(ctx context.Context, network, addr string, port int) (net.Conn, error) {
+			if port == 0 {
+				plain++
+				return old(ctx, network, addr, 0)
+			}
+			if port < 600 || port > 1023 {
+				t.Errorf("%s: port %d is not one of 600 to 1023", name, port)
+			}
+			low++
+			return nil, c.low(ctx)
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second) // the check's own limit
+		start := time.Now()
+		conn, err := dialHealthAs(ctx, "tcp", ln.Addr().String(), true)
+		took := time.Since(start)
+		cancel()
+		if conn != nil {
+			conn.Close()
+		}
+		if low != c.wantLow || (plain == 1) != c.wantPlain || (err != nil) != c.wantErr || took < c.atLeast || took > c.atLeast+time.Second {
+			t.Errorf("%s: %d tries from root's ports (want %d), ordinary port used %d times (want %v), err %v, took %s",
+				name, low, c.wantLow, plain, c.wantPlain, err, took)
+		}
+	}
+	// not root, or no reserved ports on this system: an ordinary port at once
+	low := 0
+	dialTCP = func(ctx context.Context, network, addr string, port int) (net.Conn, error) {
+		if port != 0 {
+			low++
+		}
+		return old(ctx, network, addr, 0)
+	}
+	if conn, err := dialHealthAs(context.Background(), "tcp", ln.Addr().String(), false); err != nil || low != 0 {
+		t.Fatal(err, low)
+	} else {
+		conn.Close()
+	}
 }
