@@ -18,6 +18,7 @@ import (
 	"math/rand/v2"
 	"net"
 	"net/http"
+	"net/netip"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -199,7 +200,7 @@ func TestRootLaneHasItsOwnSlots(t *testing.T) {
 	if s := ln.Stats(); s.Trusted != MaxConnsPerSender || s.Root != RootConns || s.Refused != 0 {
 		t.Fatalf("%+v", s)
 	}
-	// a fifth from a root port finds the lane full: it waits (300 ms here) and is then closed
+	// a fifth from a root port finds the lane full of connections that are not idle: it is closed at once
 	c5, err := dialAsRoot(floodLocal, addr)
 	if err != nil {
 		t.Fatal(err)
@@ -242,4 +243,153 @@ func TestRootLaneIsForThisMachineOnly(t *testing.T) {
 	if err := healthFrom(floodLocal, false, addr, "2222222222222222"); err != nil {
 		t.Fatal(err)
 	}
+}
+
+// Review of the fix (R5): four idle connections in root's lane (one answered request each, then nothing) kept
+// root's check out for as long as they were held, which the same connections in the ordinary local lane cannot
+// do any more (review N2 of audit 3). An idle connection in root's lane makes room in the same way now.
+func TestRootLaneIdleConnectionsMakeRoom(t *testing.T) {
+	ln, addr := serveLimited(t, rootLimits(t, ConnLimits{}))
+	var held []net.Conn
+	for i := 0; i < RootConns; i++ {
+		c, err := dialAsRoot(floodLocal, addr)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer c.Close()
+		fmt.Fprintf(c, "GET /metrics HTTP/1.1\r\nHost: agent\r\n\r\n") // a complete request without a token, kept alive
+		resp, err := http.ReadResponse(bufio.NewReader(c), nil)
+		if err != nil || resp.StatusCode != 401 {
+			t.Fatal("setup:", resp, err)
+		}
+		resp.Body.Close()
+		held = append(held, c)
+	}
+	waitStats(t, ln, func(s ConnStats) bool { return s.Root == RootConns })
+	// The server marks a connection idle a moment after its answer was read here, so the first check is asked
+	// until it passes. Before the change it never did: the four were held for the 90 s an idle connection may stay.
+	deadline := time.Now().Add(20 * time.Second)
+	for n := 0; ; n++ {
+		err := healthFrom(floodLocal, true, addr, fmt.Sprintf("%016d", 5000+n))
+		if err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("root's check with %d idle connections in root's lane: %v (stats %+v)", RootConns, err, ln.Stats())
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	for i := 0; i < 6; i++ { // and every one after it, more often than there are idle connections
+		if err := healthFrom(floodLocal, true, addr, fmt.Sprintf("%016d", 6000+i)); err != nil {
+			t.Fatalf("root's check %d with idle connections in root's lane: %v (stats %+v)", i, err, ln.Stats())
+		}
+	}
+	if s := ln.Stats(); s.Evicted == 0 || s.Root > RootConns || s.Open != 0 {
+		t.Fatalf("%+v", s)
+	}
+	_ = held[0].SetReadDeadline(time.Now().Add(20 * time.Second))
+	if _, err := held[0].Read(make([]byte, 1)); err == nil || isTimeout(err) {
+		t.Fatal("the oldest idle connection in root's lane is still open:", err)
+	}
+}
+
+// Review of the fix (R6): a connection over the cap of root's lane waited in the PANEL's waiting room, so a
+// dozen connections from low ports filled it and the panel's next connection over its own cap was reset
+// instead of waiting. The lane gives four slots and nothing else: a fifth connection is closed at once.
+// (The listener alone, without the HTTP server, so that nothing in this test depends on a time limit.)
+func TestRootLaneTakesNoPlaceInThePanelsWaitingRoom(t *testing.T) {
+	if probe, err := net.Listen("tcp", floodPanel+":0"); err != nil {
+		t.Skip("this system has no other 127.0.0.0/8 addresses to connect from:", err)
+	} else {
+		probe.Close()
+	}
+	tcp, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	const panelSlots, room = 8, 8
+	o := rootLimits(t, ConnLimits{PerPanel: panelSlots, Waiting: room, Wait: 10 * time.Minute,
+		Panel: func() string { return floodPanel },
+		Local: func(remote, _ netip.Addr) bool { return remote.String() == floodLocal }})
+	ln := LimitConns(tcp, o)
+	var mu sync.Mutex
+	var open, served []net.Conn // every connection of the test; those the limiter let through (the server's side)
+	keep := func(c net.Conn) {
+		mu.Lock()
+		open = append(open, c)
+		mu.Unlock()
+	}
+	t.Cleanup(func() {
+		ln.Close()
+		mu.Lock()
+		defer mu.Unlock()
+		for _, c := range open {
+			c.Close()
+		}
+	})
+	go func() { // the "server": takes every connection the limiter lets through and holds it
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			keep(c)
+			mu.Lock()
+			served = append(served, c)
+			mu.Unlock()
+		}
+	}()
+	addr := ln.Addr().String()
+	dial := func(from func(src, addr string) (net.Conn, error), src string) net.Conn {
+		t.Helper()
+		c, err := from(src, addr)
+		if err != nil {
+			t.Fatal(err)
+		}
+		keep(c)
+		return c
+	}
+	for i := 0; i < panelSlots; i++ { // the panel has all of its slots in use
+		dial(dialFrom, floodPanel)
+	}
+	for i := 0; i < RootConns; i++ { // root's lane is full
+		dial(dialAsRoot, floodLocal)
+	}
+	waitStats(t, ln, func(s ConnStats) bool { return s.Open == panelSlots && s.Root == RootConns })
+	// As many more from root's ports as the panel's waiting room has places. Each must be closed at once. (A
+	// reset can reach the dialer before its connect has returned; then dialAsRoot tries again, so more than
+	// room connections may be refused here.)
+	var extra []net.Conn
+	for i := 0; i < room; i++ {
+		if c, err := dialAsRoot(floodLocal, addr); err == nil {
+			keep(c)
+			extra = append(extra, c)
+		}
+	}
+	s := waitStats(t, ln, func(s ConnStats) bool { return s.Waiting > 0 || int(s.Refused) >= room })
+	if s.Waiting != 0 || s.Root != RootConns {
+		t.Fatalf("connections over the cap of root's lane wait for a slot (they wait in the panel's room): %+v", s)
+	}
+	for _, c := range extra { // every one of them was closed by the listener
+		_ = c.SetReadDeadline(time.Now().Add(20 * time.Second))
+		if _, err := c.Read(make([]byte, 1)); err == nil || isTimeout(err) {
+			t.Fatalf("a connection over the cap of root's lane was not closed: %v (stats %+v)", err, ln.Stats())
+		}
+	}
+	refused := ln.Stats().Refused
+	// the panel's next connection finds its room empty and waits
+	dial(dialFrom, floodPanel)
+	s = waitStats(t, ln, func(s ConnStats) bool { return s.Waiting > 0 || s.Refused > refused })
+	if s.Waiting != 1 || s.Refused != refused {
+		t.Fatalf("the panel's connection over its cap was refused instead of waiting: %+v", s)
+	}
+	// and it gets the slot one of the panel's connections gives back
+	mu.Lock()
+	first := served[0] // the panel's first connection: the "server" is done with it
+	mu.Unlock()
+	if addrOf(first.RemoteAddr()).String() != floodPanel {
+		t.Fatal("setup: the first connection served is not the panel's:", first.RemoteAddr())
+	}
+	first.Close()
+	waitStats(t, ln, func(s ConnStats) bool { return s.Waiting == 0 && s.Waited == 1 && s.Open == panelSlots })
 }

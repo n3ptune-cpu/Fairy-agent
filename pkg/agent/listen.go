@@ -445,10 +445,12 @@ func (l *LimitListener) arrive(c net.Conn) {
 			_ = idle.Conn.Close()
 		}
 		return
-	case trusted && l.waitingOf(key) < l.room(key):
+	case trusted && key != rootKey && l.waitingOf(key) < l.room(key):
 		// The panel's own next connection, or the update's health check: a reset would be a failed poll, a
 		// failed "cancel shutdown", a failed update. It waits, unread, until one of its sender's requests is
-		// done.
+		// done. A connection over the cap of root's lane does not wait: the lane is four slots and nothing
+		// else, and the places to wait are the panel's and this machine's (a dozen connections from low ports
+		// used to fill the panel's; the check asks again a second later).
 		w := &waitingConn{c: lc, why: why}
 		w.timer = time.AfterFunc(l.o.Wait, func() { l.giveUp(w) })
 		l.waiting = append(l.waiting, w)
@@ -471,7 +473,7 @@ func (l *LimitListener) arrive(c net.Conn) {
 //
 //   - This machine has all of its slots in use: its own oldest idle connection, one that never showed a token
 //     before one that did. (Eight idle connections of a local user used to keep the update's health check out
-//     for as long as they were held: review N2.)
+//     for as long as they were held: review N2.) The same in root's lane, among the connections of that lane.
 //   - No slot is left for the newcomer for another reason (every slot strangers may have is taken, or every
 //     slot): the oldest idle connection of a stranger that never showed a valid token. (Six senders with eight
 //     idle connections each used to keep everybody else out, the panel of a hand-configured agent included:
@@ -479,8 +481,8 @@ func (l *LimitListener) arrive(c net.Conn) {
 func (l *LimitListener) idleConn(key, why string) *limitedConn {
 	var pick func(c *limitedConn) bool
 	switch {
-	case why == tooManyOfSender && key == localKey:
-		pick = func(c *limitedConn) bool { return c.sender == localKey }
+	case why == tooManyOfSender && (key == localKey || key == rootKey):
+		pick = func(c *limitedConn) bool { return c.sender == key }
 	case why == tooManyOfSender:
 		return nil
 	default:
