@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"maps"
 	"math"
 	"slices"
 	"strconv"
@@ -55,6 +56,21 @@ type Fan struct {
 	blindSaid   string    // what that action came to, as last logged (so one spell is logged once, not every 30 s)
 	closed      bool      // Shutdown was called: no more changes from the API
 	changed     bool      // SetMode or SetDuty changed the fans since this process started
+
+	// /fan/status and the watchdog (see reading). Lock order: statusMu, watchdogMu, mu.
+	statusMu   sync.Mutex // held by the one status request that asks the BMC
+	last       fanReading // what that request was told, for the requests that waited behind it (statusMu)
+	watchdogMu sync.Mutex // held by a watchdog check from before it waits for mu until it is done
+}
+
+// fanReading is what /fan/status asks the BMC: the fan mode, in "full" mode the duty of both zones, and the
+// modes the BMC refused so far.
+type fanReading struct {
+	at          time.Time // when the BMC had answered
+	mode        string
+	duty        map[string]int
+	unsupported []string
+	err         string // why the mode could not be read ("": it could)
 }
 
 // NewFan returns the fan controller.
@@ -95,39 +111,80 @@ func (f *Fan) recentEvents() []FanEvent {
 	return append([]FanEvent{}, f.events[max(0, n-10):]...)
 }
 
+// fanBMCTimeout is the time one fan operation has for all its BMC commands. (A variable for the tests, which
+// run ten times faster.)
+var fanBMCTimeout = 20 * time.Second
+
 func ctxTimeout(ctx context.Context) (context.Context, context.CancelFunc) {
-	return context.WithTimeout(ctx, 20*time.Second)
+	return context.WithTimeout(ctx, fanBMCTimeout)
 }
 
 // Status is /fan/status. BMC errors are reported in `error` (HTTP 200), so the panel can show them.
 // unsupported_modes lists the modes this board's BMC refused (since the agent started), so the panel can grey
 // them out; auto_mode is the configured "not overridden" mode.
 func (f *Fan) Status(ctx context.Context) map[string]any {
-	ctx, cancel := ctxTimeout(ctx)
-	defer cancel()
 	out := map[string]any{"enabled": true, "vendor": f.cfg.Vendor, "mode": nil, "error": nil, "overridden": false,
 		"duty": map[string]int{}, "min_duty": f.cfg.MinDuty, "max_temp_c": f.cfg.MaxTempC, "fans": f.bmc.FanList(),
 		"events": f.recentEvents(), "auto_mode": f.cfg.AutoMode}
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	out["unsupported_modes"] = f.unsupportedModes()
-	mode, err := ipmi.GetFanMode(ctx, f.t)
-	if err != nil {
-		out["error"] = "cannot read the fan mode: " + safeErr(err)
+	r := f.reading(ctx)
+	out["unsupported_modes"] = slices.Clone(r.unsupported)
+	if r.err != "" {
+		out["error"] = r.err
 		return out
 	}
-	out["mode"] = mode
-	out["overridden"] = mode != f.cfg.AutoMode
-	if mode == "full" {
-		duty := map[string]int{}
-		for z := byte(0); z <= 1; z++ {
-			if d, err := ipmi.GetDuty(ctx, f.t, z); err == nil {
-				duty[strconv.Itoa(int(z))] = d
-			}
-		}
-		out["duty"] = duty
+	out["mode"] = r.mode
+	out["overridden"] = r.mode != f.cfg.AutoMode
+	if r.duty != nil {
+		out["duty"] = maps.Clone(r.duty)
 	}
 	return out
+}
+
+// reading asks the BMC for the fan mode and, in "full" mode, the duty of both zones.
+//
+// /fan/status needs only the read token, four requests may be in flight, and each made up to three BMC
+// commands under f.mu, the lock the watchdog needs. With a BMC that takes 1.5 s for a command, four callers
+// that asked without a pause kept the watchdog waiting for longer than its own time limit, check after check
+// (audit 4, T-08). Now:
+//
+//   - one status request asks the BMC at a time (statusMu). A request that waited behind it is answered with
+//     what that one was told, which is newer than the request itself. Nothing is kept beyond that: a request
+//     that arrives later asks the BMC again;
+//   - a watchdog check goes first (watchdogMu): while one is running or waiting, no status request starts to
+//     ask the BMC. So the watchdog waits for the one status request that was already asking, at most.
+func (f *Fan) reading(ctx context.Context) fanReading {
+	asked := time.Now()
+	f.statusMu.Lock()
+	defer f.statusMu.Unlock()
+	if f.last.at.After(asked) {
+		return f.last
+	}
+	f.watchdogMu.Lock() // waits for a watchdog check that is running or waiting for mu
+	f.mu.Lock()
+	f.watchdogMu.Unlock()
+	defer f.mu.Unlock()
+	ctx, cancel := ctxTimeout(ctx) // counted from here: the time spent waiting for the locks is not the BMC's
+	defer cancel()
+	r := fanReading{unsupported: f.unsupportedModes()}
+	mode, err := ipmi.GetFanMode(ctx, f.t)
+	if err != nil {
+		r.err = "cannot read the fan mode: " + safeErr(err)
+		return r // not passed on: it may be this caller's own time that was over
+	}
+	r.mode = mode
+	if mode == "full" {
+		r.duty = map[string]int{}
+		for z := byte(0); z <= 1; z++ {
+			if d, err := ipmi.GetDuty(ctx, f.t, z); err == nil {
+				r.duty[strconv.Itoa(int(z))] = d
+			}
+		}
+	}
+	if ctx.Err() == nil { // a reading that was cut short by this caller's own limit is not passed on either
+		r.at = time.Now()
+		f.last = r
+	}
+	return r
 }
 
 // SetMode is POST /fan/mode. A mode the BMC rejects as invalid (completion code 0xCC / 0xC9: the board has no
@@ -413,11 +470,17 @@ const fanBlindRetry = 30 * time.Second
 //     temperature limit or without a temperature it does what failSafeBlind says, 100 % first;
 //   - the first check that reads the mode again ends that, and the watchdog is back to what it does with a
 //     known mode.
+//
+// The check's time limit starts when it has the lock. It used to start before, so a check that waited for the
+// lock behind /fan/status requests came to the BMC with its time already over (audit 4, T-08). And it goes
+// before status requests that have not started to ask the BMC (see reading).
 func (f *Fan) WatchdogOnce(ctx context.Context) {
-	ctx, cancel := ctxTimeout(ctx)
-	defer cancel()
+	f.watchdogMu.Lock()
+	defer f.watchdogMu.Unlock()
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	ctx, cancel := ctxTimeout(ctx)
+	defer cancel()
 	mode, modeErr := ipmi.GetFanMode(ctx, f.t)
 	if modeErr == nil {
 		if f.modeFails >= fanBlindAfter {
