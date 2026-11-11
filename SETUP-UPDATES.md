@@ -36,9 +36,9 @@ Expand-Archive "$HOME\Downloads\fairy-dashboard-repo-v2.zip" -DestinationPath E:
 
 cd E:\Projects\Fairy-agent
 git pull --ff-only E:\Projects\v2\Fairy-agent main
-git fetch E:\Projects\v2\Fairy-agent refs/tags/v0.2.0:refs/tags/v0.2.0
+git fetch E:\Projects\v2\Fairy-agent refs/tags/v0.6.0:refs/tags/v0.6.0
 git log --oneline -6                       # newest first; the old 5e2d90c is further down
-git rev-parse "v0.2.0^{commit}"            # must be the same as: git rev-parse HEAD
+git rev-parse "v0.6.0^{commit}"            # must be the same as: git rev-parse HEAD
 
 cd E:\Projects\Fairy-dashboard
 git pull --ff-only E:\Projects\v2\Fairy-dashboard main
@@ -48,7 +48,9 @@ git log --oneline -6                       # ee94dde further down
 If `git pull --ff-only` refuses, stop and ask (something was committed in between). If git says "detected
 dubious ownership", run the `git config --global --add safe.directory ...` line it suggests.
 
-**Do not change or re-make the tag `v0.2.0`.** The dashboard's `go.sum` has a fingerprint of exactly that tag.
+The tag is the one named in the delivery note: `v0.6.0` for release 0.6.0. If the note names another tag, use
+that one in the commands of this part. **Do not change or re-make a tag that was pushed.** The dashboard's
+`go.sum` has a fingerprint of exactly that tag.
 
 ### 1.2 Make the key
 
@@ -128,7 +130,7 @@ cd E:\Projects\Fairy-agent
 git add release/signing.pub
 git commit -m "Release signing key"
 git push origin main
-git push origin v0.2.0
+git push origin v0.6.0
 
 cd E:\Projects\Fairy-dashboard
 git add release/signing.pub
@@ -150,10 +152,12 @@ If a run is red:
 * "release/signing.pub is missing": step 1.4.
 * "the private key does not belong to release/signing.pub": the secret and the committed file come from
   different `gen` runs; paste the right key again (1.3).
-* the dashboard cannot download `github.com/n3ptune-cpu/Fairy-agent v0.2.0`: the tag was not pushed (1.4), or
+* the dashboard cannot download `github.com/n3ptune-cpu/Fairy-agent v0.6.0`: the tag was not pushed (1.4), or
   wait a minute and press **Re-run jobs**.
-* "Resource not accessible by integration" when publishing: repository **Settings** > **Actions** > **General**
-  > **Workflow permissions** > **Read and write permissions** > Save, then re-run.
+* "Resource not accessible by integration" when publishing: check that `.github/workflows/release.yml` still
+  has `permissions:` with `contents: write`, then re-run. Leave the repository's **Settings** > **Actions** >
+  **General** > **Workflow permissions** on "Read repository contents and packages permissions": the release
+  workflow asks for what it needs itself, and "Read and write" would give it to every other workflow too.
 
 Optional check of the signature on the PC (download `SHA256SUMS` and `SHA256SUMS.sig` from the release into
 the Fairy-agent folder first):
@@ -562,7 +566,7 @@ page is open). If the panel host has no internet access, add `updates: {check_la
 "latest" but Update still works (the agents download themselves). Then:
 
 ```sh
-runuser -u fairy -- fairy admin config check
+fairy admin config check        # as root, like the rest of this part: user fairy cannot read fairy.env
 systemctl restart fairy
 ```
 
@@ -596,9 +600,9 @@ version does not start with a build number is refused. Details: AGENT.md, "The r
 
 Linux details: `journalctl -u fairy-agent-update` (installer), `journalctl -u fairy-agent` (agent). Windows:
 `C:\ProgramData\fairy-agent\update\installer.log` (installer), `C:\ProgramData\fairy-agent\logs\agent.log`
-(agent), `C:\ProgramData\fairy-agent\helper\helper.log` (helper). The panel's own version is on the same page, with "Panel update
-available: run `fairy update` on the panel's host" when it is behind (the panel never updates itself from the
-web page).
+(agent), `C:\ProgramData\fairy-agent\helper\helper.log` (helper). The panel's own version is on the same page. When it is
+behind, an admin can press **Update panel** there (it needs a Pocket ID sign-in from the last 2 minutes) or run
+`fairy update` on the panel's host.
 
 ### Agents: on the machine (`fairy-agent update`)
 
@@ -631,4 +635,5 @@ fairy-update             # the same (the small wrapper from 3.1)
   "Rollback" (0.4.x does not know the helper or the new account)
 * Panel: `mv /usr/local/bin/fairy.old /usr/local/bin/fairy && systemctl restart fairy`
 
-Agents never install a release older than the one they run; the panel only with `fairy update --force`.
+Nothing installs an older release through the panel. By hand it needs `--force`: `fairy-agent update --force`
+on the machine, `fairy update --force` on the panel's host.

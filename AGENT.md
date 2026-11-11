@@ -272,11 +272,11 @@ it is not a sign of a failed check.)
 | What failed | What the installer does | What you see |
 | --- | --- | --- |
 | the data folder itself (someone else owns it or can change it) | renames the whole folder to `C:\ProgramData\fairy-agent.untrusted-<UTC date and time>`, makes a new one, writes a starter `config.yaml` with everything that can change the PC switched off, and new tokens | `repaired:` lines, then `IMPORTANT: config.yaml could not be trusted and was replaced by a starter ...` |
-| a file or folder inside (someone else owns it or can change it) | moves it, as it is, into `C:\ProgramData\fairy-agent\untrusted-<UTC date and time>\` (a folder only administrators can open), and makes Fairy's own folders anew | a `repaired:` line for each |
+| a file or folder inside (someone else owns it or can change it) | moves it, as it is, into `C:\ProgramData\fairy-agent\untrusted-<UTC date and time>\` (a folder only administrators can change; what was moved keeps its old owner and permissions, so that account can still reach it until you delete it, step 4 below), and makes Fairy's own folders anew | a `repaired:` line for each |
 | a link or junction inside | removes the link (not what it points to) | a `repaired:` line |
 | a file that another account could read, but not change | writes it anew with the folder's permissions | a `repaired:` line |
 | anything at all that does not belong in `logs\`, `state\` or `update\stage\` (a link, a file of another account, a file with a second name, folders nested more than 8 deep), or one of these three folders with other permissions | moves **that whole folder** into `untrusted-<UTC date and time>\` and makes a new, empty one. See "The agent's three folders" below | a `repaired:` line that names what was found and says what went with the folder |
-| a token file that another account could read, or that went aside | writes a new token | `IMPORTANT: the tokens are new. Pair this PC with the panel again (Re-pair in the panel).` |
+| a token file that another account could read, or that went aside (the file `token_file` / `control_token_file` name, however config.yaml spells the path) | writes a new token | `IMPORTANT: the tokens are new. Pair this PC with the panel again (Re-pair in the panel).` |
 
 If a rename fails (for example because a program holds a file in the folder open), the installer stops and
 says so: stop the two services (`Stop-Service fairy-agent, fairy-agent-helper`) and run it again. The installer
@@ -303,7 +303,8 @@ For the same reason the installer sets a folder's permissions only while nothing
 changed by another account (Windows passes a folder's new permissions on to everything inside). If the data
 folder's own permissions have to be set, the three folders are moved next to it for that moment
 (`C:\ProgramData\fairy-agent.parked-<time>-logs` and so on) and put back straight away, with everything in them.
-If the installer is interrupted in that moment, it says where they are; move them back with `Move-Item`.
+If the installer is interrupted in that moment, it says where they are; move them back with `Move-Item`, then
+run the installer again (`setup-self-update`): it checks the three folders.
 
 **What "moved aside" means.** Nothing was deleted. The folder or file is still on the disk: the whole old data
 folder as, for example, `C:\ProgramData\fairy-agent.untrusted-20261110-142530`, single things from inside it in
@@ -341,9 +342,10 @@ folder but repairs nothing:
 * An untrusted folder: `agent.log` has the warning `the agent's data folder is not safe: self-update and the
   helper will not work until it is repaired`. The helper refuses to work, `fairy-agent join` refuses, and the
   updater service does nothing: it writes `fairy-agent-update did nothing: ...` to the Windows Event Log
-  (Windows Logs > Application, source fairy-agent) and ends with exit code 3. The cure is to run the installer:
-  Re-pair in the panel, or `& "C:\Program Files\Fairy\fairy-agent.exe" setup-self-update` in PowerShell as
-  Administrator.
+  (Windows Logs > Application, source fairy-agent) and ends with exit code 3. The cure is
+  `& "C:\Program Files\Fairy\fairy-agent.exe" setup-self-update` in PowerShell as Administrator. (The panel's
+  Re-pair runs the same repair, but it installs the agent release that panel was built for: use it only from a
+  panel that is already updated, or it puts an older agent back.)
 
 On Windows `fairy-agent join` also refuses a `config.yaml` that names a token file outside the data folder.
 
@@ -371,8 +373,10 @@ every refused request is written to `helper.log` with who asked.
 
 **Who may talk to it.** The pipe's access list lets in only the agent's account, SYSTEM and Administrators,
 refuses network logons, and the pipe refuses remote clients. On top of that the helper looks at every
-client's identity and drops anyone else. The agent in turn checks that the pipe really belongs to the helper
-service's process (so nothing can pretend to be the helper while it is stopped), and lets the helper only
+client's identity and drops anyone else. The agent in turn uses the pipe only when the process that serves it
+has the helper service's process id. A process id can be used again after the helper has ended, so the agent
+also looks at who owns the pipe; in this release that look only writes a warning to `agent.log` unless
+`require_helper_pipe_owner: true` is set (see [Settings](#settings-configyaml)). The agent lets the helper only
 identify it, not act as it.
 
 **The fan watchdog lives in the helper**: while a fixed fan speed is set it checks the CPU temperature every
@@ -1049,8 +1053,9 @@ The very first program with self-update has to be installed by hand once per mac
 releases must still carry the owner's signature).
 
 **Undo by hand**: Linux `mv /usr/local/bin/fairy-agent.old /usr/local/bin/fairy-agent && systemctl restart
-fairy-agent`; Windows `Stop-Service fairy-agent`, rename `fairy-agent.exe.old` back to `fairy-agent.exe`,
-`Start-Service fairy-agent`.
+fairy-agent`; Windows `Stop-Service fairy-agent, fairy-agent-helper` (the helper only if it is installed: it
+runs the same program), rename the current `fairy-agent.exe` away, rename `fairy-agent.exe.old` to
+`fairy-agent.exe`, `Start-Service fairy-agent-helper, fairy-agent`.
 
 ## What it can and cannot show
 
@@ -1249,7 +1254,8 @@ are lists of devices: edit those in the file.
   Command lines are off only for installs made with this release or later; an existing agent keeps sending
   them, filtered, until `fairy-agent config set processes.cmdline false` and a restart.
 * The BMC relay reaches private addresses only, passes the BMC password to ipmitool only through its
-  environment, pins the Redfish certificate and never logs passwords.
+  environment, sends a Redfish login only to the certificate named in `tls_fingerprint`, and never logs
+  passwords.
 * At most 64 connections are open at a time. A stranger's address gets 8. The panel's address gets 32, and
   when those are busy up to 128 more of its connections wait up to 3 seconds for a free one instead of being
   reset. 16 of the 64 are kept for the panel and this machine, 4 of those for this machine alone. So a flood
@@ -1260,8 +1266,13 @@ are lists of devices: edit those in the file.
   out and make an update roll back. (Not on a machine where `net.ipv4.ip_unprivileged_port_start` was lowered
   below 1024, and not on Windows, which has no ports reserved for administrators: there a local program that
   keeps opening connections to the agent can still make the check fail, the update is then rolled back, and
-  nothing else is harmed.) On an agent set up by hand, an
-  address that has shown a valid token counts as the panel for an hour. The process list is read at most once
+  nothing else is harmed.) An agent set up by hand (tokens written into the files, never added through Add
+  host) has no panel address on record. There an address that has shown a valid token counts as the panel for
+  an hour after its last request. Until the panel's first request with the token got through (after the agent
+  was restarted, or after an hour without a request from the panel) the panel is a stranger there like any
+  other device, and devices that hold all 48 connections strangers may have with unfinished requests (six
+  addresses are enough) can keep it out for as long as they do so. An agent added through Add host has the
+  panel's address on record and is not affected. The process list is read at most once
   a second however many ask. When more than 16 requests are waiting for it the agent answers `503` with code
   `busy` and `Retry-After: 1`. A request's header must arrive within 2 seconds and fit in 4096 bytes. With
   `only_from_panel: true` nobody but the panel and this machine gets a connection at all.
