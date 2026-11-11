@@ -43,10 +43,12 @@ func (s *shelly) Read(ctx context.Context, timeout time.Duration) ([]Reading, er
 		if pw != "" {
 			auth = "digest" // Gen2 auth is digest
 		}
-		d, err := devices.GetJSON(ctx, hc, fmt.Sprintf("%s/rpc/%s?id=%d", base, url.PathEscape(c.RPCMethod), c.Channel), auth, c.Username, pw)
+		var r devices.Reading
+		err := devices.ReadJSON(ctx, hc, fmt.Sprintf("%s/rpc/%s?id=%d", base, url.PathEscape(c.RPCMethod), c.Channel), auth, c.Username, pw,
+			func(d map[string]any) error { r = devices.ParseShellyGen2(d); return nil })
 		var he *devices.HTTPStatusError
 		if err == nil {
-			return []Reading{NewReading(c.Base, devices.ParseShellyGen2(d))}, nil
+			return []Reading{NewReading(c.Base, r)}, nil
 		}
 		if !errors.As(err, &he) || he.Code != 404 || c.Gen == "2" {
 			return nil, err
@@ -56,11 +58,11 @@ func (s *shelly) Read(ctx context.Context, timeout time.Duration) ([]Reading, er
 	if pw != "" {
 		auth = "basic"
 	}
-	d, err := devices.GetJSON(ctx, hc, base+"/status", auth, c.Username, pw)
-	if err != nil {
-		return nil, err
-	}
-	r, err := devices.ParseShellyGen1(d, c.Channel)
+	var r devices.Reading
+	err = devices.ReadJSON(ctx, hc, base+"/status", auth, c.Username, pw, func(d map[string]any) (err error) {
+		r, err = devices.ParseShellyGen1(d, c.Channel)
+		return err
+	})
 	if err != nil {
 		return nil, err
 	}

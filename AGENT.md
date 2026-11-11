@@ -923,7 +923,12 @@ read it and pass the readings on. The entries are the same as in the panel's `po
 `NAME=value` lines and stay on that machine. A Tasmota plug with a web password gets it the one way Tasmota
 documents, in the address of the request (`/cm?user=...&password=...`), exactly as in earlier releases. That
 address is never logged and never part of an error message. It crosses the local network unencrypted:
-Tasmota speaks plain HTTP. `system_hint: self` links a plug to the agent's own machine, but
+Tasmota speaks plain HTTP. One answer of a plug or a BMC is read up to 256 KiB of JSON with at most 8192 values,
+nested at most 32 deep; a larger one is refused and the source shows "answer from device is too large", "has
+too many values" or "is nested too deep" (a hostile or broken device could otherwise use up the agent's
+memory with one answer). Plugs send a few hundred bytes and a BMC's Power document 15 to 100 KiB, so this
+should never show. If it does for a BMC (`type: redfish` or `ipmi`), point `power_path:` at a smaller document
+of that BMC, for example `/redfish/v1/Chassis/<id>/EnvironmentMetrics`. `system_hint: self` links a plug to the agent's own machine, but
 only for an agent that is a host of its own: for an agent merged into a Proxmox node (`node:` in the panel) it
 does not work, because the panel shows that machine under the node's id. There, and whenever the panel should
 decide, use `power_links:` in the panel's agent entry (`power_links: {<device id>: <system id>}`, e.g.

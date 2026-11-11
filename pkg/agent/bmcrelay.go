@@ -437,7 +437,10 @@ func (b *BMCRelay) redfish(ctx context.Context, t BMCTarget, action string) (str
 	}
 	c, seen := b.client(t)
 	base := strings.TrimRight(t.URL, "/")
-	do := func(method, path string, body any) (int, map[string]any, error) {
+	// do sends one request. With use, the answer's JSON object is handed to it: use takes the one value it needs.
+	// The answer is limited in size, number of values and depth (devices.DecodeJSON; audit 4, T-02): a BMC's
+	// answer decoded whole cost about 50 times its size in memory. bad is why an answer could not be used.
+	do := func(method, path string, body any, use func(map[string]any)) (status int, bad, err error) {
 		var rd io.Reader
 		if body != nil {
 			j, _ := json.Marshal(body)
@@ -457,11 +460,19 @@ func (b *BMCRelay) redfish(ctx context.Context, t BMCTarget, action string) (str
 			return 0, nil, err
 		}
 		defer res.Body.Close()
-		var m map[string]any
-		_ = json.NewDecoder(io.LimitReader(res.Body, 1<<20)).Decode(&m)
-		return res.StatusCode, m, nil
+		if use != nil {
+			bad = devices.DecodeJSON(res.Body, func(m map[string]any) error { use(m); return nil })
+		}
+		return res.StatusCode, bad, nil
 	}
-	st, sys, err := do("GET", "/redfish/v1/Systems", nil)
+	var member string
+	st, _, err := do("GET", "/redfish/v1/Systems", nil, func(sys map[string]any) {
+		if members, _ := sys["Members"].([]any); len(members) > 0 {
+			if m, ok := members[0].(map[string]any); ok {
+				member, _ = m["@odata.id"].(string)
+			}
+		}
+	})
 	if err != nil {
 		if strings.Contains(err.Error(), "fingerprint") {
 			return "", bmcErr(502, "bmc_certificate_changed", "the BMC at %s shows a different certificate than the pinned one (%s); if that is expected, set tls_fingerprint", t.URL, *seen)
@@ -478,25 +489,21 @@ func (b *BMCRelay) redfish(ctx context.Context, t BMCTarget, action string) (str
 	case st != 200:
 		return "", bmcErr(502, "bmc_error", "the BMC answered %d to /redfish/v1/Systems (Redfish not available? try backend: ipmitool)", st)
 	}
-	members, _ := sys["Members"].([]any)
-	var member string
-	if len(members) > 0 {
-		if m, ok := members[0].(map[string]any); ok {
-			member, _ = m["@odata.id"].(string)
-		}
-	}
 	if !strings.HasPrefix(member, "/redfish/v1/") {
 		return "", bmcErr(502, "bmc_error", "the BMC lists no system under /redfish/v1/Systems")
 	}
 	if action == "status" {
-		st, m, err := do("GET", member, nil)
+		var ps string
+		st, bad, err := do("GET", member, nil, func(m map[string]any) { ps, _ = m["PowerState"].(string) })
 		if err != nil || st != 200 {
 			return "", bmcErr(502, "bmc_error", "the BMC did not return the system's state (%d)", st)
 		}
-		ps, _ := m["PowerState"].(string)
+		if bad != nil {
+			return "", bmcErr(502, "bmc_error", "the BMC's answer about the system's state could not be used: %v", bad)
+		}
 		return strings.ToLower(ps), nil
 	}
-	st, _, err = do("POST", member+"/Actions/ComputerSystem.Reset", map[string]any{"ResetType": "On"})
+	st, _, err = do("POST", member+"/Actions/ComputerSystem.Reset", map[string]any{"ResetType": "On"}, nil)
 	if err != nil {
 		return "", bmcErr(502, "bmc_unreachable", "the BMC at %s stopped answering", t.URL)
 	}

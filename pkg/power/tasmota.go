@@ -36,7 +36,7 @@ func (s *tasmota) Info() Base { return s.c.Base }
 // in clear in either form.
 //
 // What this code does guarantee is that the address with the password is never logged and never part of an
-// error: devices.GetJSON returns only fixed words for a failed request, and safeError checks that again here.
+// error: devices.ReadJSON returns only fixed words for a failed request, and safeError checks that again here.
 func (s *tasmota) Read(ctx context.Context, timeout time.Duration) ([]Reading, error) {
 	c := s.c
 	q := url.Values{"cmnd": {"Status 8"}}
@@ -48,11 +48,12 @@ func (s *tasmota) Read(ctx context.Context, timeout time.Duration) ([]Reading, e
 		q.Set("user", c.Username)
 		q.Set("password", pw)
 	}
-	d, err := devices.GetJSON(ctx, devices.LANClient(timeout), strings.TrimRight(c.URL, "/")+"/cm?"+q.Encode(), "", "", "")
-	if err != nil {
-		return nil, safeError(err, pw)
-	}
-	r, err := devices.ParseTasmotaStatus8(d)
+	var r devices.Reading
+	err = devices.ReadJSON(ctx, devices.LANClient(timeout), strings.TrimRight(c.URL, "/")+"/cm?"+q.Encode(), "", "", "",
+		func(d map[string]any) (err error) {
+			r, err = devices.ParseTasmotaStatus8(d)
+			return err
+		})
 	if err != nil {
 		return nil, safeError(err, pw)
 	}
@@ -60,7 +61,7 @@ func (s *tasmota) Read(ctx context.Context, timeout time.Duration) ([]Reading, e
 }
 
 // safeError returns err as it is when its text cannot give the password away, and a fixed word otherwise. The
-// errors of this package's requests are fixed words already (devices.GetJSON); this is the second lock on the
+// errors of this package's requests are fixed words already (devices.ReadJSON); this is the second lock on the
 // one request whose address can carry a password.
 func safeError(err error, pw string) error {
 	msg := err.Error()

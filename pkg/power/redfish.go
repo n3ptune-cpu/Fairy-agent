@@ -55,11 +55,12 @@ func (s *redfish) Read(ctx context.Context, timeout time.Duration) ([]Reading, e
 	if err != nil {
 		return nil, devices.Safe(err)
 	}
-	d, err := devices.GetJSON(ctx, devices.ClientWith(timeout, s.tr), strings.TrimRight(c.URL, "/")+path, "basic", c.Username, pw)
-	if err != nil {
-		return nil, err
-	}
-	w, v, err := devices.ParseRedfishPower(d)
+	var w, v *float64
+	err = devices.ReadJSON(ctx, devices.ClientWith(timeout, s.tr), strings.TrimRight(c.URL, "/")+path, "basic", c.Username, pw,
+		func(d map[string]any) (err error) {
+			w, v, err = devices.ParseRedfishPower(d)
+			return err
+		})
 	if err != nil {
 		return nil, err
 	}
