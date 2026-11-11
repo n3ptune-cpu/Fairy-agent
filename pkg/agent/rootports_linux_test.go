@@ -6,6 +6,7 @@ import (
 	"context"
 	"net"
 	"os"
+	"strconv"
 	"syscall"
 	"testing"
 	"time"
@@ -52,7 +53,7 @@ func TestHealthCheckComesFromARootPort(t *testing.T) {
 		// root without the right to use the ports (a container): the fall-back is the ordinary port
 		t.Skipf("root here cannot use a port below 1024: the check came from port %d", port)
 	}
-	if port < 600 || s.Root != 1 || s.Trusted != 0 || s.Open != 0 {
+	if port < healthPortLo || servicePorts[port] || s.Root != 1 || s.Trusted != 0 || s.Open != 0 {
 		t.Fatalf("as root: port %d, stats %+v", port, s)
 	}
 }
@@ -124,8 +125,8 @@ func TestHealthDialFallsBackToAnOrdinaryPort(t *testing.T) {
 				plain++
 				return old(ctx, network, addr, 0)
 			}
-			if port < 600 || port > 1023 {
-				t.Errorf("%s: port %d is not one of 600 to 1023", name, port)
+			if port < healthPortLo || port > healthPortHi || servicePorts[port] {
+				t.Errorf("%s: port %d is not one the check may use", name, port)
 			}
 			low++
 			return nil, c.low(ctx)
@@ -155,5 +156,149 @@ func TestHealthDialFallsBackToAnOrdinaryPort(t *testing.T) {
 		t.Fatal(err, low)
 	} else {
 		conn.Close()
+	}
+}
+
+// Review of the fix (R7): the port the check connects from must not get in the way of a real service. It is one
+// of 512 to 1023 (the range the old r-commands and bindresvport use for clients), never one that a well-known
+// service listens on.
+func TestHealthSourcePortSelection(t *testing.T) {
+	for _, p := range []int{514, 515, 543, 544, 548, 554, 563, 587, 593, 631, 636, 853, 873, 902, 989, 990, 992, 993, 995} {
+		if !servicePorts[p] {
+			t.Errorf("port %d (a common service) is not in the list of ports the check leaves alone", p)
+		}
+	}
+	for p := range servicePorts {
+		if p < healthPortLo || p > healthPortHi {
+			t.Errorf("port %d in the list is outside %d to %d", p, healthPortLo, healthPortHi)
+		}
+	}
+	// every number the random source can return, in turn: every result is allowed, and every allowed port comes
+	got := map[int]bool{}
+	n := healthPortHi - healthPortLo + 1
+	for i := 0; i < n; i++ {
+		k := -1
+		p := healthSourcePort(func(m int) int {
+			if m != n {
+				t.Fatalf("the port is drawn from %d numbers, want %d", m, n)
+			}
+			k++ // after the first draw: a service port was drawn, so the next number
+			return (i + k) % n
+		})
+		if p < healthPortLo || p > healthPortHi || servicePorts[p] {
+			t.Fatalf("draw %d gave port %d", i, p)
+		}
+		got[p] = true
+	}
+	if want := n - len(servicePorts); len(got) != want {
+		t.Fatalf("%d different ports were chosen, want all %d that are allowed", len(got), want)
+	}
+}
+
+// freePort is a port nothing is bound to at this moment.
+func freePort(t *testing.T) int {
+	t.Helper()
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+	return l.Addr().(*net.TCPAddr).Port
+}
+
+// holdConns accepts connections and holds them until the test ends; it reports each one.
+func holdConns(t *testing.T) (addr string, accepted chan net.Conn) {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	accepted = make(chan net.Conn, 16)
+	t.Cleanup(func() {
+		ln.Close()
+		for {
+			select {
+			case c := <-accepted:
+				c.Close()
+			default:
+				return
+			}
+		}
+	})
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			accepted <- c
+		}
+	}()
+	return ln.Addr().String(), accepted
+}
+
+// A port that something on this machine listens on is never used: the check goes on to the next one. (With
+// ordinary ports in place of root's, so that the test needs no root.)
+func TestHealthDialSkipsAPortWithAListener(t *testing.T) {
+	addr, _ := holdConns(t)
+	busy, err := net.Listen("tcp", "127.0.0.1:0") // "a service"
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer busy.Close()
+	taken, free := busy.Addr().(*net.TCPAddr).Port, freePort(t)
+	old := pickHealthPort
+	t.Cleanup(func() { pickHealthPort = old })
+	var picks []int
+	pickHealthPort = func() int {
+		p := free
+		if len(picks) < 2 {
+			p = taken
+		}
+		picks = append(picks, p)
+		return p
+	}
+	c, err := dialHealthAs(context.Background(), "tcp", addr, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	if got := c.LocalAddr().(*net.TCPAddr).Port; got != free || len(picks) != 3 {
+		t.Fatalf("the check came from port %d after %d tries; want %d after 3 (port %d has a listener)", got, len(picks), free, taken)
+	}
+	// and the service was not disturbed: it still accepts
+	probe, err := net.Dial("tcp", busy.Addr().String())
+	if err != nil {
+		t.Fatal("the listener on the port the check tried:", err)
+	}
+	probe.Close()
+}
+
+// After a check that gave up first (it timed out), its port can be listened on at once: the check's socket
+// allows it (SO_REUSEADDR). Without that the port was refused to a service for a minute.
+func TestHealthDialLeavesItsPortFreeForAListener(t *testing.T) {
+	addr, accepted := holdConns(t)
+	port := freePort(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	c, err := dialTCP(ctx, "tcp", addr, port)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := <-accepted
+	c.Close() // the check gives up: its side closes first
+	buf := make([]byte, 1)
+	_ = srv.SetReadDeadline(time.Now().Add(30 * time.Second))
+	if _, err := srv.Read(buf); err == nil || isTimeout(err) {
+		t.Fatal("the other side did not see the check close:", err)
+	}
+	srv.Close() // now the check's old socket waits out its minute in the kernel
+	for i := 0; i < 20; i++ {
+		l, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port))) // Go sets SO_REUSEADDR, as servers do
+		if err != nil {
+			t.Fatalf("try %d: a service cannot listen on port %d right after the check used it: %v", i, port, err)
+		}
+		l.Close()
+		time.Sleep(10 * time.Millisecond)
 	}
 }

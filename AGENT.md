@@ -1263,7 +1263,7 @@ are lists of devices: edit those in the file.
   reset. 16 of the 64 are kept for the panel and this machine, 4 of those for this machine alone. So a flood
   from another device cannot lock the panel out or exhaust the agent's memory. Programs on the machine itself
   share 8 connections, and any of them can fill those. So on Linux the update's health check, which root runs,
-  connects from a port below 1024 (600 to 1023), and connections from this machine that come from such a port
+  connects from a port below 1024 (one of 512 to 1023 that no well-known service listens on), and connections from this machine that come from such a port
   have 4 more slots of their own: only root can use those ports, so no other local program can keep the check
   out and make an update roll back. (Not on a machine where `net.ipv4.ip_unprivileged_port_start` was lowered
   below 1024, and not on Windows, which has no ports reserved for administrators: there a local program that
