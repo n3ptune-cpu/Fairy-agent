@@ -196,6 +196,12 @@ const (
 	// LocalReservedConns of ReservedConns are for this machine alone: whatever the panel and everybody else
 	// have open, the update's health check finds a slot.
 	LocalReservedConns = 4
+	// RootConns connections from this machine whose source port only root can use (ConnLimits.RootPort) are
+	// counted on their own, outside every other cap: the health check of a root installer comes from such a
+	// port. The eight slots and the places to wait that this machine's other connections share can be filled
+	// by any local program, without a token and without any right (audit 4, T-03: 16 silent sockets were
+	// enough, and every update was rolled back). These four cannot: the system gives those ports to root only.
+	RootConns = 4
 	// An agent whose tokens were set up by hand has no panel address on record. There, an address that showed
 	// a valid token counts as the panel (the cap, the reserved slots, the waiting) for knownSenderFor after
 	// its last request with one; at most maxKnownSenders addresses are remembered.
@@ -223,6 +229,10 @@ type ConnLimits struct {
 	// Local reports whether a connection comes from this machine itself (default: a loopback address, or the
 	// very address it connected to).
 	Local func(remote, local netip.Addr) bool
+	// RootPort reports whether only root can open a connection from this source port on this machine. Such
+	// connections from this machine have RootConns slots of their own. Default: the ports below 1024 on Linux
+	// while the system reserves them (rootPorts); on other systems there are no such ports and no such slots.
+	RootPort func(port int) bool
 }
 
 // NoPanelRefusal is why a connection is refused while only_from_panel is on and no panel address is on record.
@@ -234,6 +244,7 @@ const NoPanelRefusal = "only_from_panel is on and this agent has no panel addres
 const (
 	panelKey    = "panel"
 	localKey    = "local"
+	rootKey     = "local root" // this machine, from a source port only root can use (RootConns)
 	knownPrefix = "token "
 )
 
@@ -271,7 +282,11 @@ func LimitConns(ln net.Listener, o ConnLimits) *LimitListener {
 	if o.Local == nil {
 		o.Local = isThisMachine
 	}
-	return &LimitListener{Listener: ln, o: o, open: map[string]int{}, conns: map[*limitedConn]struct{}{}, ready: make(chan net.Conn, o.Total),
+	if o.RootPort == nil {
+		below := rootPorts()
+		o.RootPort = func(port int) bool { return port < below }
+	}
+	return &LimitListener{Listener: ln, o: o, open: map[string]int{}, conns: map[*limitedConn]struct{}{}, ready: make(chan net.Conn, o.Total+RootConns),
 		known: map[netip.Addr]time.Time{},
 		errs:  make(chan error), done: make(chan struct{})}
 }
@@ -318,6 +333,7 @@ type ConnStats struct {
 	Refused uint64 // connections closed because a cap was reached
 	Waited  uint64 // connections that got their slot after waiting for it
 	Evicted uint64 // idle connections closed to make room for a new one of the same sender
+	Root    int    // open connections in root's own slots (RootConns); not part of Open and Trusted
 }
 
 // Stats returns the listener's counters.
@@ -325,7 +341,7 @@ func (l *LimitListener) Stats() ConnStats {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	return ConnStats{Open: l.trusted + l.others, Trusted: l.trusted, Waiting: len(l.waiting), Peak: l.peak,
-		Refused: l.refused, Waited: l.waited, Evicted: l.evicted}
+		Refused: l.refused, Waited: l.waited, Evicted: l.evicted, Root: l.open[rootKey]}
 }
 
 // Accept returns the next connection that is within the caps. The others are closed, or kept waiting, by the
@@ -423,7 +439,7 @@ func (l *LimitListener) arrive(c net.Conn) {
 	switch {
 	case why == "":
 		l.countConn(lc)
-		l.ready <- lc // never blocks: at most Total connections are counted in
+		l.ready <- lc // never blocks: at most Total + RootConns connections are counted in
 		l.mu.Unlock()
 		if idle != nil {
 			_ = idle.Conn.Close()
@@ -534,6 +550,9 @@ func (l *LimitListener) sender(c net.Conn) (key string, trusted bool) {
 		return "unknown", false
 	}
 	if l.o.Local(remote, addrOf(c.LocalAddr())) {
+		if t, ok := c.RemoteAddr().(*net.TCPAddr); ok && t.Port > 0 && l.o.RootPort(t.Port) {
+			return rootKey, true
+		}
 		return localKey, true
 	}
 	panel := l.panel()
@@ -590,7 +609,7 @@ func (l *LimitListener) vouch(c *limitedConn) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	c.vouched, c.vouchedAt = true, now
-	if !noPanel || !c.remote.IsValid() || c.sender == localKey || c.sender == panelKey {
+	if !noPanel || !c.remote.IsValid() || c.sender == localKey || c.sender == rootKey || c.sender == panelKey {
 		return
 	}
 	if _, ok := l.known[c.remote]; !ok && len(l.known) >= maxKnownSenders {
@@ -634,6 +653,11 @@ const tooManyOfSender = "too many open connections from this sender"
 // check says which cap a new connection of this sender would break ("" when none). Caller holds l.mu.
 func (l *LimitListener) check(key string, trusted bool) string {
 	switch {
+	case key == rootKey: // root's own slots: no other cap applies, and they count towards none
+		if l.open[key] >= RootConns {
+			return tooManyOfSender
+		}
+		return ""
 	case l.open[key] >= l.capOf(key, trusted):
 		return tooManyOfSender
 	case l.trusted+l.others >= l.o.Total:
@@ -649,6 +673,9 @@ func (l *LimitListener) check(key string, trusted bool) string {
 // count counts a connection in. Caller holds l.mu.
 func (l *LimitListener) count(key string, trusted bool) {
 	l.open[key]++
+	if key == rootKey {
+		return
+	}
 	if trusted {
 		l.trusted++
 	} else {
@@ -693,6 +720,9 @@ func (l *LimitListener) admit(key string, trusted bool) (refusal string) {
 func (l *LimitListener) forget(key string, trusted bool) {
 	if l.open[key]--; l.open[key] <= 0 {
 		delete(l.open, key)
+	}
+	if key == rootKey {
+		return
 	}
 	if trusted {
 		l.trusted--

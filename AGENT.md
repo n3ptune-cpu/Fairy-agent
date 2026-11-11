@@ -1246,7 +1246,14 @@ are lists of devices: edit those in the file.
 * At most 64 connections are open at a time. A stranger's address gets 8. The panel's address gets 32, and
   when those are busy up to 128 more of its connections wait up to 3 seconds for a free one instead of being
   reset. 16 of the 64 are kept for the panel and this machine, 4 of those for this machine alone. So a flood
-  from another device cannot lock the panel out or exhaust the agent's memory. On an agent set up by hand, an
+  from another device cannot lock the panel out or exhaust the agent's memory. Programs on the machine itself
+  share 8 connections, and any of them can fill those. So on Linux the update's health check, which root runs,
+  connects from a port below 1024 (600 to 1023), and connections from this machine that come from such a port
+  have 4 more slots of their own: only root can use those ports, so no other local program can keep the check
+  out and make an update roll back. (Not on a machine where `net.ipv4.ip_unprivileged_port_start` was lowered
+  below 1024, and not on Windows, which has no ports reserved for administrators: there a local program that
+  keeps opening connections to the agent can still make the check fail, the update is then rolled back, and
+  nothing else is harmed.) On an agent set up by hand, an
   address that has shown a valid token counts as the panel for an hour. The process list is read at most once
   a second however many ask. When more than 16 requests are waiting for it the agent answers `503` with code
   `busy` and `Retry-After: 1`. A request's header must arrive within 2 seconds and fit in 4096 bytes. With
