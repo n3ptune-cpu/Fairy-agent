@@ -59,10 +59,33 @@ func TestHealthCheckComesFromARootPort(t *testing.T) {
 	}
 }
 
+// canBindLowPort reports whether this process may use a port below 1024: false when the system answers
+// "permission denied" (EACCES) to the try.
+func canBindLowPort(t *testing.T) bool {
+	t.Helper()
+	for range 16 {
+		l, err := net.Listen("tcp4", net.JoinHostPort("127.0.0.1", strconv.Itoa(pickHealthPort())))
+		if err == nil {
+			l.Close()
+			return true
+		}
+		if errors.Is(err, syscall.EACCES) || errors.Is(err, syscall.EPERM) {
+			return false
+		}
+	}
+	return true // every port tried was in use: not a matter of rights
+}
+
 // The installer's real check (CheckRunning) during the local flood of the finding: as root, every one passes.
 func TestRootsRealHealthCheckDuringALocalFlood(t *testing.T) {
 	if os.Geteuid() != 0 || rootPorts() == 0 {
 		t.Skip("needs root and a system that reserves the ports below 1024 (the same with test ports: TestLocalFloodDoesNotStarveRootsHealthCheck)")
+	}
+	if !canBindLowPort(t) {
+		// root without CAP_NET_BIND_SERVICE (some containers): the check comes from an ordinary port there and
+		// shares this machine's eight slots, so the flood keeps it out as before the fix. That is what the guide
+		// says; it is not what this test is about.
+		t.Skip("root here may not use a port below 1024: the check comes from an ordinary port, as before")
 	}
 	ln, addr := serveLimited(t, ConnLimits{})
 	cfg := healthCfg(t, "http://"+addr)
