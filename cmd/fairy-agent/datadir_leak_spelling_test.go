@@ -20,8 +20,9 @@ func TestLeakedTokenIsReplacedHoweverConfigSpellsItsPath(t *testing.T) {
 	t.Setenv("FAIRY_AGENT_CONTROL_TOKEN", "")
 	const old = "read-token-of-the-paired-panel-0123456789\r\n"
 	sep := string(filepath.Separator)
-	// other spellings of the same file that config.yaml may use (tokenPathProblem): on Windows other slashes
-	// and another letter case, elsewhere a dot or a doubled separator
+	// other spellings of the same file that config.yaml may use (tokenPathProblem): on Windows forward slashes
+	// (another letter case is judged in TestLeakedLookupKnowsWindowsSpellings), elsewhere a dot or a doubled
+	// separator
 	spellings := map[string]func(dir string) string{
 		"as the repair spells it":  func(dir string) string { return filepath.Join(dir, "token") },
 		"with a dot":               func(dir string) string { return dir + sep + "." + sep + "token" },
@@ -31,8 +32,6 @@ func TestLeakedTokenIsReplacedHoweverConfigSpellsItsPath(t *testing.T) {
 		spellings = map[string]func(dir string) string{
 			"as the repair spells it": func(dir string) string { return filepath.Join(dir, "token") },
 			"with forward slashes":    func(dir string) string { return filepath.ToSlash(filepath.Join(dir, "token")) },
-			"the name in capitals":    func(dir string) string { return dir + sep + "TOKEN" },
-			"the folder in capitals":  func(dir string) string { return strings.ToUpper(dir) + sep + "token" },
 		}
 	}
 	for name, spell := range spellings {
