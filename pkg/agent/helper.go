@@ -70,6 +70,9 @@ type HelperClient struct {
 	seen     string
 	seenAt   time.Time
 	loggedAs string
+	// needApproval: the helper's latest status said that its approval check is on (required or broken). It
+	// stays set while the helper is not answering, and is cleared only by a helper that says "off".
+	needApproval bool
 }
 
 // NewHelperClient returns a client; nothing is dialled until the first call.
@@ -97,6 +100,7 @@ func (c *HelperClient) call(ctx context.Context, req proto.Request, timeout time
 	if err != nil {
 		return proto.Response{}, err
 	}
+	version := proto.FrameVersion(req)
 	if timeout <= 0 {
 		timeout = 5 * time.Second
 	}
@@ -113,7 +117,7 @@ func (c *HelperClient) call(ctx context.Context, req proto.Request, timeout time
 			}
 			c.conn = conn
 		}
-		r, err := c.roundTrip(ctx, b)
+		r, err := c.roundTrip(ctx, b, version)
 		if err == nil {
 			return r, nil
 		}
@@ -127,12 +131,12 @@ func (c *HelperClient) call(ctx context.Context, req proto.Request, timeout time
 	return proto.Response{}, c.notRunning(lastErr)
 }
 
-func (c *HelperClient) roundTrip(ctx context.Context, b []byte) (proto.Response, error) {
+func (c *HelperClient) roundTrip(ctx context.Context, b []byte, version int) (proto.Response, error) {
 	if d, ok := c.conn.(deadliner); ok {
 		dl, _ := ctx.Deadline()
 		_ = d.SetDeadline(dl)
 	}
-	if err := proto.WriteFrame(c.conn, b, proto.MaxRequest); err != nil {
+	if err := proto.WriteRequest(c.conn, b, version); err != nil {
 		return proto.Response{}, err
 	}
 	f, err := proto.ReadFrame(c.conn, proto.MaxResponse)
@@ -210,7 +214,7 @@ func (c *HelperClient) refresh(ctx context.Context) api.HelperStatus {
 			}
 		} else {
 			wd := sd.Watchdog
-			st.Version, st.Since, st.Features, st.Watchdog = sd.Version, sd.Started, sd.Features, &wd
+			st.Version, st.Since, st.Features, st.Watchdog, st.Proto = sd.Version, sd.Started, sd.Features, &wd, sd.Proto
 		}
 	}
 	c.stMu.Lock()
@@ -224,6 +228,7 @@ func (c *HelperClient) refresh(ctx context.Context) api.HelperStatus {
 	}
 	if st.State == api.HelperRunning {
 		c.last, c.hasLast = sd, true
+		c.needApproval = sd.Approval != nil && sd.Approval.State != api.ApprovalOff
 	}
 	if c.loggedAs != st.State {
 		c.loggedAs = st.State
@@ -338,9 +343,13 @@ func (c *HelperClient) CoreTempRead() ([]byte, string, error) {
 }
 
 // ApplyUpdate asks the helper to start the updater service (when the agent may not start it itself).
-func (c *HelperClient) ApplyUpdate(ctx context.Context) error {
+func (c *HelperClient) ApplyUpdate(ctx context.Context) error { return c.ApplyUpdateApproved(ctx, nil) }
+
+// ApplyUpdateApproved asks the helper to start the updater service and hands it the approval POST /update
+// carried. The helper checks it; the agent does not look inside.
+func (c *HelperClient) ApplyUpdateApproved(ctx context.Context, ap *api.Approval) error {
 	by := "self-update"
-	r, err := c.Call(ctx, proto.Request{Verb: proto.VerbApplyUpdate, By: &by})
+	r, err := c.Call(ctx, proto.Request{Verb: proto.VerbApplyUpdate, By: &by, Approval: ap})
 	if err != nil {
 		return err
 	}
@@ -478,21 +487,32 @@ func (f *HelperFan) change(ctx context.Context, req proto.Request) (int, map[str
 
 // SetMode is POST /fan/mode through the helper.
 func (f *HelperFan) SetMode(ctx context.Context, mode, who string) (int, map[string]any) {
+	return f.SetModeApproved(ctx, mode, who, nil)
+}
+
+// SetModeApproved is SetMode with the approval the request carried (nil: none). It is passed to the helper as
+// it came; the helper decides.
+func (f *HelperFan) SetModeApproved(ctx context.Context, mode, who string, ap *api.Approval) (int, map[string]any) {
 	if _, ok := modeByteOK(mode); !ok {
 		return 400, map[string]any{"error": "mode must be standard, full, optimal or heavyio"}
 	}
-	return f.change(ctx, proto.Request{Verb: proto.VerbFanMode, Mode: &mode, By: byOf(who)})
+	return f.change(ctx, proto.Request{Verb: proto.VerbFanMode, Mode: &mode, By: byOf(who), Approval: ap})
 }
 
 // SetDuty is POST /fan/duty through the helper (it refuses less than 30 % whatever is asked).
 func (f *HelperFan) SetDuty(ctx context.Context, zone, percent int, who string) (int, map[string]any) {
+	return f.SetDutyApproved(ctx, zone, percent, who, nil)
+}
+
+// SetDutyApproved is SetDuty with the approval the request carried (nil: none).
+func (f *HelperFan) SetDutyApproved(ctx context.Context, zone, percent int, who string, ap *api.Approval) (int, map[string]any) {
 	if zone != 0 && zone != 1 {
 		return 400, map[string]any{"error": "zone must be 0 or 1"}
 	}
 	if percent < max(f.cfg.MinDuty, proto.MinDuty) || percent > 100 {
 		return 400, map[string]any{"error": fmt.Sprintf("percent must be an integer between %d and 100", max(f.cfg.MinDuty, proto.MinDuty))}
 	}
-	return f.change(ctx, proto.Request{Verb: proto.VerbFanSet, Zone: &zone, Percent: &percent, By: byOf(who)})
+	return f.change(ctx, proto.Request{Verb: proto.VerbFanSet, Zone: &zone, Percent: &percent, By: byOf(who), Approval: ap})
 }
 
 func modeByteOK(mode string) (string, bool) { return mode, slices.Contains(proto.FanModes, mode) }
@@ -516,8 +536,13 @@ func (p *HelperPower) Schedule(action string, delay time.Duration, _ string) err
 
 // ScheduleBy asks the helper for a delayed shutdown, reboot or sleep.
 func (p *HelperPower) ScheduleBy(action string, delay time.Duration, who string) error {
+	return p.ScheduleApproved(action, delay, who, nil)
+}
+
+// ScheduleApproved is ScheduleBy with the approval the request carried (nil: none). The helper checks it.
+func (p *HelperPower) ScheduleApproved(action string, delay time.Duration, who string, ap *api.Approval) error {
 	d := int(delay / time.Second)
-	return p.call(proto.Request{Verb: proto.VerbPower, Action: &action, DelayS: &d, By: byOf(who)})
+	return p.call(proto.Request{Verb: proto.VerbPower, Action: &action, DelayS: &d, By: byOf(who), Approval: ap})
 }
 
 // Cancel cancels a pending action.
@@ -535,6 +560,9 @@ func (p *HelperPower) call(req proto.Request) error {
 		return err
 	}
 	if r.Status != 200 {
+		if approvalCode(r.Code) { // Power.Handle answers with the helper's status and code
+			return &ApprovalError{Status: r.Status, Code: r.Code, Msg: r.Error}
+		}
 		return errors.New(r.Error)
 	}
 	return nil
@@ -560,3 +588,100 @@ func (p *HelperPower) CanSleep() (bool, string) {
 
 // HelperSetupHint is how to install the helper (and move the agent to its own low-rights account).
 const HelperSetupHint = `in an Administrator PowerShell: & "C:\Program Files\Fairy\fairy-agent.exe" setup-self-update --helper`
+
+// ApprovalError is a request the machine's approval check refused: what the HTTP answer says.
+type ApprovalError struct {
+	Status int
+	Code   string
+	Msg    string
+}
+
+func (e *ApprovalError) Error() string { return e.Msg }
+
+func approvalCode(code string) bool {
+	return code == api.CodeApprovalRequired || code == api.CodeApprovalRefused || code == api.CodeApprovalUnavailable
+}
+
+// HelperApproval is the helper's approval check as the HTTP API sees it (the "approval" block of GET /metrics,
+// POST /approval/challenge and /approval/trust). On Windows the helper does all the checking; the agent only
+// carries requests and answers.
+type HelperApproval interface {
+	// ApprovalStatus is the "approval" block; ok is false when there is nothing to report (no helper installed,
+	// or one from before approvals).
+	ApprovalStatus(ctx context.Context) (st api.ApprovalStatus, ok bool)
+	// ApprovalNeeded reports whether the helper's check was on when it last answered.
+	ApprovalNeeded() bool
+	// Challenge and TrustInit pass the request to the helper and return the HTTP status and body.
+	Challenge(ctx context.Context, req api.ApprovalRequest) (int, any)
+	TrustInit(ctx context.Context, in api.TrustInit) (int, any)
+}
+
+// ApprovalStatus is the helper's approval state from its latest status answer; "unknown" while it is installed
+// and not answering.
+func (c *HelperClient) ApprovalStatus(ctx context.Context) (api.ApprovalStatus, bool) {
+	st := c.Status(ctx)
+	c.stMu.Lock()
+	defer c.stMu.Unlock()
+	switch {
+	case st.State == api.HelperNotInstalled:
+		return api.ApprovalStatus{}, false
+	case !st.Running():
+		if c.hasLast && c.last.Approval == nil {
+			return api.ApprovalStatus{}, false // the helper that ran before was one from before approvals
+		}
+		return api.ApprovalStatus{State: api.ApprovalUnknown, EnforcedBy: api.EnforcedByHelper, Proto: api.ApprovalProto,
+			Error: "the helper is not answering (" + st.State + ")"}, true
+	case !c.hasLast || c.last.Approval == nil:
+		return api.ApprovalStatus{}, false
+	}
+	return *c.last.Approval, true
+}
+
+// ApprovalNeeded: see HelperApproval.
+func (c *HelperClient) ApprovalNeeded() bool {
+	c.stMu.Lock()
+	defer c.stMu.Unlock()
+	return c.needApproval
+}
+
+// approvalCall sends a protocol version 2 request and turns the helper's answer into an HTTP answer.
+func (c *HelperClient) approvalCall(ctx context.Context, req proto.Request) (int, any) {
+	st := c.Status(ctx)
+	c.stMu.Lock()
+	old := st.Running() && c.hasLast && c.last.Proto < proto.Version2
+	c.stMu.Unlock()
+	if old {
+		return 409, map[string]any{"code": api.CodeHelperTooOld,
+			"error": "the running fairy-agent-helper is older than this agent and knows no approvals (restart it: Restart-Service fairy-agent-helper)"}
+	}
+	r, err := c.Call(ctx, req)
+	if err != nil {
+		reason := helperReason(err)
+		msg := "helper stopped: start fairy-agent-helper"
+		if reason == api.ReasonHelperError {
+			msg = "the helper did not answer: " + safeErr(err)
+		}
+		return 503, map[string]any{"error": msg, "code": reason}
+	}
+	if r.Status == 200 && len(r.Data) > 0 {
+		return 200, r.Data
+	}
+	body := map[string]any{"error": r.Error}
+	if r.Code != "" {
+		body["code"] = r.Code
+	}
+	return r.Status, body
+}
+
+// Challenge is POST /approval/challenge through the helper.
+func (c *HelperClient) Challenge(ctx context.Context, req api.ApprovalRequest) (int, any) {
+	return c.approvalCall(ctx, proto.Request{Verb: proto.VerbChallenge, For: &req.Verb, Zone: req.Zone, Percent: req.Percent,
+		Mode: req.Mode, Action: req.Action, DelayS: req.DelayS})
+}
+
+// TrustInit is POST /approval/trust through the helper: the first-time set of the trust.
+func (c *HelperClient) TrustInit(ctx context.Context, in api.TrustInit) (int, any) {
+	st, body := c.approvalCall(ctx, proto.Request{Verb: proto.VerbTrustInit, Trust: &in})
+	c.invalidate() // the next /metrics shows the new state
+	return st, body
+}

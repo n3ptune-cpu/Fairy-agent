@@ -248,7 +248,10 @@ func Run(ctx context.Context, cfg *Config, b Build) error {
 		if err != nil {
 			return err
 		}
-		if viaHelper { // the helper may start the updater when this account's own start right is missing
+		if viaHelper {
+			// a request with an approval: the helper checks it and starts the updater itself
+			o.ApplyApproved = helper.ApplyUpdateApproved
+			// the helper may start the updater when this account's own start right is missing
 			apply := o.Apply
 			o.Apply = func(ctx context.Context) error {
 				err := apply(ctx)

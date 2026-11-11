@@ -30,6 +30,11 @@ type powerBy interface {
 	ScheduleBy(action string, delay time.Duration, who string) error
 }
 
+// powerApproved is a PowerExec that passes the request's approval on to whoever checks it (the Windows helper).
+type powerApproved interface {
+	ScheduleApproved(action string, delay time.Duration, who string, ap *api.Approval) error
+}
+
 // pendingSource is a PowerExec that knows which action of Fairy's own is pending, also one scheduled before
 // this process started: RememberedPower (the operating system counts the shutdown down, a file remembers it)
 // and the Windows helper's client (the helper remembers it and says so in its status).
@@ -145,6 +150,8 @@ type PowerRequest struct {
 	Action      string `json:"action"`
 	DelayS      *int   `json:"delay_s"`
 	RequestedBy any    `json:"requested_by"`
+	// Approval is the passkey approval the request carried (nil: none). Power does not look inside.
+	Approval *api.Approval `json:"-"`
 }
 
 // Handle carries out one request and returns the HTTP status and body.
@@ -194,13 +201,20 @@ func (p *Power) Handle(req PowerRequest) (int, map[string]any) {
 	}
 	msg := fmt.Sprintf("Fairy: %s requested by %s in %d seconds.", req.Action, who, delay)
 	var err error
-	if by, ok := p.exec.(powerBy); ok { // the Windows helper builds the message itself from who
+	if ap, ok := p.exec.(powerApproved); ok && req.Approval != nil {
+		err = ap.ScheduleApproved(req.Action, time.Duration(delay)*time.Second, who, req.Approval)
+	} else if by, ok := p.exec.(powerBy); ok { // the Windows helper builds the message itself from who
 		err = by.ScheduleBy(req.Action, time.Duration(delay)*time.Second, who)
 	} else {
 		err = p.exec.Schedule(req.Action, time.Duration(delay)*time.Second, msg)
 	}
 	if errors.Is(err, api.ErrHelperStopped) {
 		return 503, map[string]any{"error": "helper stopped: start fairy-agent-helper to " + req.Action + " this machine", "code": api.ReasonHelperStopped}
+	}
+	var refused *ApprovalError
+	if errors.As(err, &refused) { // the machine's approval check said no: its status, code and text
+		slog.Warn("power: not scheduled", "action", req.Action, "code", refused.Code, "requested_by", who)
+		return refused.Status, map[string]any{"error": refused.Msg, "code": refused.Code}
 	}
 	if err != nil {
 		slog.Error("power: could not schedule", "action", req.Action, "error", err.Error(), "requested_by", who)

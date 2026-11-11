@@ -19,6 +19,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/n3ptune-cpu/Fairy-agent/pkg/agent/api"
 	"github.com/n3ptune-cpu/Fairy-agent/pkg/agent/collect"
 	"github.com/n3ptune-cpu/Fairy-agent/pkg/release"
 )
@@ -65,6 +66,8 @@ type UpdateRequest struct {
 	// fairy-agent update --force.
 	Force       bool `json:"force"`
 	RequestedBy any  `json:"requested_by"`
+	// Approval is the passkey approval the request carried (nil: none). The updater does not look inside.
+	Approval *api.Approval `json:"approval,omitempty"`
 }
 
 // UpdateCooldown is the least time between two installer runs that were asked for through the agent (the
@@ -132,7 +135,10 @@ type UpdaterOptions struct {
 	ResultPath string
 	Asset      string                          // this platform's release file
 	Apply      func(ctx context.Context) error // start the installer
-	ResultWait time.Duration                   // how long to wait for the installer's result (default 5 min)
+	// ApplyApproved, when set, starts the installer for a request that carried an approval: through whoever
+	// checks the approval (Windows: the helper, which then starts the installer itself). Apply is not tried.
+	ApplyApproved func(ctx context.Context, ap *api.Approval) error
+	ResultWait    time.Duration // how long to wait for the installer's result (default 5 min)
 	// Ready says why the installer cannot be started on this machine (nil: it can), e.g. Windows without the
 	// fairy-agent-update service. Asked at start, before each update and (while it fails) once a minute.
 	Ready func() error
@@ -266,7 +272,7 @@ func (u *Updater) Start(req UpdateRequest) (int, map[string]any) {
 		slog.Warn("self-update: \"force\" in the request is ignored (the same or an older version is only installed by hand: fairy-agent update --force)",
 			"requested_by", who)
 	}
-	go u.run(who, u.done)
+	go u.run(who, req.Approval, u.done)
 	return 202, map[string]any{"state": "downloading", "current": u.o.Version}
 }
 
@@ -282,7 +288,7 @@ func (u *Updater) fail(msg, target string) {
 	u.set("failed", msg, target)
 }
 
-func (u *Updater) run(who string, done chan struct{}) {
+func (u *Updater) run(who string, ap *api.Approval, done chan struct{}) {
 	defer u.finish(done)
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
 	defer cancel()
@@ -325,7 +331,11 @@ func (u *Updater) run(who string, done chan struct{}) {
 	}
 	u.set("applying", "installing "+ch.Version+"; the agent restarts", ch.Version)
 	slog.Warn("self-update: starting the installer", "version", ch.Version, "id", id)
-	if err := u.o.Apply(ctx); err != nil {
+	apply := u.o.Apply
+	if ap != nil && u.o.ApplyApproved != nil {
+		apply = func(ctx context.Context) error { return u.o.ApplyApproved(ctx, ap) }
+	}
+	if err := apply(ctx); err != nil {
 		u.fail("starting the installer: "+safeErr(err), ch.Version)
 		return
 	}

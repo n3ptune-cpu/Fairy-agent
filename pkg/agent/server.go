@@ -347,7 +347,10 @@ type route struct {
 	// For the reads that can take long (they wait for a process listing or for the BMC): however many of
 	// them the panel passes on, they never hold more than this many of its connections, so its /metrics poll
 	// and its control requests always find one.
-	busy    chan struct{}
+	busy chan struct{}
+	// maxBody is the largest body of a control request (0: 4096 bytes). The routes that take a passkey approval
+	// (an ID token and the list it was given for) get approvalBody.
+	maxBody int64
 	feature func() bool // POST: is the feature on? (off = 404, nothing happens)
 	code    string      // the 404 code when the feature is off
 	h       func(w http.ResponseWriter, r *http.Request)
@@ -359,14 +362,17 @@ func (a *Agent) Handler() http.Handler {
 		"/metrics":          {method: http.MethodGet, h: a.metrics},
 		"/processes":        {method: http.MethodGet, busy: a.procWaiters, h: a.processes},
 		"/fan/status":       {method: http.MethodGet, busy: a.fanStatuses, h: a.fanStatus},
-		"/fan/mode":         {method: http.MethodPost, control: true, feature: func() bool { return a.d.Fan != nil }, code: "fan_control_disabled", h: a.fanMode},
-		"/fan/duty":         {method: http.MethodPost, control: true, feature: func() bool { return a.d.Fan != nil }, code: "fan_control_disabled", h: a.fanDuty},
-		"/power":            {method: http.MethodPost, control: true, feature: func() bool { return a.d.Power != nil }, code: "power_control_disabled", h: a.power},
+		"/fan/mode":         {method: http.MethodPost, control: true, maxBody: approvalBody, feature: func() bool { return a.d.Fan != nil }, code: "fan_control_disabled", h: a.fanMode},
+		"/fan/duty":         {method: http.MethodPost, control: true, maxBody: approvalBody, feature: func() bool { return a.d.Fan != nil }, code: "fan_control_disabled", h: a.fanDuty},
+		"/power":            {method: http.MethodPost, control: true, maxBody: approvalBody, feature: func() bool { return a.d.Power != nil }, code: "power_control_disabled", h: a.power},
 		"/wol":              {method: http.MethodPost, control: true, feature: func() bool { return a.d.WOL != nil }, code: "wol_disabled", h: a.wol},
-		"/update":           {method: http.MethodPost, control: true, feature: func() bool { return a.d.Updater != nil }, code: "self_update_disabled", h: a.update},
+		"/update":           {method: http.MethodPost, control: true, maxBody: approvalBody, feature: func() bool { return a.d.Updater != nil }, code: "self_update_disabled", h: a.update},
 		"/bmc/power":        {method: http.MethodPost, control: true, feature: func() bool { return a.d.BMCRelay != nil }, code: "bmc_relay_disabled", h: a.bmcPower},
 		api.PathHelperStop:  {method: http.MethodPost, control: true, feature: a.hasHelper, h: a.helperStop},
 		api.PathHelperStart: {method: http.MethodPost, control: true, feature: a.hasHelper, h: a.helperStart},
+		// the passkey approval of the routes above (approval.go)
+		api.PathApprovalChallenge: {method: http.MethodPost, control: true, maxBody: approvalBody, feature: a.hasApproval, code: api.CodeApprovalDisabled, h: a.approvalChallenge},
+		api.PathApprovalTrust:     {method: http.MethodPost, control: true, maxBody: approvalBody, feature: a.hasApproval, code: api.CodeApprovalDisabled, h: a.approvalTrust},
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ip := clientIP(r)
@@ -425,7 +431,7 @@ func (a *Agent) Handler() http.Handler {
 				writeJSON(w, 429, map[string]any{"error": "too many control requests; try again in a minute"})
 				return
 			}
-			r.Body = http.MaxBytesReader(w, r.Body, 4096)
+			r.Body = http.MaxBytesReader(w, r.Body, max(rt.maxBody, 4096))
 		}
 		if rt.busy != nil {
 			select {
@@ -560,6 +566,9 @@ func (a *Agent) Metrics(ctx context.Context) map[string]any {
 				pc["available"], pc["reason"] = false, un[0].Reason
 			}
 		}
+	}
+	if st, ok := a.approvalStatus(ctx); ok {
+		m["approval"] = st
 	}
 	return m
 }
@@ -975,20 +984,28 @@ func intField(v json.RawMessage) (int, bool) {
 
 func (a *Agent) fanMode(w http.ResponseWriter, r *http.Request) {
 	var b struct {
-		Mode string `json:"mode"`
+		Mode     string        `json:"mode"`
+		Approval *api.Approval `json:"approval"`
 	}
 	if err := decodeBody(r, &b); err != nil {
 		writeJSON(w, 400, map[string]any{"error": err.Error()})
 		return
 	}
-	st, body := a.d.Fan.SetMode(r.Context(), b.Mode, "panel "+clientIP(r))
+	who := "panel " + clientIP(r)
+	if f, ok := a.d.Fan.(approvedFan); ok && b.Approval != nil { // the Windows helper checks it
+		st, body := f.SetModeApproved(r.Context(), b.Mode, who, b.Approval)
+		writeJSON(w, st, body)
+		return
+	}
+	st, body := a.d.Fan.SetMode(r.Context(), b.Mode, who)
 	writeJSON(w, st, body)
 }
 
 func (a *Agent) fanDuty(w http.ResponseWriter, r *http.Request) {
 	var b struct {
-		Zone    json.RawMessage `json:"zone"`
-		Percent json.RawMessage `json:"percent"`
+		Zone     json.RawMessage `json:"zone"`
+		Percent  json.RawMessage `json:"percent"`
+		Approval *api.Approval   `json:"approval"`
 	}
 	if err := decodeBody(r, &b); err != nil {
 		writeJSON(w, 400, map[string]any{"error": err.Error()})
@@ -1000,7 +1017,13 @@ func (a *Agent) fanDuty(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 400, map[string]any{"error": "zone and percent must be integers"})
 		return
 	}
-	st, body := a.d.Fan.SetDuty(r.Context(), zone, pct, "panel "+clientIP(r))
+	who := "panel " + clientIP(r)
+	if f, ok := a.d.Fan.(approvedFan); ok && b.Approval != nil { // the Windows helper checks it
+		st, body := f.SetDutyApproved(r.Context(), zone, pct, who, b.Approval)
+		writeJSON(w, st, body)
+		return
+	}
+	st, body := a.d.Fan.SetDuty(r.Context(), zone, pct, who)
 	writeJSON(w, st, body)
 }
 
@@ -1009,12 +1032,13 @@ func (a *Agent) power(w http.ResponseWriter, r *http.Request) {
 		Action      string          `json:"action"`
 		DelayS      json.RawMessage `json:"delay_s"`
 		RequestedBy any             `json:"requested_by"`
+		Approval    *api.Approval   `json:"approval"`
 	}
 	if err := decodeBody(r, &b); err != nil {
 		writeJSON(w, 400, map[string]any{"error": err.Error()})
 		return
 	}
-	req := PowerRequest{Action: b.Action, RequestedBy: b.RequestedBy}
+	req := PowerRequest{Action: b.Action, RequestedBy: b.RequestedBy, Approval: b.Approval}
 	if len(b.DelayS) > 0 && string(b.DelayS) != "null" {
 		d, ok := intField(b.DelayS)
 		if !ok {
@@ -1051,6 +1075,9 @@ func (a *Agent) update(w http.ResponseWriter, r *http.Request) {
 	var b UpdateRequest
 	if err := decodeBody(r, &b); err != nil {
 		writeJSON(w, 400, map[string]any{"error": err.Error()})
+		return
+	}
+	if !a.updateApproval(w, &b) {
 		return
 	}
 	st, body := a.d.Updater.Start(b)
