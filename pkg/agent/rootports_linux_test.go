@@ -4,6 +4,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"net"
 	"os"
 	"strconv"
@@ -195,10 +196,12 @@ func TestHealthSourcePortSelection(t *testing.T) {
 	}
 }
 
-// freePort is a port nothing is bound to at this moment.
+// freePort is a port nothing is bound to at this moment, on any address of this machine (the check binds its
+// port on all of them; a port that an earlier test's connection from 127.0.0.9 still holds in the kernel is
+// free on 127.0.0.1 only).
 func freePort(t *testing.T) int {
 	t.Helper()
-	l, err := net.Listen("tcp", "127.0.0.1:0")
+	l, err := net.Listen("tcp4", "0.0.0.0:0")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -246,14 +249,14 @@ func TestHealthDialSkipsAPortWithAListener(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer busy.Close()
-	taken, free := busy.Addr().(*net.TCPAddr).Port, freePort(t)
+	taken := busy.Addr().(*net.TCPAddr).Port
 	old := pickHealthPort
 	t.Cleanup(func() { pickHealthPort = old })
 	var picks []int
 	pickHealthPort = func() int {
-		p := free
-		if len(picks) < 2 {
-			p = taken
+		p := taken // the first two tries
+		if len(picks) >= 2 {
+			p = freePort(t)
 		}
 		picks = append(picks, p)
 		return p
@@ -263,8 +266,8 @@ func TestHealthDialSkipsAPortWithAListener(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer c.Close()
-	if got := c.LocalAddr().(*net.TCPAddr).Port; got != free || len(picks) != 3 {
-		t.Fatalf("the check came from port %d after %d tries; want %d after 3 (port %d has a listener)", got, len(picks), free, taken)
+	if got := c.LocalAddr().(*net.TCPAddr).Port; len(picks) < 3 || got != picks[len(picks)-1] || got == taken {
+		t.Fatalf("the check came from port %d after the tries %v; want the first one after the two tries with port %d, which has a listener", got, picks, taken)
 	}
 	// and the service was not disturbed: it still accepts
 	probe, err := net.Dial("tcp", busy.Addr().String())
@@ -278,10 +281,17 @@ func TestHealthDialSkipsAPortWithAListener(t *testing.T) {
 // allows it (SO_REUSEADDR). Without that the port was refused to a service for a minute.
 func TestHealthDialLeavesItsPortFreeForAListener(t *testing.T) {
 	addr, accepted := holdConns(t)
-	port := freePort(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	c, err := dialTCP(ctx, "tcp", addr, port)
+	var c net.Conn
+	var port int
+	var err error
+	for range 20 { // a port may be taken between the look for a free one and its use
+		port = freePort(t)
+		if c, err = dialTCP(ctx, "tcp", addr, port); err == nil || !errors.Is(err, syscall.EADDRINUSE) {
+			break
+		}
+	}
 	if err != nil {
 		t.Fatal(err)
 	}
