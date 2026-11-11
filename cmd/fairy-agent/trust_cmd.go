@@ -53,12 +53,20 @@ set (root / Administrator) writes the trust file. What is not given stays as it 
   --yes                 do not ask before writing
 show prints the trust file and whether it can be used. clear removes it: nothing needs an approval any more,
 and the panel can set the trust again (once).
+
+The panel's first-time set is accepted only with a passkey approval that proves the values work. set, typed
+here, proves nothing: it writes what it is given. A wrong issuer spelling, client id or user id, or a clock
+that is off, then shows at the first approval ("approval refused"). So approve one action from the panel
+while you are still at the machine; clear undoes the set.
+Linux: run it as root. In the agent's own state folder it works as the agent's user (see AGENT.md).
 `
 
 // Seams for the tests.
 var (
 	trustFiles      = func(cfg *agent.Config) approval.Files { return agent.ApprovalAdminFiles(cfg) }
 	trustIsAdmin    = isAdmin
+	trustBecome     = trustBecomeOwner
+	trustNow        = time.Now
 	trustHTTPClient = func() *http.Client {
 		return &http.Client{Timeout: 15 * time.Second,
 			CheckRedirect: func(*http.Request, []*http.Request) error { return errors.New("the issuer answered with a redirect") }}
@@ -111,16 +119,36 @@ func helperTrustCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) in
 		return fail(fmt.Errorf("config problem: %w", err))
 	}
 	files := trustFiles(cfg)
+	if sub != "show" && !trustIsAdmin() {
+		return fail(errors.New("run it as root / in an Administrator PowerShell"))
+	}
+	// what set reads from files the administrator names is read now, as the administrator: from here on (not
+	// Windows) the file work may be done as the owner of the agent's state folder (trust_unix.go)
+	var fromData, jwksData []byte
+	if sub == "set" && *from != "" {
+		if fromData, err = os.ReadFile(*from); err != nil {
+			return fail(err)
+		}
+	}
+	if sub == "set" && *jwks != "" && !*fetch {
+		if jwksData, err = os.ReadFile(*jwks); err != nil {
+			return fail(err)
+		}
+	}
+	as, err := trustBecome(files.Path)
+	if err != nil {
+		return fail(err)
+	}
 	state, old, _, loadErr := files.Load()
 	switch sub {
 	case "show":
 		fmt.Fprintln(stdout, "trust file:     ", files.Path)
+		if as != "" {
+			fmt.Fprintln(stdout, as)
+		}
 		printTrust(stdout, state, old, loadErr)
 		return 0
 	case "clear":
-		if !trustIsAdmin() {
-			return fail(errors.New("run it as root / in an Administrator PowerShell"))
-		}
 		if state == api.ApprovalOff {
 			fmt.Fprintln(stdout, "there is no trust file ("+files.Path+"): nothing needs an approval, and the panel can set the trust (once)")
 			return 0
@@ -139,9 +167,6 @@ func helperTrustCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) in
 	}
 
 	// set
-	if !trustIsAdmin() {
-		return fail(errors.New("run it as root / in an Administrator PowerShell"))
-	}
 	var t approval.Trust
 	if old != nil {
 		t = approval.Trust{Issuer: old.Issuer, ClientID: old.ClientID, Keys: old.Keys, Users: old.Users,
@@ -150,11 +175,7 @@ func helperTrustCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) in
 		fmt.Fprintln(stdout, "note: the existing trust file cannot be used and will be replaced:", loadErr)
 	}
 	if *from != "" {
-		b, err := os.ReadFile(*from)
-		if err != nil {
-			return fail(err)
-		}
-		ft, err := approval.ParseTrust(b)
+		ft, err := approval.ParseTrust(fromData)
 		if err != nil {
 			return fail(fmt.Errorf("%s: %w", *from, err))
 		}
@@ -199,11 +220,7 @@ func helperTrustCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) in
 	case *jwks != "" && *fetch:
 		return fail(errors.New("--fetch-keys and --jwks exclude each other"))
 	case *jwks != "":
-		b, err := os.ReadFile(*jwks)
-		if err != nil {
-			return fail(err)
-		}
-		if t.Keys, notes, err = keysFromJWKS(b); err != nil {
+		if t.Keys, notes, err = keysFromJWKS(jwksData); err != nil {
 			return fail(fmt.Errorf("%s: %w", *jwks, err))
 		}
 		source = "from " + *jwks
@@ -211,10 +228,14 @@ func helperTrustCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) in
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 		var uri string
-		if t.Keys, notes, uri, err = fetchIssuerKeys(ctx, trustHTTPClient(), t.Issuer); err != nil {
+		var issuerTime time.Time
+		if t.Keys, notes, uri, issuerTime, err = fetchIssuerKeys(ctx, trustHTTPClient(), t.Issuer); err != nil {
 			return fail(fmt.Errorf("fetching the issuer's keys: %w (or give them in a file: --jwks FILE)", err))
 		}
 		source = "fetched just now from " + uri
+		if n := clockNote(issuerTime, trustNow()); n != "" {
+			notes = append(notes, n)
+		}
 	}
 	if *keepOld {
 		for _, k := range oldKeys {
@@ -250,7 +271,30 @@ func helperTrustCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) in
 		return fail(fmt.Errorf("the file was written but cannot be used, so everything that needs an approval is refused until this is repaired: %v", err))
 	}
 	fmt.Fprintln(stdout, "written. In effect within 5 seconds; from now on only this command changes it (the panel cannot).")
+	fmt.Fprintln(stdout, "NOT PROVEN: nothing has checked that Pocket ID issues approvals that fit these values (the panel's own")
+	fmt.Fprintln(stdout, "  first-time set is accepted only with such a proof; this command writes what it is given). A wrong issuer")
+	fmt.Fprintln(stdout, "  spelling, client id or user id, or a clock that is more than 60 s off, shows at the first approval as")
+	fmt.Fprintln(stdout, "  \"approval refused\". Approve one action from the panel now, while you are at this machine.")
+	fmt.Fprintln(stdout, "  To undo: fairy-agent helper-trust clear")
 	return 0
+}
+
+// clockNote says so when this machine's clock (now) and the issuer's (the Date of its answer) are far enough
+// apart to matter: an approval is refused when they differ by more than approval.ClockAllowance. "" when they
+// agree or the issuer's time is not known.
+func clockNote(issuer, now time.Time) string {
+	if issuer.IsZero() {
+		return ""
+	}
+	d := now.Sub(issuer)
+	if d < 0 {
+		d = -d
+	}
+	if d <= approval.ClockAllowance*3/4 {
+		return ""
+	}
+	return fmt.Sprintf("THE CLOCK: this machine's clock and the issuer's differ by about %d s. Approvals are refused when they differ by more than %d s: set this machine's clock first",
+		int(d/time.Second), int(approval.ClockAllowance/time.Second))
 }
 
 func hasKid(keys []api.TrustKey, kid string) bool {
@@ -378,59 +422,69 @@ func clipText(s string, n int) string {
 }
 
 // fetchIssuerKeys reads the issuer's discovery document and its JWKS over https. The document must name the
-// same issuer, and its jwks_uri must be https on the issuer's own host; redirects are not followed.
-func fetchIssuerKeys(ctx context.Context, c *http.Client, issuer string) (keys []api.TrustKey, notes []string, uri string, err error) {
+// same issuer, and its jwks_uri must be https on the issuer's own host; redirects are not followed. at is the
+// issuer's clock, from the Date of its last answer (zero: it sent none).
+func fetchIssuerKeys(ctx context.Context, c *http.Client, issuer string) (keys []api.TrustKey, notes []string, uri string, at time.Time, err error) {
+	keys, notes, uri, date, err := fetchIssuerKeysDate(ctx, c, issuer)
+	if err == nil && date != "" {
+		at, _ = http.ParseTime(date)
+	}
+	return keys, notes, uri, at, err
+}
+
+func fetchIssuerKeysDate(ctx context.Context, c *http.Client, issuer string) (keys []api.TrustKey, notes []string, uri, date string, err error) {
 	iu, err := url.Parse(issuer)
 	if err != nil || iu.Scheme != "https" || iu.Host == "" {
-		return nil, nil, "", errors.New("the issuer must be an https:// URL")
+		return nil, nil, "", "", errors.New("the issuer must be an https:// URL")
 	}
-	b, err := httpGet(ctx, c, strings.TrimSuffix(issuer, "/")+"/.well-known/openid-configuration")
+	b, _, err := httpGet(ctx, c, strings.TrimSuffix(issuer, "/")+"/.well-known/openid-configuration")
 	if err != nil {
-		return nil, nil, "", err
+		return nil, nil, "", "", err
 	}
 	var doc struct {
 		Issuer  string `json:"issuer"`
 		JWKSURI string `json:"jwks_uri"`
 	}
 	if json.Unmarshal(b, &doc) != nil {
-		return nil, nil, "", errors.New("the discovery document is not JSON")
+		return nil, nil, "", "", errors.New("the discovery document is not JSON")
 	}
 	if doc.Issuer != issuer {
-		return nil, nil, "", fmt.Errorf("the issuer calls itself %q, not %q: use exactly its own spelling for --issuer", clipText(doc.Issuer, 255), issuer)
+		return nil, nil, "", "", fmt.Errorf("the issuer calls itself %q, not %q: use exactly its own spelling for --issuer", clipText(doc.Issuer, 255), issuer)
 	}
 	ju, err := url.Parse(doc.JWKSURI)
 	if err != nil || ju.Scheme != "https" || ju.Host != iu.Host {
-		return nil, nil, "", fmt.Errorf("the issuer's jwks_uri %q is not https on the issuer's own host", clipText(doc.JWKSURI, 255))
+		return nil, nil, "", "", fmt.Errorf("the issuer's jwks_uri %q is not https on the issuer's own host", clipText(doc.JWKSURI, 255))
 	}
-	if b, err = httpGet(ctx, c, doc.JWKSURI); err != nil {
-		return nil, nil, "", err
+	if b, date, err = httpGet(ctx, c, doc.JWKSURI); err != nil {
+		return nil, nil, "", "", err
 	}
 	keys, notes, err = keysFromJWKS(b)
-	return keys, notes, doc.JWKSURI, err
+	return keys, notes, doc.JWKSURI, date, err
 }
 
-func httpGet(ctx context.Context, c *http.Client, u string) ([]byte, error) {
+// httpGet returns the body of a 200 answer and its Date header.
+func httpGet(ctx context.Context, c *http.Client, u string) ([]byte, string, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	req.Header.Set("Accept", "application/json")
 	resp, err := c.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
-		return nil, fmt.Errorf("%s answered %d", u, resp.StatusCode)
+		return nil, "", fmt.Errorf("%s answered %d", u, resp.StatusCode)
 	}
 	b, err := io.ReadAll(io.LimitReader(resp.Body, maxJWKS+1))
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	if len(b) > maxJWKS {
-		return nil, fmt.Errorf("%s: the answer is too large", u)
+		return nil, "", fmt.Errorf("%s: the answer is too large", u)
 	}
-	return b, nil
+	return b, resp.Header.Get("Date"), nil
 }
 
 // helperApprovalLines is what helper-status prints about approvals from the helper's status answer: whether

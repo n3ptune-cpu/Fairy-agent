@@ -27,6 +27,7 @@ type trustRig struct {
 	issuer *httptest.Server
 	jwks   map[string]any // what the issuer publishes
 	iss    string         // what its discovery document calls it ("": its own address)
+	date   string         // the Date of its answers ("": now)
 }
 
 func newTrustRig(t *testing.T) *trustRig {
@@ -46,6 +47,9 @@ func newTrustRig(t *testing.T) *trustRig {
 		map[string]any{"kty": "RSA", "kid": "enc-1", "use": "enc", "n": k1.N, "e": k1.E},
 	}}
 	r.issuer = httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, q *http.Request) {
+		if r.date != "" {
+			w.Header().Set("Date", r.date)
+		}
 		switch q.URL.Path {
 		case "/.well-known/openid-configuration":
 			iss := r.iss
@@ -106,8 +110,13 @@ func TestHelperTrustSetShowClear(t *testing.T) {
 	if code != 1 || r.trust() != nil {
 		t.Fatalf("set answered with no: code %d, trust %+v", code, r.trust())
 	}
-	if code, out, errs := r.run("yes\n", args...); code != 0 || !strings.Contains(out, "written.") {
+	code, out, errs := r.run("yes\n", args...)
+	if code != 0 || !strings.Contains(out, "written.") {
 		t.Fatalf("set: %d\n%s\n%s", code, out, errs)
+	}
+	// the command proves nothing, and says so; the clocks agree, so nothing is said about them
+	if !strings.Contains(out, "NOT PROVEN") || !strings.Contains(out, "fairy-agent helper-trust clear") || strings.Contains(out, "THE CLOCK") {
+		t.Errorf("set: the output does not say that nothing was proven (or warns about the clock):\n%s", out)
 	}
 	tr := r.trust()
 	if tr == nil || tr.Issuer != r.issuer.URL || tr.ClientID != "fairy-pc-actions" || len(tr.Keys) != 1 || tr.Keys[0].Kid != "key-1" ||
@@ -275,4 +284,32 @@ func mustSmallKey(t *testing.T) *rsa.PrivateKey {
 		t.Fatal(err)
 	}
 	return k
+}
+
+// TestHelperTrustSetWarnsAboutTheClock: when the keys are fetched from the issuer, its answer carries its time.
+// A machine whose clock is more than a minute away from it would refuse every approval after the set; the
+// command says so before it writes.
+func TestHelperTrustSetWarnsAboutTheClock(t *testing.T) {
+	r := newTrustRig(t)
+	args := []string{"set", "--yes", "--issuer", r.issuer.URL, "--client-id", "c", "--user", "u"}
+	r.date = time.Now().Add(-10 * time.Minute).UTC().Format(http.TimeFormat)
+	code, out, errs := r.run("", args...)
+	if code != 0 || !strings.Contains(out, "THE CLOCK") || !strings.Contains(out, "differ by about 6") || !strings.Contains(out, "more than 60 s") {
+		t.Fatalf("issuer's clock 10 minutes behind: %d\n%s\n%s", code, out, errs)
+	}
+	for _, c := range []struct {
+		issuer, now time.Time
+		warn        bool
+	}{
+		{time.Unix(1000, 0), time.Unix(1000, 0), false},
+		{time.Unix(1000, 0), time.Unix(1040, 0), false},
+		{time.Unix(1000, 0), time.Unix(1046, 0), true},
+		{time.Unix(1046, 0), time.Unix(1000, 0), true},
+		{time.Unix(1000, 0), time.Unix(5000, 0), true},
+		{time.Time{}, time.Unix(5000, 0), false}, // the issuer sent no Date
+	} {
+		if got := clockNote(c.issuer, c.now) != ""; got != c.warn {
+			t.Errorf("issuer %d, machine %d: warned %v, want %v", c.issuer.Unix(), c.now.Unix(), got, c.warn)
+		}
+	}
 }
