@@ -23,7 +23,8 @@ import (
 const (
 	// PathApprovalChallenge: body ApprovalRequest; 200 ChallengeResponse.
 	PathApprovalChallenge = "/approval/challenge"
-	// PathApprovalTrust: body TrustInit; 200 ApprovalStatus. Only while the machine has no trust file.
+	// PathApprovalTrust: body TrustInit, with the approval that proves the proposed trust works; 200
+	// ApprovalStatus. Only while the machine has no trust file.
 	PathApprovalTrust = "/approval/trust"
 )
 
@@ -50,6 +51,8 @@ const (
 	CodeTrustAlreadySet     = "already_set"          // 409: a trust file exists; only an administrator on the machine changes it
 	CodeTrustInvalid        = "invalid"              // 400: the trust values were refused
 	CodeTrustUnsupportedKey = "unsupported_key"      // 400: a key of a kind, algorithm or size this version does not check
+	CodeTrustProofRequired  = "proof_required"       // 403: a first-time set of the trust without the approval that proves it; nothing was written
+	CodeTrustProofRefused   = "proof_refused"        // 403: the approval sent with a first-time set does not verify against the proposed trust; nothing was written
 	CodeHelperTooOld        = "helper_too_old"       // 409: the Windows helper is older than this protocol
 )
 
@@ -67,12 +70,14 @@ const (
 	EnforcedByAgent  = "agent"  // everywhere else: the agent itself
 )
 
-// Verbs of an ApprovalRequest: the four requests that need an approval when trust is set.
+// Verbs of an ApprovalRequest: the four requests that need an approval when trust is set, and the one request
+// that needs one while there is none: the first-time set of the trust itself.
 const (
 	ApproveFanSet      = "fan_set"      // POST /fan/duty
 	ApproveFanMode     = "fan_mode"     // POST /fan/mode
 	ApprovePower       = "power"        // POST /power, every action but cancel
 	ApproveApplyUpdate = "apply_update" // POST /update
+	ApproveTrustSet    = "trust_set"    // POST /approval/trust (only while the machine has no trust file)
 )
 
 var (
@@ -88,6 +93,8 @@ type ApprovalRequest struct {
 	Mode    *string `json:"mode,omitempty"`    // fan_mode
 	Action  *string `json:"action,omitempty"`  // power: shutdown | reboot | sleep
 	DelayS  *int    `json:"delay_s,omitempty"` // power
+	// TrustHash (trust_set): TrustHash of the trust the panel is about to propose, 43 characters.
+	TrustHash *string `json:"trust_hash,omitempty"`
 }
 
 // Canonical is the one text form of the request, the "request" of an entry:
@@ -96,13 +103,15 @@ type ApprovalRequest struct {
 //	fan_mode mode=<standard|full|optimal|heavyio>
 //	power action=<shutdown|reboot|sleep> delay_s=<0-86400>
 //	apply_update
+//	trust_set hash=<43 characters: TrustHash of the proposed trust>
 //
-// Lower-case ASCII, single spaces, numbers in decimal without sign or leading zeros, the fields in exactly this
-// order. Every value is a small number or one word of a fixed list, so no value can contain a space or "=".
+// ASCII, single spaces, numbers in decimal without sign or leading zeros, the fields in exactly this order.
+// Every value is a small number, one word of a fixed list or 43 characters of the base64url alphabet, so no
+// value can contain a space or "=".
 // A request with a missing or an extra field, or a value outside these lists, has no canonical form.
 func (r ApprovalRequest) Canonical() (string, error) {
 	set := map[string]bool{"zone": r.Zone != nil, "percent": r.Percent != nil, "mode": r.Mode != nil,
-		"action": r.Action != nil, "delay_s": r.DelayS != nil}
+		"action": r.Action != nil, "delay_s": r.DelayS != nil, "trust_hash": r.TrustHash != nil}
 	only := func(fields ...string) error {
 		for f, present := range set {
 			if want := slices.Contains(fields, f); present != want {
@@ -150,8 +159,16 @@ func (r ApprovalRequest) Canonical() (string, error) {
 			return "", err
 		}
 		return "apply_update", nil
+	case ApproveTrustSet:
+		if err := only("trust_hash"); err != nil {
+			return "", err
+		}
+		if _, err := decode32(*r.TrustHash); err != nil {
+			return "", errors.New("trust_hash must be 43 characters of base64url (32 bytes, no padding)")
+		}
+		return "trust_set hash=" + *r.TrustHash, nil
 	}
-	return "", errors.New("verb must be fan_set, fan_mode, power or apply_update")
+	return "", errors.New("verb must be fan_set, fan_mode, power, apply_update or trust_set")
 }
 
 // ApprovalEntry is one (challenge, request) pair of an approval.
@@ -173,18 +190,28 @@ const nonceDomain = "fairy-approval-v1"
 // DecodeChallenge returns the 32 bytes of a challenge. Exactly 43 characters of the URL-safe alphabet, no
 // padding, no stray bits.
 func DecodeChallenge(s string) ([]byte, error) {
+	b, err := decode32(s)
+	if err != nil {
+		return nil, errors.New("a challenge is " + err.Error())
+	}
+	return b, nil
+}
+
+// decode32 returns the 32 bytes of s: exactly 43 characters of the URL-safe alphabet, no padding, no stray
+// bits. The error says what s must be.
+func decode32(s string) ([]byte, error) {
 	if len(s) != ChallengeLen {
-		return nil, errors.New("a challenge is 43 characters")
+		return nil, errors.New("43 characters")
 	}
 	for i := 0; i < len(s); i++ { // encoding/base64 skips line breaks even in strict mode
 		c := s[i]
 		if !(c >= 'A' && c <= 'Z' || c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || c == '-' || c == '_') {
-			return nil, errors.New("a challenge is base64url")
+			return nil, errors.New("base64url")
 		}
 	}
 	b, err := base64.RawURLEncoding.Strict().DecodeString(s)
 	if err != nil || len(b) != 32 {
-		return nil, errors.New("a challenge is 32 bytes in base64url without padding")
+		return nil, errors.New("32 bytes in base64url without padding")
 	}
 	return b, nil
 }
@@ -236,7 +263,8 @@ func ApprovalNonce(entries []ApprovalEntry) (string, error) {
 
 // ChallengeResponse is the 200 answer of POST /approval/challenge.
 type ChallengeResponse struct {
-	// Needed: the request needs an approval now. false: send it without one (Reason says why).
+	// Needed: the request needs an approval now. false: send it without one (Reason says why). For trust_set it
+	// is always true (or the request is refused: already_set).
 	Needed bool `json:"needed"`
 	// Reason when not needed: "off" (no trust set), "fan_window" (a fan change was approved a moment ago) or
 	// "boot_shutdown" (the machine's own setting allows one shutdown shortly after it started).
@@ -247,7 +275,8 @@ type ChallengeResponse struct {
 	Challenge string `json:"challenge,omitempty"`
 	// ExpiresInS: seconds until the challenge is dropped (needed only).
 	ExpiresInS int `json:"expires_in_s,omitempty"`
-	// Issuer and ClientID the machine will accept the token from (needed only).
+	// Issuer and ClientID the machine will accept the token from (needed only; absent for trust_set, where the
+	// machine has none yet and the token is checked against the proposed ones).
 	Issuer   string `json:"issuer,omitempty"`
 	ClientID string `json:"client_id,omitempty"`
 }
@@ -265,11 +294,72 @@ type TrustKey struct {
 // TrustInit is the body of POST /approval/trust: what a machine without a trust file is told to trust. The fan
 // window and the shutdown-after-boot setting are not in it: they start at their defaults (30 s, off) and only
 // an administrator on the machine changes them.
+//
+// A first-time set must prove that it works: Approval is an approval of the request "trust_set hash=<TrustHash
+// of these four values>" (a challenge of this machine for exactly that request, POST /approval/challenge with
+// the verb trust_set), and its token is checked like every approval, against the PROPOSED values: signed by a
+// proposed key, "iss" the proposed issuer, "aud" the proposed client, "sub" one of the proposed users. Only
+// then is the trust written. So a wrong issuer spelling, client id, user id or key, or a machine whose clock
+// is off, is found out before the machine locks, not after.
 type TrustInit struct {
 	Issuer   string     `json:"issuer"`    // https://..., exactly the "iss" of the tokens
 	ClientID string     `json:"client_id"` // the Pocket ID client "Fairy PC actions"
 	Keys     []TrustKey `json:"keys"`      // 1-MaxTrustKeys
 	Users    []string   `json:"users"`     // 1-MaxTrustUsers "sub" values that may approve
+	// Approval is the proof (see above). Without it the set is refused with proof_required.
+	Approval *Approval `json:"approval,omitempty"`
+}
+
+// trustDomain starts every trust hash input: nothing else Fairy hashes begins with it.
+const trustDomain = "fairy-trust-v1"
+
+// TrustHash is the hash of the four values of a proposed trust, the "hash" of the request "trust_set
+// hash=...":
+//
+//	base64url_nopad( SHA-256( "fairy-trust-v1" || 0x00 ||
+//	    str(issuer) || str(client_id) ||
+//	    be32(number of keys)  || for each key, in the order of "keys":   str(kty) || str(kid) || str(alg) || str(n) || str(e) ||
+//	    be32(number of users) || for each user, in the order of "users": str(user) ) )
+//
+// str(x) is be32(len(x)) || x, the bytes of the string as it is in the JSON body (n and e stay base64url text);
+// be32 is a 4-byte big-endian number. A key's "use" is not part of it. The order of keys and users counts: the
+// body that is sent must list them in the order that was hashed. Every part has its length in front, so two
+// different proposals never give the same input. The values are not checked here.
+func TrustHash(in TrustInit) string {
+	h := sha256.New()
+	h.Write([]byte(trustDomain))
+	h.Write([]byte{0})
+	var n [4]byte
+	num := func(v int) {
+		binary.BigEndian.PutUint32(n[:], uint32(v))
+		h.Write(n[:])
+	}
+	str := func(s string) {
+		num(len(s))
+		h.Write([]byte(s))
+	}
+	str(in.Issuer)
+	str(in.ClientID)
+	num(len(in.Keys))
+	for _, k := range in.Keys {
+		str(k.Kty)
+		str(k.Kid)
+		str(k.Alg)
+		str(k.N)
+		str(k.E)
+	}
+	num(len(in.Users))
+	for _, u := range in.Users {
+		str(u)
+	}
+	return base64.RawURLEncoding.EncodeToString(h.Sum(nil))
+}
+
+// TrustSetRequest is the request a first-time set of in must be approved as: the body of the POST
+// /approval/challenge that comes before it.
+func TrustSetRequest(in TrustInit) ApprovalRequest {
+	hash := TrustHash(in)
+	return ApprovalRequest{Verb: ApproveTrustSet, TrustHash: &hash}
 }
 
 // ApprovalKey is one pinned key in ApprovalStatus.
@@ -298,4 +388,11 @@ type ApprovalStatus struct {
 	BootShutdownS *int `json:"boot_shutdown_s,omitempty"`
 	// Error: why the trust file cannot be used (broken), or why the state is unknown.
 	Error string `json:"error,omitempty"`
+	// AgentChecks: on a machine where EnforcedBy is the helper, the requests (verbs) this agent process
+	// carries out itself, without the helper, and therefore checks itself with the same trust file and the
+	// same rules: a Windows agent that drives the fans over the network (ipmi.transport: ipmitool), or one
+	// started before the helper was installed. Absent: none, the helper checks everything.
+	AgentChecks []string `json:"agent_checks,omitempty"`
+	// AgentError: why the agent's own check of AgentChecks cannot be used; those requests are refused.
+	AgentError string `json:"agent_error,omitempty"`
 }

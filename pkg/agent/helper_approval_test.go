@@ -149,8 +149,13 @@ func TestApprovalThroughAgentAndHelper(t *testing.T) {
 		t.Fatalf("challenge without trust: %d %v", st, c)
 	}
 
-	// first-time set, once
+	// first-time set: not without the approval that proves it, then once
 	st, ap := r.post(t, api.PathApprovalTrust, r.iss.Init())
+	wantRefusal(t, "first-time set without a proof", st, ap, 403, api.CodeTrustProofRequired)
+	if st, b := r.post(t, "/fan/mode", map[string]any{"mode": "full"}); st != 200 {
+		t.Fatalf("after a refused set the machine is not locked: %d %v", st, b)
+	}
+	st, ap = r.post(t, api.PathApprovalTrust, provenTrust(t, r.base, r.iss, r.iss.Init()))
 	if st != 200 || ap["state"] != api.ApprovalRequired || ap["issuer"] != r.iss.URL || ap["users"] != float64(1) {
 		t.Fatalf("first-time set: %d %v", st, ap)
 	}
@@ -293,7 +298,7 @@ func TestUpdateWithHelperApproval(t *testing.T) {
 		t.Fatalf("trust off: own %d, helper %d", r.ownStarts.Load(), r.helperStarts.Load())
 	}
 
-	if st, b := r.post(t, api.PathApprovalTrust, r.iss.Init()); st != 200 {
+	if st, b := r.post(t, api.PathApprovalTrust, provenTrust(t, r.base, r.iss, r.iss.Init())); st != 200 {
 		t.Fatalf("first-time set: %d %v", st, b)
 	}
 	r.approvalBlock(t, api.ApprovalRequired)

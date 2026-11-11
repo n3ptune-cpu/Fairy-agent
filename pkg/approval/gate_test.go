@@ -52,11 +52,26 @@ func newRig(t testing.TB, trusted bool) *rig {
 	r.files = approval.Files{Path: filepath.Join(t.TempDir(), approval.TrustFileName)}
 	r.g = r.gate()
 	if trusted {
-		if st, ref := r.g.Init(r.iss.Init()); ref != nil || st.State != api.ApprovalRequired {
+		if st, ref := r.firstSet(r.g, r.iss, r.iss.Init()); ref != nil || st.State != api.ApprovalRequired {
 			t.Fatalf("first-time set: %+v, %v", st, ref)
 		}
 	}
 	return r
+}
+
+// proven is in as the panel sends it: with iss's approval of g's challenge for exactly these values. When g
+// gives no challenge (trust is set already) it is in without a proof.
+func (r *rig) proven(g *approval.Gate, iss *approvaltest.Issuer, in api.TrustInit) api.TrustInit {
+	c, ref := g.Challenge(api.TrustSetRequest(in))
+	if ref != nil {
+		return in
+	}
+	return iss.Prove(r.Now(), in, api.ApprovalEntry{Challenge: c.Challenge, Request: c.Request})
+}
+
+// firstSet is a complete first-time set of in on g: the challenge, iss's approval of it, the set.
+func (r *rig) firstSet(g *approval.Gate, iss *approvaltest.Issuer, in api.TrustInit) (api.ApprovalStatus, *approval.Refusal) {
+	return g.Init(r.proven(g, iss, in))
 }
 
 // gate is another gate on the same file and clock (the same machine after a restart, or a second process).
@@ -386,14 +401,23 @@ func TestFirstTimeSetThenLocked(t *testing.T) {
 	r := newRig(t, false)
 	other := *r.iss
 	other.URL, other.Key, other.Kid = "https://evil.test.invalid", approvaltest.Key(1), "evil"
-	st, ref := r.g.Init(r.iss.Init("user-a", "user-b"))
+	userA := *r.iss
+	userA.Sub = "user-a"
+	// two complete proofs made while the machine has no trust; the first one sets it
+	early := []api.TrustInit{r.proven(r.g, &userA, r.iss.Init("user-a", "user-b")), r.proven(r.g, &other, other.Init())}
+	st, ref := r.firstSet(r.g, &userA, r.iss.Init("user-a", "user-b"))
 	if ref != nil || st.State != api.ApprovalRequired || st.Users != 2 || *st.FanWindowS != 30 || *st.BootShutdownS != 0 {
 		t.Fatalf("first-time set: %+v, %v", st, ref)
 	}
 	before, _ := os.ReadFile(r.files.Path)
-	// locked: the same values, other values, from this gate or a new one (restart)
+	// no challenge for another set is to be had now
+	if _, ref := r.g.Challenge(api.TrustSetRequest(other.Init())); ref == nil || ref.Code != api.CodeTrustAlreadySet || ref.Status != 409 {
+		t.Errorf("trust_set challenge on a machine with trust: %v", ref)
+	}
+	// locked: the same values, other values, without a proof and with the proofs that were good a moment ago,
+	// from this gate or a new one (restart)
 	for name, g := range map[string]*approval.Gate{"same gate": r.g, "after a restart": r.gate()} {
-		for _, in := range []api.TrustInit{r.iss.Init("user-a", "user-b"), other.Init()} {
+		for _, in := range append([]api.TrustInit{r.iss.Init("user-a", "user-b"), other.Init()}, early...) {
 			st, ref := g.Init(in)
 			refused(t, name, ref, api.CodeTrustAlreadySet, "")
 			if ref != nil && ref.Status != 409 {
@@ -429,7 +453,10 @@ func TestFirstTimeSetThenLocked(t *testing.T) {
 		t.Fatalf("after the local clear: %+v", st)
 	}
 	accepted(t, "off again", r.g.Check(req, nil))
-	if st, ref := r.g.Init(other.Init()); ref != nil || st.Issuer != other.URL {
+	// the proof from before the first set is worth nothing now: its challenge went with the old state
+	_, ref = r.g.Init(early[1])
+	refused(t, "old proof after a local clear", ref, api.CodeTrustProofRefused, "")
+	if st, ref := r.firstSet(r.g, &other, other.Init()); ref != nil || st.Issuer != other.URL {
 		t.Errorf("set after a local clear: %+v, %v", st, ref)
 	}
 }
@@ -447,7 +474,7 @@ func TestFirstTimeSetExactlyOneWins(t *testing.T) {
 			defer wg.Done()
 			iss := *r.iss
 			iss.ClientID = "client-" + string(rune('a'+i))
-			_, ref := gates[i%len(gates)].Init(iss.Init())
+			_, ref := r.firstSet(gates[i%len(gates)], &iss, iss.Init())
 			mu.Lock()
 			defer mu.Unlock()
 			switch {
@@ -539,8 +566,14 @@ func TestFirstTimeSetRefusesBadValues(t *testing.T) {
 		if _, err := os.Lstat(r.files.Path); !errors.Is(err, os.ErrNotExist) {
 			t.Errorf("%s: a refused set left a trust file", name)
 		}
+		// also with a proof for exactly these values: the values are checked first, and no file appears
+		_, ref = r.g.Init(r.proven(r.g, r.iss, in))
+		refused(t, name+", with a proof", ref, c.code, "")
+		if _, err := os.Lstat(r.files.Path); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("%s: a refused set left a trust file", name)
+		}
 		// and the machine still takes a good one
-		if _, ref := r.g.Init(good); ref != nil {
+		if _, ref := r.firstSet(r.g, r.iss, good); ref != nil {
 			t.Errorf("%s: a good set after the refused one: %v", name, ref)
 		}
 	}
@@ -626,11 +659,11 @@ func TestUnsafeFolderOrFileFailsClosed(t *testing.T) {
 	}
 	// no folder at all: nothing was ever set up here
 	gone := approval.NewGate(approval.Options{Files: approval.Files{Path: filepath.Join(t.TempDir(), "missing", approval.TrustFileName)},
-		Log: slog.New(slog.NewTextHandler(empty.log, nil))})
+		Now: empty.Now, Log: slog.New(slog.NewTextHandler(empty.log, nil))})
 	if st := gone.Status(); st.State != api.ApprovalOff {
 		t.Errorf("no folder: %+v", st)
 	}
-	if _, ref := gone.Init(empty.iss.Init()); ref == nil || ref.Status != 500 {
+	if _, ref := empty.firstSet(gone, empty.iss, empty.iss.Init()); ref == nil || ref.Status != 500 {
 		t.Errorf("first-time set without a folder: %v", ref)
 	}
 	if st := gone.Status(); st.State != api.ApprovalOff {

@@ -50,6 +50,8 @@ type Issuer struct {
 	ClientID string
 	Kid      string
 	Key      *rsa.PrivateKey
+	// Sub is the user its tokens are for ("": User).
+	Sub string
 }
 
 // New is the made-up issuer with key 0.
@@ -66,7 +68,11 @@ func (i *Issuer) Init(users ...string) api.TrustInit {
 
 // Claims are the claims of a good ID token for nonce, authenticated and issued at now.
 func (i *Issuer) Claims(nonce string, now time.Time) map[string]any {
-	return map[string]any{"iss": i.URL, "aud": i.ClientID, "sub": User, "nonce": nonce, "amr": []string{"phr"},
+	sub := i.Sub
+	if sub == "" {
+		sub = User
+	}
+	return map[string]any{"iss": i.URL, "aud": i.ClientID, "sub": sub, "nonce": nonce, "amr": []string{"phr"},
 		"iat": now.Unix(), "exp": now.Add(time.Hour).Unix(), "auth_time": now.Unix(), "preferred_username": "neptune"}
 }
 
@@ -110,4 +116,11 @@ func (i *Issuer) Approve(now time.Time, entries ...api.ApprovalEntry) *api.Appro
 		panic(err)
 	}
 	return &api.Approval{Token: i.Token(i.Claims(nonce, now)), Entries: entries}
+}
+
+// Prove is in as the panel sends it for a first-time set: with this issuer's approval of entries, which must
+// hold the machine's challenge for api.TrustSetRequest(in). Authenticated at now.
+func (i *Issuer) Prove(now time.Time, in api.TrustInit, entries ...api.ApprovalEntry) api.TrustInit {
+	in.Approval = i.Approve(now, entries...)
+	return in
 }

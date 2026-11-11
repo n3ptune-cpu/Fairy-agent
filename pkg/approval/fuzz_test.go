@@ -2,6 +2,7 @@ package approval_test
 
 import (
 	"encoding/json"
+	"os"
 	"reflect"
 	"strings"
 	"testing"
@@ -16,7 +17,7 @@ import (
 func FuzzToken(f *testing.F) {
 	iss := approvaltest.New()
 	r := newRig(f, false)
-	if _, ref := r.g.Init(iss.Init()); ref != nil {
+	if _, ref := r.firstSet(r.g, iss, iss.Init()); ref != nil {
 		f.Fatal(ref)
 	}
 	req := power("shutdown", 60)
@@ -53,7 +54,7 @@ func FuzzToken(f *testing.F) {
 func FuzzApproval(f *testing.F) {
 	iss := approvaltest.New()
 	r := newRig(f, false)
-	if _, ref := r.g.Init(iss.Init()); ref != nil {
+	if _, ref := r.firstSet(r.g, iss, iss.Init()); ref != nil {
 		f.Fatal(ref)
 	}
 	req := fanSet(0, 50)
@@ -78,6 +79,55 @@ func FuzzApproval(f *testing.F) {
 		}
 		if ref := r.g.Check(req, &ap); ref == nil {
 			t.Fatalf("accepted: %q", raw)
+		}
+	})
+}
+
+// FuzzTrustProof feeds anything as the body of a first-time set (POST /approval/trust) to a machine without
+// trust that has an open challenge for a good proposal: the body's values, its approval, its entry list. The
+// fuzzer has no key of the proposal the challenge is for, and a proposal with a key of its own has another
+// hash, so whatever it builds must be refused; nothing may panic, and no trust file may appear.
+func FuzzTrustProof(f *testing.F) {
+	iss := approvaltest.New()
+	r := newRig(f, false)
+	in := iss.Init()
+	c, ref := r.g.Challenge(api.TrustSetRequest(in))
+	if ref != nil {
+		f.Fatal(ref)
+	}
+	e := api.ApprovalEntry{Challenge: c.Challenge, Request: c.Request}
+	otherNonce, _ := api.ApprovalNonce([]api.ApprovalEntry{{Challenge: strings.Repeat("A", 43), Request: c.Request}})
+	real := in
+	real.Approval = &api.Approval{Token: iss.Token(iss.Claims(otherNonce, r.Now())), Entries: []api.ApprovalEntry{e}} // a real token, for another list
+	b, _ := json.Marshal(real)
+	f.Add(string(b))
+	bare, _ := json.Marshal(in)
+	f.Add(string(bare))
+	f.Add(strings.Replace(string(b), iss.URL, iss.URL+"/", 1))
+	f.Add(strings.Replace(string(b), c.Request, "trust_set hash="+strings.Repeat("A", 43), 1))
+	f.Add(`{"issuer":"https://a","client_id":"c","keys":[{"kty":"RSA","kid":"k","alg":"RS256","n":"AQ","e":"AQAB"}],"users":["u"],"approval":{"token":"a.b.c","entries":[{"challenge":"` + c.Challenge + `","request":"` + c.Request + `"}]}}`)
+	f.Add(`{"approval":{"token":"","entries":[{"challenge":"\n","request":"\u0000"}]}}`)
+	f.Add(`{"approval":null}`)
+	f.Add(`null`)
+	f.Fuzz(func(t *testing.T, raw string) {
+		var body api.TrustInit
+		if json.Unmarshal([]byte(raw), &body) != nil {
+			return
+		}
+		if h := api.TrustHash(body); len(h) != 43 {
+			t.Fatalf("trust hash %q", h)
+		}
+		st, ref := r.g.Init(body)
+		if ref == nil || st.State != api.ApprovalOff {
+			t.Fatalf("accepted (state %s): %q", st.State, raw)
+		}
+		switch ref.Code {
+		case api.CodeTrustInvalid, api.CodeTrustUnsupportedKey, api.CodeTrustProofRequired, api.CodeTrustProofRefused:
+		default:
+			t.Fatalf("refused with %s: %q", ref.Code, raw)
+		}
+		if _, err := os.Lstat(r.files.Path); err == nil {
+			t.Fatalf("a trust file appeared: %q", raw)
 		}
 	})
 }

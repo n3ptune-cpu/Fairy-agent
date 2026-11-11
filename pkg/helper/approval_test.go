@@ -71,10 +71,23 @@ func (a *arig) v2(t *testing.T, req proto.Request) proto.Response {
 
 func (a *arig) trust(t *testing.T) {
 	t.Helper()
-	in := a.iss.Init()
+	in := a.proven(t, a.iss, a.iss.Init())
 	if resp := a.v2(t, proto.Request{Verb: proto.VerbTrustInit, Trust: &in}); resp.Status != 200 {
 		t.Fatalf("trust_init: %+v", resp)
 	}
+}
+
+// proven is in as the agent passes it on for a first-time set: with iss's approval of the helper's challenge
+// for exactly these values (the verb challenge, for trust_set).
+func (a *arig) proven(t *testing.T, iss *approvaltest.Issuer, in api.TrustInit) api.TrustInit {
+	t.Helper()
+	hash := api.TrustHash(in)
+	resp := a.v2(t, proto.Request{Verb: proto.VerbChallenge, For: ptr(proto.ForTrustSet), TrustHash: &hash})
+	var c api.ChallengeResponse
+	if resp.Status != 200 || json.Unmarshal(resp.Data, &c) != nil || !c.Needed || c.Request != "trust_set hash="+hash || c.Issuer != "" {
+		t.Fatalf("challenge for trust_set: %+v", resp)
+	}
+	return iss.Prove(time.Now(), in, api.ApprovalEntry{Challenge: c.Challenge, Request: c.Request})
 }
 
 func (a *arig) status(t *testing.T) proto.StatusData {
@@ -149,6 +162,53 @@ func TestNoTrustBehavesAsBefore(t *testing.T) {
 	req.Approval = &api.Approval{Token: "a.b.c", Entries: []api.ApprovalEntry{{Challenge: strings.Repeat("A", 43), Request: "x"}}}
 	if resp := a.v2(t, req); resp.Status != 200 {
 		t.Errorf("approval sent without trust: %+v", resp)
+	}
+}
+
+// TestHelperFirstTimeSetNeedsProof: trust_init is accepted only with an approval that verifies against the
+// proposed trust; without one, or with one that does not, nothing is written and the helper stays off.
+func TestHelperFirstTimeSetNeedsProof(t *testing.T) {
+	a := newApprovalRig(t)
+	in := a.iss.Init()
+	wantCode(t, "trust_init without a proof", a.v2(t, proto.Request{Verb: proto.VerbTrustInit, Trust: &in}), 403, api.CodeTrustProofRequired)
+	// the proposal has the issuer's address with a slash too many: Pocket ID's token does not fit it
+	typo := in
+	typo.Issuer += "/"
+	bad := a.proven(t, a.iss, typo)
+	resp := a.v2(t, proto.Request{Verb: proto.VerbTrustInit, Trust: &bad})
+	wantCode(t, "trust_init with a proof that does not fit the proposal", resp, 403, api.CodeTrustProofRefused)
+	if !strings.HasPrefix(resp.Error, "proof refused (issuer)") {
+		t.Errorf("refusal text: %q", resp.Error)
+	}
+	// a proof for other values than the ones sent
+	other := a.proven(t, a.iss, in)
+	other.Users = []string{approvaltest.User, "attacker"}
+	wantCode(t, "trust_init with values the proof is not for", a.v2(t, proto.Request{Verb: proto.VerbTrustInit, Trust: &other}), 403, api.CodeTrustProofRefused)
+	if sd := a.status(t); sd.Approval.State != api.ApprovalOff {
+		t.Fatalf("after three refused sets: %+v", sd.Approval)
+	}
+	if _, err := os.Lstat(a.files.Path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("a refused set left a trust file")
+	}
+	if resp := a.call(t, `{"v":1,"verb":"power","action":"shutdown","delay_s":60,"by":"test"}`); resp.Status != 200 {
+		t.Errorf("still off, a plain shutdown: %+v", resp)
+	}
+	a.trust(t) // and a right one is taken
+	if sd := a.status(t); sd.Approval.State != api.ApprovalRequired {
+		t.Fatalf("after the proven set: %+v", sd.Approval)
+	}
+	// with trust set there is no challenge for another set
+	hash := api.TrustHash(in)
+	wantCode(t, "challenge for trust_set with trust set", a.v2(t, proto.Request{Verb: proto.VerbChallenge, For: ptr(proto.ForTrustSet), TrustHash: &hash}),
+		409, api.CodeTrustAlreadySet)
+	log := a.audit.String()
+	for _, want := range []string{"reason=proof_required", "reason=issuer", "reason=no_challenge", "proven by a passkey approval"} {
+		if !strings.Contains(log, want) {
+			t.Errorf("helper log lacks %q", want)
+		}
+	}
+	if strings.Contains(log, strings.Split(bad.Approval.Token, ".")[2]) {
+		t.Error("helper log holds a part of a token")
 	}
 }
 
@@ -334,6 +394,14 @@ func TestRequestVersions(t *testing.T) {
 		"approval on fan_auto":                {true, `{"v":2,"verb":"fan_auto","approval":{"token":"a","entries":[]}}`, proto.CodeBadRequest},
 		"approval on a read":                  {true, `{"v":2,"verb":"status","approval":{"token":"a","entries":[]}}`, proto.CodeBadRequest},
 		"trust_init without trust":            {true, `{"v":2,"verb":"trust_init"}`, proto.CodeBadRequest},
+		"challenge for trust_set, no hash":    {true, `{"v":2,"verb":"challenge","for":"trust_set"}`, proto.CodeBadRequest},
+		"challenge for trust_set, short hash": {true, `{"v":2,"verb":"challenge","for":"trust_set","trust_hash":"abc"}`, proto.CodeBadRequest},
+		"challenge for trust_set and a delay": {true, `{"v":2,"verb":"challenge","for":"trust_set","trust_hash":"` + strings.Repeat("A", 43) + `","delay_s":60}`, proto.CodeBadRequest},
+		"challenge for power with a hash":     {true, `{"v":2,"verb":"challenge","for":"power","action":"shutdown","delay_s":60,"trust_hash":"` + strings.Repeat("A", 43) + `"}`, proto.CodeBadRequest},
+		"challenge for trust_init":            {true, `{"v":2,"verb":"challenge","for":"trust_init","trust_hash":"` + strings.Repeat("A", 43) + `"}`, proto.CodeBadRequest},
+		"trust_hash on a shutdown":            {true, `{"v":2,"verb":"power","action":"shutdown","delay_s":60,"trust_hash":"` + strings.Repeat("A", 43) + `","approval":{"token":"a","entries":[]}}`, proto.CodeBadRequest},
+		"challenge for trust_set, plain":      {false, `{"v":1,"verb":"challenge","for":"trust_set","trust_hash":"` + strings.Repeat("A", 43) + `"}`, proto.CodeBadRequest},
+		"proof token over the limit":          {true, `{"v":2,"verb":"trust_init","trust":{"issuer":"https://a","approval":{"token":"` + strings.Repeat("a", api.MaxApprovalToken+1) + `","entries":[]}}}`, proto.CodeTooLarge},
 		"unknown member in the approval":      {true, `{"v":2,"verb":"apply_update","approval":{"token":"a","entries":[],"x":1}}`, proto.CodeBadRequest},
 		"unknown member in the trust":         {true, `{"v":2,"verb":"trust_init","trust":{"issuer":"https://a","fan_window_s":60}}`, proto.CodeBadRequest},
 		"token over the limit":                {true, `{"v":2,"verb":"apply_update","approval":{"token":"` + strings.Repeat("a", api.MaxApprovalToken+1) + `","entries":[]}}`, proto.CodeTooLarge},

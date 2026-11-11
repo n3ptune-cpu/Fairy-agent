@@ -1,6 +1,7 @@
 package approval
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -109,6 +110,10 @@ func (f Files) write(t *Trust) (string, error) {
 // and then given its final name with a hard link, which fails when the name is taken (ErrExists). Of two
 // callers, in this process or another, exactly one succeeds; a crash at any point leaves either no trust file
 // or the complete one.
+//
+// On Windows this is the mechanism the owner's run of 2026-11-11 proved (the file the helper wrote passed the
+// helper's own check: one name, inherited permissions), so it is kept as it is. If the temporary name could
+// ever not be removed, the file has two names and the file check says "broken": closed, never open.
 func (f Files) Create(t *Trust) error {
 	if _, err := os.Lstat(f.Path); err == nil {
 		return ErrExists
@@ -168,4 +173,84 @@ func syncDir(dir string) {
 		_ = d.Sync()
 		_ = d.Close()
 	}
+}
+
+// BootMarkName is the file next to the trust file that remembers that the one shutdown without approval
+// shortly after boot (the trust file's boot_shutdown_s) was used, and in which boot. It holds no secret.
+const BootMarkName = "approval-boot-shutdown.json"
+
+// bootMark is that file.
+type bootMark struct {
+	// BootID is the system's own id of the boot, where it has one (Linux: /proc/sys/kernel/random/boot_id).
+	BootID string `json:"boot_id,omitempty"`
+	// UsedAt is when the shutdown was accepted, by this machine's clock (Unix seconds), UptimeS how long the
+	// system had been up then.
+	UsedAt  int64 `json:"used_at"`
+	UptimeS int64 `json:"uptime_s"`
+}
+
+func (f Files) bootMarkPath() string { return filepath.Join(filepath.Dir(f.Path), BootMarkName) }
+
+// readBootMark returns the mark, or nil when there is none. An error means "cannot tell": the caller then does
+// not accept an unapproved shutdown.
+func (f Files) readBootMark() (*bootMark, error) {
+	path := f.bootMarkPath()
+	st, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if !st.Mode().IsRegular() {
+		return nil, fmt.Errorf("%s is not a plain file", path)
+	}
+	fh, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer fh.Close()
+	b, err := io.ReadAll(io.LimitReader(fh, 4096))
+	if err != nil {
+		return nil, err
+	}
+	var m bootMark
+	if err := decodeStrict(b, &m); err != nil || m.UsedAt <= 0 {
+		return nil, fmt.Errorf("%s is not readable as the record of a shutdown after boot (remove it to start over)", path)
+	}
+	return &m, nil
+}
+
+// writeBootMark records the mark, replacing an older one, before the shutdown it stands for is accepted.
+func (f Files) writeBootMark(m bootMark) error {
+	dir := filepath.Dir(f.Path)
+	if f.CheckDir != nil {
+		if err := f.CheckDir(dir); err != nil {
+			return fmt.Errorf("the folder of the trust file is not safe: %w", err)
+		}
+	}
+	b, err := json.Marshal(m)
+	if err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(dir, ".approval-boot-*.tmp")
+	if err != nil {
+		return err
+	}
+	_, err = tmp.Write(append(b, '\n'))
+	if err == nil {
+		err = tmp.Sync()
+	}
+	if cerr := tmp.Close(); err == nil {
+		err = cerr
+	}
+	if err == nil {
+		err = os.Rename(tmp.Name(), f.bootMarkPath())
+	}
+	if err != nil {
+		_ = os.Remove(tmp.Name())
+		return err
+	}
+	syncDir(dir)
+	return nil
 }

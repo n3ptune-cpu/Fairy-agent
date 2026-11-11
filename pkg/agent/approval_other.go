@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"time"
 
 	"github.com/n3ptune-cpu/Fairy-agent/pkg/agent/collect"
@@ -36,6 +37,23 @@ func SystemUptime() (time.Duration, error) {
 		return 0, errors.New("/proc/uptime: not a number")
 	}
 	return time.Duration(*s) * time.Second, nil
+}
+
+// SystemBootID is the kernel's own id of this boot (Linux: /proc/sys/kernel/random/boot_id, a new random UUID
+// at every boot). "" where there is none: the gate then tells boots apart by the clock and the uptime.
+func SystemBootID() (string, error) {
+	if runtime.GOOS != "linux" {
+		return "", nil
+	}
+	b, err := os.ReadFile("/proc/sys/kernel/random/boot_id")
+	if err != nil {
+		return "", err
+	}
+	id := strings.TrimSpace(string(b))
+	if len(id) != 36 { // a UUID
+		return "", errors.New("boot_id: not a UUID")
+	}
+	return id, nil
 }
 
 // ApprovalAdminFiles is ApprovalFiles for the administrator's command (fairy-agent helper-trust): run as root,

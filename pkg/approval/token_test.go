@@ -221,7 +221,7 @@ func TestRotatedKeys(t *testing.T) {
 	next.Kid, next.Key = "test-key-2", approvaltest.Key(1)
 	in := r.iss.Init()
 	in.Keys = append(in.Keys, approval.KeyFromRSA(next.Kid, &next.Key.PublicKey))
-	if st, ref := r.g.Init(in); ref != nil || len(st.Keys) != 2 || st.Keys[0].Thumbprint == st.Keys[1].Thumbprint {
+	if st, ref := r.firstSet(r.g, r.iss, in); ref != nil || len(st.Keys) != 2 || st.Keys[0].Thumbprint == st.Keys[1].Thumbprint {
 		t.Fatalf("set with two keys: %+v, %v", st, ref)
 	}
 	req := fanMode("full")

@@ -70,9 +70,14 @@ const (
 	VerbPower        = "power"
 	VerbApplyUpdate  = "apply_update"
 	// Version2 only.
-	VerbChallenge = "challenge"  // a challenge for one exact fan_set, fan_mode, power or apply_update request
-	VerbTrustInit = "trust_init" // the first trust, accepted only while the helper has none
+	VerbChallenge = "challenge"  // a challenge for one exact fan_set, fan_mode, power or apply_update request, or for trust_init
+	VerbTrustInit = "trust_init" // the first trust, accepted only while the helper has none and with an approval that proves it
 )
+
+// ForTrustSet is the "for" of a challenge for the first-time set of the trust (api.ApproveTrustSet): the
+// request that will follow is trust_init, and the challenge is bound to the hash of the trust it will propose
+// ("trust_hash").
+const ForTrustSet = api.ApproveTrustSet
 
 // MinDuty is the lowest fan duty any request may ask for, whatever config.yaml says.
 const MinDuty = 30
@@ -102,7 +107,9 @@ type Request struct {
 	// Version2 only.
 	Approval *api.Approval  `json:"approval,omitempty"` // fan_set, fan_mode, power (not cancel), apply_update
 	For      *string        `json:"for,omitempty"`      // challenge: the verb the challenge is for, with that verb's fields
-	Trust    *api.TrustInit `json:"trust,omitempty"`    // trust_init
+	Trust    *api.TrustInit `json:"trust,omitempty"`    // trust_init: the proposed trust with the approval that proves it
+	// TrustHash (challenge for trust_set): api.TrustHash of the trust that will be proposed.
+	TrustHash *string `json:"trust_hash,omitempty"`
 }
 
 // Control reports whether the verb changes something (the helper's control rate limit and audit log).
@@ -122,17 +129,20 @@ var verbFields = map[string][]string{
 	VerbFanAuto:     {"by"},
 	VerbPower:       {"action", "delay_s", "by", "approval"},
 	VerbApplyUpdate: {"by", "approval"},
-	VerbChallenge:   {"for", "zone", "percent", "mode", "action", "delay_s", "by"},
+	VerbChallenge:   {"for", "zone", "percent", "mode", "action", "delay_s", "trust_hash", "by"},
 	VerbTrustInit:   {"trust", "by"},
 }
 
 // ApprovalRequestOf is r as the request an approval is given for, when r is one that needs an approval while
 // trust is set: fan_set, fan_mode, power other than cancel, apply_update. For a challenge it is the request the
-// challenge is asked for. ok is false for every other request (reads, fan_auto, power cancel, trust_init).
+// challenge is asked for (which may also be the first-time set of the trust). ok is false for every other
+// request (reads, fan_auto, power cancel; trust_init checks its own approval).
 func ApprovalRequestOf(r Request) (api.ApprovalRequest, bool) {
 	verb := r.Verb
 	if verb == VerbChallenge && r.For != nil {
-		verb = *r.For
+		if verb = *r.For; verb == ForTrustSet {
+			return api.ApprovalRequest{Verb: api.ApproveTrustSet, TrustHash: r.TrustHash}, true
+		}
 	}
 	switch verb {
 	case VerbFanSet:
@@ -178,6 +188,8 @@ const (
 	CodeTrustAlreadySet     = api.CodeTrustAlreadySet     // trust_init when a trust file exists
 	CodeTrustInvalid        = api.CodeTrustInvalid
 	CodeTrustUnsupportedKey = api.CodeTrustUnsupportedKey
+	CodeTrustProofRequired  = api.CodeTrustProofRequired // trust_init without the approval that proves the trust
+	CodeTrustProofRefused   = api.CodeTrustProofRefused  // that approval does not verify against the proposed trust
 )
 
 // Error is a refused request: a code from the list above and a short message.
@@ -201,7 +213,7 @@ func (r *Request) Validate() error {
 	}
 	present := map[string]bool{"zone": r.Zone != nil, "percent": r.Percent != nil, "mode": r.Mode != nil,
 		"action": r.Action != nil, "delay_s": r.DelayS != nil, "by": r.By != nil,
-		"approval": r.Approval != nil, "for": r.For != nil, "trust": r.Trust != nil}
+		"approval": r.Approval != nil, "for": r.For != nil, "trust": r.Trust != nil, "trust_hash": r.TrustHash != nil}
 	for f, p := range present {
 		if p && !slices.Contains(allowed, f) {
 			return bad("%s does not take %s", r.Verb, f)
@@ -247,9 +259,21 @@ func (r *Request) Validate() error {
 		if r.For == nil {
 			return bad("challenge needs for")
 		}
+		if *r.For == ForTrustSet { // the first-time set: the hash of the trust that will be proposed and nothing else
+			if r.Zone != nil || r.Percent != nil || r.Mode != nil || r.Action != nil || r.DelayS != nil {
+				return bad("a challenge for trust_set takes trust_hash only")
+			}
+			if _, err := (api.ApprovalRequest{Verb: api.ApproveTrustSet, TrustHash: r.TrustHash}).Canonical(); err != nil {
+				return bad("%s", err.Error())
+			}
+			break
+		}
+		if r.TrustHash != nil {
+			return bad("trust_hash is for a challenge for trust_set")
+		}
 		inner := Request{V: Version, Verb: *r.For, Zone: r.Zone, Percent: r.Percent, Mode: r.Mode, Action: r.Action, DelayS: r.DelayS}
 		if _, ok := ApprovalRequestOf(inner); !ok || inner.Verb == VerbChallenge {
-			return bad("a challenge is for fan_set, fan_mode, power (not cancel) or apply_update")
+			return bad("a challenge is for fan_set, fan_mode, power (not cancel), apply_update or trust_set")
 		}
 		if err := inner.Validate(); err != nil {
 			return err
@@ -259,10 +283,19 @@ func (r *Request) Validate() error {
 			return bad("trust_init needs trust")
 		}
 	}
-	if r.Approval != nil && (len(r.Approval.Token) > api.MaxApprovalToken || len(r.Approval.Entries) > api.MaxApprovalEntries) {
-		return &Error{Code: CodeTooLarge, Msg: "approval too large"}
+	for _, ap := range []*api.Approval{r.Approval, trustApproval(r.Trust)} {
+		if ap != nil && (len(ap.Token) > api.MaxApprovalToken || len(ap.Entries) > api.MaxApprovalEntries) {
+			return &Error{Code: CodeTooLarge, Msg: "approval too large"}
+		}
 	}
 	return nil
+}
+
+func trustApproval(t *api.TrustInit) *api.Approval {
+	if t == nil {
+		return nil
+	}
+	return t.Approval
 }
 
 // FrameVersion is the one protocol version r is sent in: Version2 for challenge, trust_init and a request with
@@ -369,7 +402,7 @@ func Fail(code, msg string) Response {
 	switch code {
 	case CodeBadRequest, CodeUnknownVerb, CodeTrustInvalid, CodeTrustUnsupportedKey:
 		st = 400
-	case CodeApprovalRequired, CodeApprovalRefused:
+	case CodeApprovalRequired, CodeApprovalRefused, CodeTrustProofRequired, CodeTrustProofRefused:
 		st = 403
 	case CodeTrustAlreadySet:
 		st = 409

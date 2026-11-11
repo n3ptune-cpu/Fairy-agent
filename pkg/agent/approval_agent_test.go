@@ -169,8 +169,22 @@ func TestLinuxAgentEnforcesApproval(t *testing.T) {
 	r := newLinuxRig(t, true)
 	r.gh.Publish("build-42", "fairy-agent", "42-bbbbbbb", map[string][]byte{"fairy-agent-linux-amd64": []byte("build 42")}, nil)
 
-	// first-time set from the panel, once
+	// a first-time set without the approval that proves it, and one whose proof does not fit the proposal
+	// (the issuer's address with a slash too many): refused, nothing is written, nothing is locked
 	st, b := r.post(t, api.PathApprovalTrust, r.iss.Init())
+	wantRefusal(t, "first-time set without a proof", st, b, 403, api.CodeTrustProofRequired)
+	typo := r.iss.Init()
+	typo.Issuer += "/"
+	st, b = r.post(t, api.PathApprovalTrust, provenTrust(t, r.base, r.iss, typo))
+	wantRefusal(t, "first-time set with a proof that does not fit", st, b, 403, api.CodeTrustProofRefused)
+	if _, err := os.Lstat(r.trust); err == nil {
+		t.Fatal("a refused first-time set left a trust file")
+	}
+	if st, b := r.post(t, "/fan/mode", map[string]any{"mode": "standard"}); st != 200 {
+		t.Fatalf("after two refused sets the machine is not locked: fan mode %d %v", st, b)
+	}
+	// first-time set from the panel with its proof, once
+	st, b = r.post(t, api.PathApprovalTrust, provenTrust(t, r.base, r.iss, r.iss.Init()))
 	if st != 200 || b["state"] != api.ApprovalRequired || b["enforced_by"] != api.EnforcedByAgent {
 		t.Fatalf("first-time set: %d %v", st, b)
 	}
@@ -185,6 +199,8 @@ func TestLinuxAgentEnforcesApproval(t *testing.T) {
 	evil.Key, evil.Kid = approvaltest.Key(1), "evil"
 	st, b = r.post(t, api.PathApprovalTrust, evil.Init())
 	wantRefusal(t, "second set (locked)", st, b, 409, api.CodeTrustAlreadySet)
+	st, b = r.post(t, api.PathApprovalChallenge, map[string]any{"verb": "trust_set", "trust_hash": api.TrustHash(evil.Init())})
+	wantRefusal(t, "challenge for a second set (locked)", st, b, 409, api.CodeTrustAlreadySet)
 
 	// an old panel now: refused, nothing runs
 	for name, c := range map[string]struct {
@@ -315,7 +331,19 @@ func TestLinuxAgentEnforcesApproval(t *testing.T) {
 	if st, b := r.post(t, "/fan/duty", map[string]any{"zone": 0, "percent": 70}); st != 200 {
 		t.Errorf("fan duty after the local clear: %d %v", st, b)
 	}
-	if st, b := r.post(t, api.PathApprovalTrust, r.iss.Init()); st != 200 {
+	if st, b := r.post(t, api.PathApprovalTrust, provenTrust(t, r.base, r.iss, r.iss.Init())); st != 200 {
 		t.Errorf("first-time set after the local clear: %d %v", st, b)
 	}
+}
+
+// provenTrust is in as the panel sends it for a first-time set: with iss's approval of this machine's challenge
+// for exactly these values (POST /approval/challenge with the verb trust_set and the hash of the values).
+func provenTrust(t *testing.T, base string, iss *approvaltest.Issuer, in api.TrustInit) api.TrustInit {
+	t.Helper()
+	hash := api.TrustHash(in)
+	st, c := do(t, base, "POST", api.PathApprovalChallenge, ctlTok, map[string]any{"verb": api.ApproveTrustSet, "trust_hash": hash})
+	if st != 200 || c["needed"] != true || c["request"] != "trust_set hash="+hash || c["expires_in_s"] != float64(180) || c["issuer"] != nil {
+		t.Fatalf("challenge for trust_set: %d %v", st, c)
+	}
+	return iss.Prove(time.Now(), in, api.ApprovalEntry{Challenge: c["challenge"].(string), Request: c["request"].(string)})
 }

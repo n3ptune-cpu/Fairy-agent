@@ -82,7 +82,7 @@ func New(p Parts) *Server {
 func FromConfig(cfg *agent.Config, version string, audit *slog.Logger) (Parts, func(), error) {
 	p := Parts{Version: version, Audit: audit}
 	p.Approval = approval.NewGate(approval.Options{Files: agent.ApprovalFiles(cfg), EnforcedBy: api.EnforcedByHelper,
-		Uptime: agent.SystemUptime, Log: audit})
+		Uptime: agent.SystemUptime, BootID: agent.SystemBootID, Log: audit})
 	closer := func() {}
 	if cfg.Sensors.CoreTemp {
 		p.CoreTemp = collect.ReadCoreTemp
@@ -273,13 +273,17 @@ func (s *Server) approve(r proto.Request) *proto.Response {
 	return nil
 }
 
-// challenge answers the verb challenge: a challenge bound to the request it names.
+// challenge answers the verb challenge: a challenge bound to the request it names (one of the four that need an
+// approval while trust is set, or the first-time set of the trust for one exact proposal).
 func (s *Server) challenge(r proto.Request) proto.Response {
 	if resp := s.off(*r.For); resp != nil {
 		return *resp
 	}
 	ar, _ := proto.ApprovalRequestOf(r)
 	if s.p.Approval == nil {
+		if ar.Verb == api.ApproveTrustSet {
+			return proto.Fail(proto.CodeDisabled, "this helper has no approval check")
+		}
 		canon, _ := ar.Canonical()
 		return proto.OK(api.ChallengeResponse{Reason: "off", Request: canon})
 	}

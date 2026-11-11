@@ -680,10 +680,11 @@ func (c *HelperClient) approvalCall(ctx context.Context, req proto.Request) (int
 // Challenge is POST /approval/challenge through the helper.
 func (c *HelperClient) Challenge(ctx context.Context, req api.ApprovalRequest) (int, any) {
 	return c.approvalCall(ctx, proto.Request{Verb: proto.VerbChallenge, For: &req.Verb, Zone: req.Zone, Percent: req.Percent,
-		Mode: req.Mode, Action: req.Action, DelayS: req.DelayS})
+		Mode: req.Mode, Action: req.Action, DelayS: req.DelayS, TrustHash: req.TrustHash})
 }
 
-// TrustInit is POST /approval/trust through the helper: the first-time set of the trust.
+// TrustInit is POST /approval/trust through the helper: the first-time set of the trust, with the approval
+// that proves it. The helper checks both; the agent does not look inside.
 func (c *HelperClient) TrustInit(ctx context.Context, in api.TrustInit) (int, any) {
 	st, body := c.approvalCall(ctx, proto.Request{Verb: proto.VerbTrustInit, Trust: &in})
 	c.invalidate() // the next /metrics shows the new state

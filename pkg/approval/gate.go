@@ -26,6 +26,13 @@ const (
 	// reloadEvery: the trust file is looked at again at most this often, so a change made on the machine
 	// (helper-trust set / clear) is in effect within this time.
 	reloadEvery = 5 * time.Second
+	// BootShutdownMaxDelayS is the longest delay the one shutdown without approval shortly after boot
+	// (boot_shutdown_s in the trust file) may ask for: it is for "switch off again now", not for a shutdown
+	// that is scheduled in the first minutes and happens a day later.
+	BootShutdownMaxDelayS = 600
+	// bootSlack: a recorded shutdown after boot counts for this boot when it was accepted no earlier than this
+	// long before the boot began, by this machine's clock (used only where the system has no id of its boot).
+	bootSlack = 2 * time.Minute
 )
 
 // Options build a Gate.
@@ -36,6 +43,13 @@ type Options struct {
 	Now func() time.Time
 	// Uptime is how long the system has been up (nil or an error: the shutdown-after-boot setting never applies).
 	Uptime func() (time.Duration, error)
+	// BootID is the system's own id of this boot, where it has one (Linux). nil, "" or an error: whether the
+	// one shutdown after boot was used in this boot is told from the recorded time and the uptime instead.
+	BootID func() (string, error)
+	// ReadOnly: this gate reads a trust file it cannot write and does not own (a Windows agent next to the
+	// helper, whose file it is). It checks requests and gives challenges for them; it never sets the trust,
+	// gives no challenge for that, and never accepts the shutdown after boot (it could not record it).
+	ReadOnly bool
 	// Rand is the source of challenges (nil: crypto/rand).
 	Rand io.Reader
 	// Log gets one line for every accepted and every refused approval (nil: slog.Default()).
@@ -75,7 +89,7 @@ type Gate struct {
 	loaded   bool
 	open     []challenge
 	fanAt    time.Time // when the fan window was opened (zero: closed)
-	bootUsed bool      // the one shutdown after boot was accepted
+	bootUsed bool      // the one shutdown after boot was accepted in this boot (by this process, or recorded)
 }
 
 // NewGate returns the gate. The trust file is read at the first question.
@@ -133,6 +147,15 @@ func (g *Gate) Status() api.ApprovalStatus {
 	return g.status()
 }
 
+// StatusNow is Status with the trust file read at this moment, not up to five seconds ago: for a decision that
+// must not rest on an old look (the Windows agent's POST /update while its helper is not answering).
+func (g *Gate) StatusNow() api.ApprovalStatus {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.reload(true)
+	return g.status()
+}
+
 func (g *Gate) status() api.ApprovalStatus {
 	st := api.ApprovalStatus{State: g.state, Proto: api.ApprovalProto}
 	switch g.state {
@@ -172,16 +195,61 @@ func (g *Gate) fanLeft(now time.Time) time.Duration {
 	return w - e
 }
 
-// bootWindow reports whether the one shutdown after boot is still to be had. Caller holds g.mu.
-func (g *Gate) bootWindow() (time.Duration, bool) {
-	if g.trust == nil || g.trust.BootShutdownS <= 0 || g.bootUsed || g.o.Uptime == nil {
+// bootWindow reports whether req, a shutdown, can be the one shutdown without approval of this boot: the
+// setting is on, the delay asked for is at most BootShutdownMaxDelayS, the system has been up for less than
+// the setting says, and none was accepted in this boot yet (by this process or, per the record next to the
+// trust file, by one before it: a restarted service gets no second one). Caller holds g.mu.
+func (g *Gate) bootWindow(req api.ApprovalRequest, now time.Time) (time.Duration, bool) {
+	if g.trust == nil || g.trust.BootShutdownS <= 0 || g.bootUsed || g.o.Uptime == nil || g.o.ReadOnly {
+		return 0, false
+	}
+	if req.DelayS == nil || *req.DelayS < 0 || *req.DelayS > BootShutdownMaxDelayS {
 		return 0, false
 	}
 	up, err := g.o.Uptime()
 	if err != nil || up < 0 || up >= time.Duration(g.trust.BootShutdownS)*time.Second {
 		return 0, false
 	}
+	if g.usedThisBoot(now, up) {
+		return 0, false
+	}
 	return up, true
+}
+
+func (g *Gate) bootID() string {
+	if g.o.BootID == nil {
+		return ""
+	}
+	id, err := g.o.BootID()
+	if err != nil || len(id) > 128 {
+		return ""
+	}
+	return id
+}
+
+// usedThisBoot reads the record of the last shutdown that was accepted without approval and reports whether it
+// belongs to this boot. With the system's own boot id on both sides that is exact. Without one it is decided
+// by the clock: the record counts for this boot unless it was made clearly before this boot began (now minus
+// uptime). A record that cannot be read counts as "used": nothing unapproved is accepted on a guess.
+// Caller holds g.mu.
+func (g *Gate) usedThisBoot(now time.Time, up time.Duration) bool {
+	m, err := g.o.Files.readBootMark()
+	if err != nil {
+		g.o.Log.Warn("approval: the record of the shutdown after boot cannot be read, so none is accepted without approval", "error", firstLine(err.Error()))
+		return true
+	}
+	if m == nil {
+		return false
+	}
+	if id := g.bootID(); id != "" && m.BootID != "" {
+		if m.BootID != id {
+			return false
+		}
+	} else if time.Unix(m.UsedAt, 0).Before(now.Add(-up).Add(-bootSlack)) {
+		return false
+	}
+	g.bootUsed = true
+	return true
 }
 
 // expire drops the challenges whose time is over. Caller holds g.mu.
@@ -207,21 +275,26 @@ func (g *Gate) Challenge(req api.ApprovalRequest) (api.ChallengeResponse, *Refus
 	defer g.mu.Unlock()
 	g.reload(false)
 	out := api.ChallengeResponse{Request: canon}
-	switch g.state {
-	case api.ApprovalOff:
+	now := g.o.Now()
+	switch {
+	case req.Verb == api.ApproveTrustSet:
+		// the one request that is approved while there is no trust: the first-time set itself (Init)
+		if g.state != api.ApprovalOff {
+			return out, alreadySet()
+		}
+		if g.o.ReadOnly {
+			return out, notHere()
+		}
+	case g.state == api.ApprovalOff:
 		out.Reason = "off"
 		return out, nil
-	case api.ApprovalRequired:
-	default:
+	case g.state != api.ApprovalRequired:
 		return out, unavailable(g.loadErr)
-	}
-	now := g.o.Now()
-	if isFan(req) && g.fanLeft(now) > 0 {
+	case isFan(req) && g.fanLeft(now) > 0:
 		out.Reason = "fan_window"
 		return out, nil
-	}
-	if isShutdown(req) {
-		if _, ok := g.bootWindow(); ok {
+	case isShutdown(req):
+		if _, ok := g.bootWindow(req, now); ok {
 			out.Reason = "boot_shutdown"
 			return out, nil
 		}
@@ -240,7 +313,9 @@ func (g *Gate) Challenge(req api.ApprovalRequest) (api.ChallengeResponse, *Refus
 	g.open = append(g.open, c)
 	g.o.Log.Info("approval: challenge issued", "request", canon, "challenge", prefix(c.id))
 	out.Needed, out.Challenge, out.ExpiresInS = true, base64.RawURLEncoding.EncodeToString(c.id[:]), int(c.ttl/time.Second)
-	out.Issuer, out.ClientID = g.trust.Issuer, g.trust.ClientID
+	if g.trust != nil { // none yet for trust_set: its token is checked against the proposed values
+		out.Issuer, out.ClientID = g.trust.Issuer, g.trust.ClientID
+	}
 	return out, nil
 }
 
@@ -264,6 +339,9 @@ func (g *Gate) Check(req api.ApprovalRequest, ap *api.Approval) *Refusal {
 	if g == nil {
 		return nil
 	}
+	if req.Verb == api.ApproveTrustSet { // not a request that is carried out: Init checks its own approval
+		return &Refusal{Status: 400, Code: "bad_request", Msg: "the trust is set with POST " + api.PathApprovalTrust}
+	}
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	g.reload(false)
@@ -286,18 +364,24 @@ func (g *Gate) Check(req api.ApprovalRequest, ap *api.Approval) *Refusal {
 			return nil
 		}
 		if isShutdown(req) {
-			if up, ok := g.bootWindow(); ok {
-				g.bootUsed = true
-				g.o.Log.Warn("approval: UNAPPROVED shutdown accepted shortly after boot (boot_shutdown_s in the trust file)",
-					"result", "accepted", "request", canon, "uptime_s", int(up/time.Second), "limit_s", g.trust.BootShutdownS)
-				return nil
+			if up, ok := g.bootWindow(req, now); ok {
+				// recorded first: a service that is restarted in this boot finds the record and gives no second one
+				err := g.o.Files.writeBootMark(bootMark{BootID: g.bootID(), UsedAt: now.Unix(), UptimeS: int64(up / time.Second)})
+				if err == nil {
+					g.bootUsed = true
+					g.o.Log.Warn("approval: UNAPPROVED shutdown accepted shortly after boot (boot_shutdown_s in the trust file)",
+						"result", "accepted", "request", canon, "uptime_s", int(up/time.Second), "limit_s", g.trust.BootShutdownS)
+					return nil
+				}
+				g.o.Log.Error("approval: the shutdown after boot was not accepted without approval: it could not be recorded",
+					"result", "refused", "request", canon, "error", firstLine(err.Error()))
 			}
 		}
 		g.o.Log.Warn("approval: required, none sent", "result", "refused", "request", canon)
 		return &Refusal{Status: 403, Code: api.CodeApprovalRequired,
 			Msg: "this needs a passkey approval (Pocket ID) and the request carried none"}
 	}
-	c, cl, reason := g.verify(canon, ap, now)
+	c, cl, reason := g.verify(g.trust, canon, ap, now)
 	if reason != "" {
 		g.o.Log.Warn("approval: refused", "result", "refused", "reason", reason, "request", canon, "sub", cl.Sub, "kid", cl.Kid,
 			"challenge", c)
@@ -311,11 +395,12 @@ func (g *Gate) Check(req api.ApprovalRequest, ap *api.Approval) *Refusal {
 	return nil
 }
 
-// verify checks ap for the request canon and, when everything holds, uses up its challenge. It returns the
-// challenge's log prefix (when one was found), what is known of the token, and the reason of a refusal ("" =
-// accepted). Caller holds g.mu, so finding, checking and using up the challenge are one step: of two requests
-// with the same approval one is accepted.
-func (g *Gate) verify(canon string, ap *api.Approval, now time.Time) (string, claims, string) {
+// verify checks ap for the request canon against the trust t (the machine's own, or for the first-time set the
+// proposed one) and, when everything holds, uses up its challenge. It returns the challenge's log prefix (when
+// one was found), what is known of the token, and the reason of a refusal ("" = accepted). Caller holds g.mu,
+// so finding, checking and using up the challenge are one step: of two requests with the same approval one is
+// accepted.
+func (g *Gate) verify(t *Trust, canon string, ap *api.Approval, now time.Time) (string, claims, string) {
 	if len(ap.Token) > api.MaxApprovalToken {
 		return "", claims{}, ReasonFormat
 	}
@@ -352,7 +437,7 @@ func (g *Gate) verify(canon string, ap *api.Approval, now time.Time) (string, cl
 		g.open = append(g.open[:mine], g.open[mine+1:]...)
 		return p, claims{}, ReasonExpired
 	}
-	cl, reason := verifyToken(ap.Token, g.trust, nonce, now, c.issued)
+	cl, reason := verifyToken(ap.Token, t, nonce, now, c.issued)
 	if reason != "" {
 		return p, cl, reason
 	}
@@ -382,8 +467,29 @@ var refusalText = map[string]string{
 	ReasonNonce:       "the token was not issued for this list of entries",
 }
 
-// Init is the first-time set of the trust from the panel: accepted only while there is no trust file. Once a
-// file exists, usable or not, every call is refused with already_set.
+// proofText says some reasons differently for the proof of a first-time set, where "this machine's trust" is
+// the proposed one (the others are refusalText's).
+var proofText = map[string]string{
+	ReasonNoChallenge: "no entry holds an open challenge of this machine for exactly this proposed trust (used already, expired, or asked for other values: ask for a challenge with the verb trust_set and the hash of the values that are sent)",
+	ReasonKey:         "the token's signing key is not one of the proposed keys (take the keys from the issuer's jwks_uri)",
+	ReasonIssuer:      "the token's issuer is not the proposed issuer (use Pocket ID's own spelling, mind a trailing slash)",
+	ReasonAudience:    "the token was issued for another client than the proposed client_id",
+	ReasonUser:        "the user who approved is not in the proposed users",
+}
+
+// Init is the first-time set of the trust from the panel. It is accepted only while there is no trust file
+// (once a file exists, usable or not, every call is refused with already_set, also one with a valid
+// approval), and only together with a proof that the proposed trust works: an approval of the request
+// "trust_set hash=<api.TrustHash of the proposed values>" for a challenge this machine gave for exactly that
+// request, whose token verifies against the PROPOSED values the way every approval verifies against the
+// trust file (verifyToken: signed by a proposed key, iss, aud, a proposed user, amr, auth_time, the times
+// against this machine's clock, the nonce of the entry list). Only then is the file written, and the machine
+// is locked.
+//
+// What the proof is for: a wrong issuer spelling, client id, user id or key, or a clock that is off, is found
+// out while the machine still has no trust, instead of locking it with local repair as the only way out. What
+// it is not: a defence against a panel that is already hostile at this moment. Such a panel proposes its own
+// issuer and proves against it; before the first-time set it has every control request anyway.
 func (g *Gate) Init(in api.TrustInit) (api.ApprovalStatus, *Refusal) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -392,7 +498,11 @@ func (g *Gate) Init(in api.TrustInit) (api.ApprovalStatus, *Refusal) {
 		g.o.Log.Warn("approval: trust set from the panel refused", "result", "refused", "reason", api.CodeTrustAlreadySet)
 		return g.status(), alreadySet()
 	}
-	t, err := FromInit(in, g.o.Now())
+	if g.o.ReadOnly {
+		return g.status(), notHere()
+	}
+	now := g.o.Now()
+	t, err := FromInit(in, now)
 	if err != nil {
 		code := api.CodeTrustInvalid
 		var ve *ValueError
@@ -401,6 +511,25 @@ func (g *Gate) Init(in api.TrustInit) (api.ApprovalStatus, *Refusal) {
 		}
 		g.o.Log.Warn("approval: trust set from the panel refused", "result", "refused", "reason", code, "error", err.Error())
 		return g.status(), &Refusal{Status: 400, Code: code, Msg: err.Error()}
+	}
+	if in.Approval == nil {
+		g.o.Log.Warn("approval: trust set from the panel refused", "result", "refused", "reason", api.CodeTrustProofRequired)
+		return g.status(), &Refusal{Status: 403, Code: api.CodeTrustProofRequired,
+			Msg: "a first-time set of the trust needs a passkey approval that proves it works: ask for a challenge with the verb trust_set and the hash of these values, have it approved at Pocket ID, and send the approval with the values. Nothing was written"}
+	}
+	canon, err := api.TrustSetRequest(in).Canonical()
+	if err != nil { // cannot happen: the hash is 43 characters by construction
+		return g.status(), &Refusal{Status: 500, Code: "failed", Msg: "no request text for this trust"}
+	}
+	c, cl, reason := g.verify(t, canon, in.Approval, now)
+	if reason != "" {
+		g.o.Log.Warn("approval: trust set from the panel refused: its proof does not verify against the proposed trust", "result", "refused",
+			"reason", reason, "request", canon, "issuer", t.Issuer, "client_id", t.ClientID, "sub", cl.Sub, "kid", cl.Kid, "challenge", c)
+		text := proofText[reason]
+		if text == "" {
+			text = refusalText[reason]
+		}
+		return g.status(), &Refusal{Status: 403, Code: api.CodeTrustProofRefused, Msg: "proof refused (" + reason + "): " + text + ". Nothing was written"}
 	}
 	err = g.o.Files.Create(t)
 	g.reload(true) // whatever happened, the file on disk is what counts from here on
@@ -419,9 +548,16 @@ func (g *Gate) Init(in api.TrustInit) (api.ApprovalStatus, *Refusal) {
 	for _, k := range t.Keys {
 		kids = append(kids, k.Kid)
 	}
-	g.o.Log.Warn("approval: trust set for the first time, from the panel; it can now be changed only on this machine",
-		"result", "accepted", "issuer", t.Issuer, "client_id", t.ClientID, "kids", strings.Join(kids, ","), "users", len(t.Users))
+	g.o.Log.Warn("approval: trust set for the first time, from the panel, proven by a passkey approval; it can now be changed only on this machine",
+		"result", "accepted", "issuer", t.Issuer, "client_id", t.ClientID, "kids", strings.Join(kids, ","), "users", len(t.Users),
+		"sub", cl.Sub, "name", cl.Name, "kid", cl.Kid, "challenge", c)
 	return g.status(), nil
+}
+
+// notHere is the answer of a gate that only reads the trust file when it is asked to set the trust.
+func notHere() *Refusal {
+	return &Refusal{Status: 404, Code: api.CodeApprovalDisabled,
+		Msg: "this agent cannot set the approval trust of this machine; it is set on the machine, by an administrator: fairy-agent helper-trust set"}
 }
 
 func alreadySet() *Refusal {
