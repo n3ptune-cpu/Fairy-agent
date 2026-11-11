@@ -205,14 +205,14 @@ func TestTokens(t *testing.T) {
 
 func TestEnvFile(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "agent.env")
-	_ = os.WriteFile(p, []byte("# plugs\nTUYA_KEY_DESK='abc=def'\nexport SHELLY_PW=pw\n\n"), 0o600)
+	_ = os.WriteFile(p, []byte("# plugs\nNUT_PASSWORD_DESK='abc=def'\nexport SHELLY_PW=pw\n\n"), 0o600)
 	t.Setenv("SHELLY_PW", "already-set")
 	names, err := LoadEnvFile(p)
-	if err != nil || strings.Join(names, ",") != "TUYA_KEY_DESK,SHELLY_PW" || os.Getenv("TUYA_KEY_DESK") != "abc=def" ||
+	if err != nil || strings.Join(names, ",") != "NUT_PASSWORD_DESK,SHELLY_PW" || os.Getenv("NUT_PASSWORD_DESK") != "abc=def" ||
 		os.Getenv("SHELLY_PW") != "already-set" {
 		t.Fatal(names, err)
 	}
-	t.Cleanup(func() { os.Unsetenv("TUYA_KEY_DESK") })
+	t.Cleanup(func() { os.Unsetenv("NUT_PASSWORD_DESK") })
 	_ = os.WriteFile(p, []byte("not a pair\n"), 0o600)
 	if _, err := LoadEnvFile(p); err == nil {
 		t.Fatal("bad line")

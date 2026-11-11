@@ -36,11 +36,11 @@ func TestMain(m *testing.M) {
 // and none that starts with FAIRY_, and it still sees the others.
 func TestCommandChildSeesNoSecrets(t *testing.T) {
 	t.Setenv("R9_PLUG_PASSWORD", "dummy-secret-1")
-	t.Setenv("r9_tuya_key", "dummy-secret-2") // names are compared without regard to case
+	t.Setenv("r9_ups_password", "dummy-secret-2") // names are compared without regard to case
 	t.Setenv("FAIRY_R9_TOKEN", "dummy-secret-3")
 	t.Setenv("R9_NOT_A_SECRET", "stays")
 	t.Setenv(childEnvMark, "1")
-	HideEnv("R9_PLUG_PASSWORD", "R9_TUYA_KEY")
+	HideEnv("R9_PLUG_PASSWORD", "R9_UPS_PASSWORD")
 	exe, err := os.Executable()
 	if err != nil {
 		t.Skip("this test program's own path is not known:", err)
@@ -57,7 +57,7 @@ func TestCommandChildSeesNoSecrets(t *testing.T) {
 	for _, n := range strings.Fields(line)[1:] {
 		seen[n] = true
 	}
-	for _, n := range []string{"R9_PLUG_PASSWORD", "R9_TUYA_KEY", "FAIRY_R9_TOKEN"} {
+	for _, n := range []string{"R9_PLUG_PASSWORD", "R9_UPS_PASSWORD", "FAIRY_R9_TOKEN"} {
 		if seen[n] {
 			t.Errorf("the child sees %s", n)
 		}
@@ -70,7 +70,7 @@ func TestCommandChildSeesNoSecrets(t *testing.T) {
 	for _, kv := range os.Environ() { // nothing else is missing either (PATH, SystemRoot and so on)
 		k, _, _ := strings.Cut(kv, "=")
 		ku := strings.ToUpper(k)
-		if ku == "" || strings.HasPrefix(ku, "FAIRY_") || ku == "R9_PLUG_PASSWORD" || ku == "R9_TUYA_KEY" {
+		if ku == "" || strings.HasPrefix(ku, "FAIRY_") || ku == "R9_PLUG_PASSWORD" || ku == "R9_UPS_PASSWORD" {
 			continue
 		}
 		if !seen[ku] {
