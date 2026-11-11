@@ -37,3 +37,11 @@ func SystemUptime() (time.Duration, error) {
 	}
 	return time.Duration(*s) * time.Second, nil
 }
+
+// ApprovalAdminFiles is ApprovalFiles for the administrator's command (fairy-agent helper-trust): run as root,
+// the file it writes belongs to root and is readable by the folder's group (the agent's), mode 0640.
+func ApprovalAdminFiles(cfg *Config) approval.Files {
+	f := ApprovalFiles(cfg)
+	f.Prepare = approval.UnixAdminPrepare(filepath.Dir(f.Path))
+	return f
+}

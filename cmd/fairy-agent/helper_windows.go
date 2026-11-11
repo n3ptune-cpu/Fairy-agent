@@ -358,5 +358,8 @@ func helperStatus() int {
 	}
 	fmt.Println("helper: running, answers on", proto.PipeName)
 	fmt.Println(string(r.Data))
+	for _, l := range helperApprovalLines(r.Data) {
+		fmt.Println(l)
+	}
 	return 0
 }

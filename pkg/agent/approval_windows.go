@@ -23,3 +23,8 @@ func ApprovalFiles(cfg *Config) approval.Files {
 
 // SystemUptime is the time since Windows started (GetTickCount64, the same clock as "uptime_s" of /metrics).
 func SystemUptime() (time.Duration, error) { return windows.DurationSinceBoot(), nil }
+
+// ApprovalAdminFiles is ApprovalFiles for the administrator's command (fairy-agent helper-trust). A file
+// created in the helper's folder inherits its permissions: Administrators and SYSTEM change it, the agent's
+// account reads it.
+func ApprovalAdminFiles(cfg *Config) approval.Files { return ApprovalFiles(cfg) }
