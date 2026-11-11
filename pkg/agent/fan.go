@@ -416,7 +416,8 @@ func FansAuto(ctx context.Context, cfg *Config) (mode string, done bool, err err
 	if !cfg.FanControl.Enabled || !cfg.IPMI.Enabled {
 		return "", false, nil
 	}
-	if _, err := LoadEnvFile(cfg.EnvFile); err != nil {
+	// as the running agent does: ipmitool does not get the device secrets of env_file (audit 4, T-60)
+	if err := loadSecrets(cfg); err != nil {
 		return "", true, err
 	}
 	t, err := ipmiTransport(cfg.IPMI)

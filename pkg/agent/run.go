@@ -88,9 +88,11 @@ type Build struct {
 	Migration Migrator
 }
 
-// Run starts every part of the agent and serves until ctx ends.
-func Run(ctx context.Context, cfg *Config, b Build) error {
-	version := b.Version
+// loadSecrets reads env_file into this process's environment and hides its names, the BMC relay's passwords
+// and the IPMI password from every program the agent starts (collect.HideEnv): ipmitool, nvidia-smi and the
+// others get an environment without them. It must run before a transport is built (IPMITransport copies the
+// environment for ipmitool then).
+func loadSecrets(cfg *Config) error {
 	names, err := LoadEnvFile(cfg.EnvFile)
 	if err != nil {
 		return err
@@ -101,6 +103,15 @@ func Run(ctx context.Context, cfg *Config, b Build) error {
 	}
 	if cfg.IPMI.PasswordEnv != "" {
 		collect.HideEnv(cfg.IPMI.PasswordEnv)
+	}
+	return nil
+}
+
+// Run starts every part of the agent and serves until ctx ends.
+func Run(ctx context.Context, cfg *Config, b Build) error {
+	version := b.Version
+	if err := loadSecrets(cfg); err != nil {
+		return err
 	}
 	tokens, err := cfg.LoadTokens()
 	if err != nil {
