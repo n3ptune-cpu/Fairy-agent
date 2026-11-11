@@ -19,9 +19,30 @@ import (
 	"time"
 )
 
-// askHealth sends GET /health with the proof of token for nonce, from one of the test's root ports or from an
-// ordinary one, and returns the status.
-func askHealth(t *testing.T, addr, token, nonce string, asRoot bool) int {
+// healthAskText is the text of GET /health with the proof of token for nonce. It is made before a connection
+// is opened: deriving the key from a token takes a moment (much longer with the race detector on a busy
+// machine), and the server gives a connection two seconds to send its request. The first version of these
+// tests derived the key after connecting, with another token for every wrong ask, and failed on a busy machine.
+func healthAskText(token, nonce string) string {
+	key := healthKey(sha256.Sum256([]byte(token)))
+	return fmt.Sprintf("GET %s?c=%s&p=%s HTTP/1.1\r\nHost: agent\r\nConnection: close\r\n\r\n", HealthPath, nonce, healthAsk(key, nonce))
+}
+
+// wrongHealthRequests are n asks made from guesses of the read token (three guesses in turn: the agent counts
+// wrong asks, not different guesses), and then the server's own key is made ready, so that no request of the
+// test waits for it.
+func wrongHealthRequests(n int) []string {
+	reqs := make([]string, n)
+	for i := range reqs {
+		reqs[i] = healthAskText(fmt.Sprintf("a-guess-of-the-read-token-%d", i%3), fmt.Sprintf("bbbbbbbbbbbbbb%02d", i))
+	}
+	healthKey(sha256.Sum256([]byte(readTok)))
+	return reqs
+}
+
+// sendHealth sends a prepared request from one of the test's root ports or from an ordinary one, and returns
+// the status.
+func sendHealth(t *testing.T, addr, request string, asRoot bool) int {
 	t.Helper()
 	dial := dialFrom
 	if asRoot {
@@ -32,15 +53,22 @@ func askHealth(t *testing.T, addr, token, nonce string, asRoot bool) int {
 		t.Fatal(err)
 	}
 	defer c.Close()
-	_ = c.SetDeadline(time.Now().Add(5 * time.Second))
-	key := healthKey(sha256.Sum256([]byte(token)))
-	fmt.Fprintf(c, "GET %s?c=%s&p=%s HTTP/1.1\r\nHost: agent\r\nConnection: close\r\n\r\n", HealthPath, nonce, healthAsk(key, nonce))
+	_ = c.SetDeadline(time.Now().Add(time.Minute)) // only so that a test that hangs ends
+	if _, err := c.Write([]byte(request)); err != nil {
+		t.Fatal(err)
+	}
 	resp, err := http.ReadResponse(bufio.NewReader(c), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	resp.Body.Close()
 	return resp.StatusCode
+}
+
+// askHealth sends GET /health with the proof of token for nonce and returns the status.
+func askHealth(t *testing.T, addr, token, nonce string, asRoot bool) int {
+	t.Helper()
+	return sendHealth(t, addr, healthAskText(token, nonce), asRoot)
 }
 
 // logBuffer collects the log; it may be read while the server still writes.
@@ -82,6 +110,7 @@ func healthRig(t *testing.T, rootLane bool) (a *Agent, addr string) {
 	ln := LimitConns(tcp, rootLimits(t, ConnLimits{Local: isThisMachine}))
 	srv := r.a.Server()
 	srv.ErrorLog = nil
+	srv.ReadHeaderTimeout, srv.ReadTimeout = time.Minute, time.Minute // not what these tests are about; a busy machine may be slow
 	go func() { _ = srv.Serve(ln) }()
 	t.Cleanup(func() { _ = srv.Close() })
 	return r.a, ln.Addr().String()
@@ -93,11 +122,12 @@ func healthRig(t *testing.T, rootLane bool) (a *Agent, addr string) {
 func TestHealthWrongAsksAreLimitedWhereRootHasItsLane(t *testing.T) {
 	logs := captureLog(t)
 	_, addr := healthRig(t, true)
+	wrong := wrongHealthRequests(healthWrongPerMin)
 	if st := askHealth(t, addr, readTok, "aaaaaaaaaaaaaaa0", false); st != 200 {
 		t.Fatal("the right ask from an ordinary port, before any wrong one:", st)
 	}
-	for i := 0; i < healthWrongPerMin; i++ {
-		if st := askHealth(t, addr, fmt.Sprintf("a-guess-of-the-read-token-%d", i), fmt.Sprintf("bbbbbbbbbbbbbb%02d", i), false); st != 404 {
+	for i, req := range wrong {
+		if st := sendHealth(t, addr, req, false); st != 404 {
 			t.Fatalf("wrong ask %d: HTTP %d", i, st)
 		}
 	}
@@ -112,7 +142,7 @@ func TestHealthWrongAsksAreLimitedWhereRootHasItsLane(t *testing.T) {
 		}
 	}
 	// wrong asks through root's lane are not counted against anybody (and root needs no guess)
-	if st := askHealth(t, addr, "a-wrong-token", "eeeeeeeeeeeeeeee", true); st != 404 {
+	if st := askHealth(t, addr, "a-guess-of-the-read-token-0", "eeeeeeeeeeeeeeee", true); st != 404 {
 		t.Fatal(st)
 	}
 	// the wrong-token limiter knows nothing of all this: a request with the right token is answered
@@ -133,8 +163,8 @@ func TestHealthWrongAsksAreLimitedWhereRootHasItsLane(t *testing.T) {
 func TestHealthWrongAsksAreOnlyLoggedWithoutRootsLane(t *testing.T) {
 	logs := captureLog(t)
 	_, addr := healthRig(t, false)
-	for i := 0; i < healthWrongPerMin+5; i++ {
-		if st := askHealth(t, addr, fmt.Sprintf("a-guess-of-the-read-token-%d", i), fmt.Sprintf("bbbbbbbbbbbbbb%02d", i), false); st != 404 {
+	for i, req := range wrongHealthRequests(healthWrongPerMin + 5) {
+		if st := sendHealth(t, addr, req, false); st != 404 {
 			t.Fatalf("wrong ask %d: HTTP %d", i, st)
 		}
 	}
