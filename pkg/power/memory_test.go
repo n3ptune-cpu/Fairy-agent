@@ -109,13 +109,13 @@ func jsonSources(t *testing.T, dev *device) map[string]Source {
 }
 
 // readCost is what one Read allocated in all.
-func readCost(s Source) (rs []Reading, err error, total uint64) {
+func readCost(s Source) (rs []Reading, total uint64, err error) {
 	runtime.GC()
 	var m0, m1 runtime.MemStats
 	runtime.ReadMemStats(&m0)
 	rs, err = s.Read(context.Background(), 10*time.Second)
 	runtime.ReadMemStats(&m1)
-	return rs, err, m1.TotalAlloc - m0.TotalAlloc
+	return rs, m1.TotalAlloc - m0.TotalAlloc, err
 }
 
 func TestHostileDeviceAnswerCostsLittle(t *testing.T) {
@@ -136,7 +136,7 @@ func TestHostileDeviceAnswerCostsLittle(t *testing.T) {
 					dev.body = zip
 				}
 				for name, s := range sources {
-					rs, err, total := readCost(s)
+					rs, total, err := readCost(s)
 					label := fmt.Sprintf("%s: %s, %d KiB, gzip %v", name, shape, len(body)>>10, zipped)
 					if total > maxReadCost {
 						t.Errorf("%s: allocated %d KiB (limit %d KiB), err=%v", label, total>>10, maxReadCost>>10, err)
@@ -157,7 +157,7 @@ func TestWorstAcceptedDeviceAnswer(t *testing.T) {
 	body = append([]byte(`{"`+strings.Repeat("k", limitBytes-len(body)-64)+`":0,`), body[1:]...) // long keys cost memory too
 	dev := &device{body: body}
 	for name, s := range jsonSources(t, dev) {
-		rs, err, total := readCost(s)
+		rs, total, err := readCost(s)
 		if err != nil || len(rs) != 1 || rs[0].Watts == nil || *rs[0].Watts != 5 {
 			t.Errorf("%s: %d bytes inside the limits were not read: %+v %v", name, len(body), rs, err)
 		}
