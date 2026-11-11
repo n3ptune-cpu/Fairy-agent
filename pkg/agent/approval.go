@@ -134,11 +134,26 @@ func (a *Agent) approved(w http.ResponseWriter, r *http.Request, req api.Approva
 	} else {
 		ref = a.d.Approval.Check(req, ap)
 	}
-	if ref == nil {
+	if ref == nil || (ref.Code == api.CodeApprovalUnavailable && a.helperSaysOff(r.Context())) {
 		return true
 	}
 	writeRefusal(w, ref)
 	return false
+}
+
+// helperSaysOff reports whether the helper, asked at this moment, says that this machine has no trust file.
+// It is for one case only: this agent's own look at the trust file fails (its low-rights account cannot run
+// the checks on the helper's folder), while the helper, whose file it is and who can, sees that there is none.
+// Then there is nothing to enforce, and what the agent carries out itself runs as it does without trust,
+// instead of being refused on every machine that never set one. With a trust file, or a helper that does not
+// answer, the agent's own failure stays a refusal.
+func (a *Agent) helperSaysOff(ctx context.Context) bool {
+	h, ok := a.helperApproval()
+	if !ok {
+		return false
+	}
+	st, known := h.ApprovalNow(ctx)
+	return known && st.State == api.ApprovalOff
 }
 
 func writeRefusal(w http.ResponseWriter, ref *approval.Refusal) {
@@ -251,6 +266,9 @@ func (a *Agent) approvalChallenge(w http.ResponseWriter, r *http.Request) {
 		approvalDisabled(w)
 	default:
 		c, ref := a.d.Approval.Challenge(req)
+		if ref != nil && ref.Code == api.CodeApprovalUnavailable && req.Verb != api.ApproveTrustSet && a.helperSaysOff(r.Context()) {
+			c, ref = api.ChallengeResponse{Reason: "off", Request: c.Request}, nil // as approved: no trust file, says the helper
+		}
 		if ref != nil {
 			writeRefusal(w, ref)
 			return

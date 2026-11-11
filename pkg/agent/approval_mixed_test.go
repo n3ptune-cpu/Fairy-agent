@@ -40,6 +40,9 @@ type mixedOpts struct {
 	ownFan, ownPower, ownUpdate bool
 	// noOwnGate: the agent is built without its own approval check (what Run never does; the safety net)
 	noOwnGate bool
+	// blindOwnGate: the agent's own look at the trust folder fails (as it would if its account could not run
+	// the folder check on the helper's folder)
+	blindOwnGate bool
 }
 
 type mixedRig struct {
@@ -123,7 +126,11 @@ func newMixedRig(t *testing.T, o mixedOpts) *mixedRig {
 		d.Power = agent.NewPower(client.Power(), cfg.PowerControl.MinDelayS)
 	}
 	if !o.noOwnGate { // as Run: the same file, read only
-		d.Approval = approval.NewGate(approval.Options{Files: r.files, EnforcedBy: api.EnforcedByAgent, ReadOnly: true,
+		own := r.files
+		if o.blindOwnGate {
+			own.CheckDir = func(string) error { return errors.New("access is denied") }
+		}
+		d.Approval = approval.NewGate(approval.Options{Files: own, EnforcedBy: api.EnforcedByAgent, ReadOnly: true,
 			Log: slog.New(slog.NewTextHandler(r.agentLog, nil))})
 	}
 	hs := httptest.NewServer(agent.New(cfg, agent.Tokens{Read: readTok, Control: ctlTok}, d).Handler())
@@ -284,6 +291,46 @@ func TestWindowsFansInTheAgentWithTrustOff(t *testing.T) {
 			t.Errorf("no own gate %v: challenge with trust off: %d %v", noGate, st, c)
 		}
 	}
+}
+
+// TestAgentThatCannotLookAtTheTrustFolder: the agent's own check cannot run (its account cannot check the
+// helper's folder). With a trust file that is a refusal of everything the agent would have to check, and
+// /metrics says why. Without one, the helper, whose file it is, says "off", and the fans work as they always
+// did: a machine that never set a trust must not lose fan control over this.
+func TestAgentThatCannotLookAtTheTrustFolder(t *testing.T) {
+	r := newMixedRig(t, mixedOpts{helper: api.HelperRunning, ownFan: true, blindOwnGate: true})
+	blk := r.block(t, api.ApprovalOff)
+	if blk["agent_error"] == nil || !strings.Contains(blk["agent_error"].(string), "access is denied") {
+		t.Errorf("approval block: %v", blk)
+	}
+	if st, b := r.post(t, "/fan/mode", map[string]any{"mode": "full"}); st != 200 {
+		t.Fatalf("no trust file, fan mode: %d %v", st, b)
+	}
+	if st, c := r.post(t, api.PathApprovalChallenge, map[string]any{"verb": "fan_mode", "mode": "full"}); st != 200 || c["needed"] != false || c["reason"] != "off" {
+		t.Errorf("no trust file, challenge: %d %v", st, c)
+	}
+	// the helper stops: nobody can say that there is no trust file
+	if st, b := r.post(t, api.PathHelperStop, map[string]any{}); st != 200 {
+		t.Fatalf("helper stop: %d %v", st, b)
+	}
+	st, b := r.post(t, "/fan/mode", map[string]any{"mode": "standard"})
+	wantRefusal(t, "fan mode, helper stopped", st, b, 503, api.CodeApprovalUnavailable)
+	// the same machine with a trust file: the helper says required, the agent cannot check, so it refuses
+	r = newMixedRig(t, mixedOpts{helper: api.HelperRunning, ownFan: true, blindOwnGate: true, trust: true})
+	if blk := r.block(t, api.ApprovalRequired); blk["agent_error"] == nil {
+		t.Errorf("approval block: %v", blk)
+	}
+	before := r.mode(t)
+	st, b = r.post(t, "/fan/mode", map[string]any{"mode": "optimal"})
+	wantRefusal(t, "fan mode, trust set", st, b, 503, api.CodeApprovalUnavailable)
+	st, b = r.post(t, api.PathApprovalChallenge, map[string]any{"verb": "fan_mode", "mode": "optimal"})
+	wantRefusal(t, "challenge, trust set", st, b, 503, api.CodeApprovalUnavailable)
+	if r.mode(t) != before {
+		t.Fatalf("a fan request ran unchecked: mode %s -> %s", before, r.mode(t))
+	}
+	// what the helper carries out is not touched by any of this
+	st, b = r.post(t, "/power", map[string]any{"action": "shutdown", "delay_s": 60})
+	wantRefusal(t, "shutdown through the helper", st, b, 403, api.CodeApprovalRequired)
 }
 
 // TestAgentWithoutItsOwnCheckRefuses: the review's test as it was written, with an agent that was built without
