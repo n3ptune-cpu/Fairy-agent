@@ -8,16 +8,35 @@ import (
 	"fmt"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/n3ptune-cpu/Fairy-agent/pkg/enroll"
 )
 
 // budgetRig is a pair rig set up as the running agent sets it up (the panel's address from PairedPanel), with
-// a count of how often the handler reads the state file.
+// a count of how often the handler reads the state file. Everything in it reads one clock, the rig's: the
+// first version of these tests gave the handler the rig's fixed time and PairedPanel the real time, so they
+// would have failed from the day the real clock passed the rig's (2027-01-15).
 func budgetRig(t *testing.T, panel string) (*pairRig, *atomic.Int32) {
+	return budgetRigAt(t, panel, time.Time{})
+}
+
+// budgetRigAt is budgetRig with the rig's clock, and the join code, moved to at (the zero time: left alone).
+func budgetRigAt(t *testing.T, panel string, at time.Time) (*pairRig, *atomic.Int32) {
 	t.Helper()
 	r := newPairRig(t, "", panel)
-	r.p.Panel = PairedPanel(r.path)
+	if !at.IsZero() {
+		r.now = at
+		st, err := enroll.ReadState(r.path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		st.CreatedAt, st.ExpiresAt = at.Unix(), at.Add(enroll.TTL).Unix()
+		if err := enroll.WriteState(r.path, st); err != nil {
+			t.Fatal(err)
+		}
+	}
+	r.p.Panel = pairedPanel(r.path, r.p.Now)
 	reads := new(atomic.Int32)
 	r.p.read = func(path string) (enroll.State, error) {
 		reads.Add(1)
@@ -26,9 +45,22 @@ func budgetRig(t *testing.T, panel string) (*pairRig, *atomic.Int32) {
 	return r, reads
 }
 
+// The test must not depend on the day it runs: it runs with the rig's own date, with one long past and with
+// one far ahead of the real clock, and with the real time itself.
 func TestPairCountsARequestBeforeItReadsTheStateFile(t *testing.T) {
+	for name, at := range map[string]time.Time{
+		"the rig's date": {},
+		"long ago":       time.Unix(1_000_000_000, 0),
+		"far ahead":      time.Unix(4_000_000_000, 0),
+		"now":            time.Now(),
+	} {
+		t.Run(name, func(t *testing.T) { pairCountsBeforeItReads(t, at) })
+	}
+}
+
+func pairCountsBeforeItReads(t *testing.T, at time.Time) {
 	const panel = "100.64.0.10"
-	r, reads := budgetRig(t, panel)
+	r, reads := budgetRigAt(t, panel, at)
 	good := `{"proof":"` + r.proof + `"}`
 	// one machine, 100 requests: its budget lets five be looked at, and only those five read the file
 	seen := map[int]int{}
@@ -103,5 +135,44 @@ func TestPairWithAnAddressOnRecordThatIsStale(t *testing.T) {
 	}
 	if st, body := r.from("100.64.0.77", "application/json", `{"proof":"`+r.proof+`"}`); st != 200 || body["token"] != readTok {
 		t.Fatalf("the new panel's first request: %d %v", st, body)
+	}
+}
+
+// The address on record is read with the clock it is given, and the five seconds between two looks at the file
+// are counted on that clock too.
+func TestPairedPanelUsesTheClockItIsGiven(t *testing.T) {
+	r := newPairRig(t, "", "100.64.0.10") // a code that is open at the rig's time, for 100.64.0.10
+	for name, c := range map[string]struct {
+		at   time.Time
+		want string
+	}{
+		"while the code is open": {r.now.Add(time.Minute), "100.64.0.10"},
+		"after the code ran out": {r.now.Add(enroll.TTL + time.Second), ""},
+		"long after":             {r.now.Add(100 * 365 * 24 * time.Hour), ""},
+		"long before":            {time.Unix(1_000_000_000, 0), "100.64.0.10"}, // a code is open until it runs out
+	} {
+		if got := pairedPanel(r.path, func() time.Time { return c.at })(); got != c.want {
+			t.Errorf("%s: the panel on record is %q, want %q", name, got, c.want)
+		}
+	}
+	now := r.now
+	panel := pairedPanel(r.path, func() time.Time { return now })
+	if got := panel(); got != "100.64.0.10" {
+		t.Fatal(got)
+	}
+	st, err := enroll.ReadState(r.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st.Panel = "100.64.0.77"
+	if err := enroll.WriteState(r.path, st); err != nil {
+		t.Fatal(err)
+	}
+	if got := panel(); got != "100.64.0.10" {
+		t.Fatalf("the file was read again within five seconds of the given clock: %q", got)
+	}
+	now = now.Add(6 * time.Second)
+	if got := panel(); got != "100.64.0.77" {
+		t.Fatalf("six seconds later on the given clock: %q", got)
 	}
 }

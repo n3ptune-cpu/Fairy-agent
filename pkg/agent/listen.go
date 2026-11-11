@@ -846,7 +846,10 @@ func (c *limitedConn) CloseWrite() error {
 // PairedPanel returns a function that reports the panel's address from the pairing state file (path): the
 // address that paired, or, while a join code is open, the address the code is open to. It is "" when the agent
 // was never paired through Add host (tokens set up by hand). The file is read at most every five seconds.
-func PairedPanel(path string) func() string {
+func PairedPanel(path string) func() string { return pairedPanel(path, time.Now) }
+
+// pairedPanel is PairedPanel with the clock it reads (the tests have their own).
+func pairedPanel(path string, clock func() time.Time) func() string {
 	var (
 		mu   sync.Mutex
 		at   time.Time
@@ -855,7 +858,7 @@ func PairedPanel(path string) func() string {
 	return func() string {
 		mu.Lock()
 		defer mu.Unlock()
-		now := time.Now()
+		now := clock()
 		if !at.IsZero() && now.Sub(at) < 5*time.Second {
 			return addr
 		}
