@@ -139,6 +139,9 @@ func main() {
 			os.Exit(1)
 		}
 		fmt.Println("config OK:", *cfgPath)
+		for _, n := range configNotes(cfg) {
+			fmt.Println(n)
+		}
 	case "config":
 		os.Exit(configCmd(args, os.Stdout, os.Stderr))
 	case "secret":

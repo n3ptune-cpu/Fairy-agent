@@ -875,9 +875,18 @@ BMC addresses are accepted. Two backends per target:
   program in `C:\ipmitool\` or a user's folder is refused (`ipmitool_untrusted`). `cipher_suite` (0-17) is ipmitool's `-C` for BMCs that need a
   particular one.
 * `redfish` (default when `url:` is set): `GET /redfish/v1/Systems`, then `POST <first
-  member>/Actions/ComputerSystem.Reset {"ResetType": "On"}`, basic auth, 10 s. The BMC's self-signed
-  certificate is pinned by SHA-256: `tls_fingerprint` if given, else learned on the first successful call
-  ("trust on first use", logged with the fingerprint) and kept in the agent's state folder (`bmc-pins.json`).
+  member>/Actions/ComputerSystem.Reset {"ResetType": "On"}`, basic auth, 10 s. A BMC's certificate is
+  self-signed, so the agent must be told which one is the BMC's: **`tls_fingerprint` is needed**, the SHA-256
+  of the BMC's certificate (64 hex digits, colons allowed). The BMC's user name and password are sent only to
+  that certificate. Without `tls_fingerprint` nothing is sent to the BMC: a request answers
+  `bmc_fingerprint_missing` and names the fingerprint of the certificate the BMC's address shows at that moment.
+  Compare it with the certificate in the BMC's own web interface (someone else on that network could be
+  answering at the BMC's address), then put it into the target as `tls_fingerprint:` and restart the agent.
+  `fairy-agent check-config` and the agent's log at start name every target that still lacks it. One exception,
+  so that an update breaks nothing: a target whose certificate an earlier version learned on its first use
+  (kept in the agent's state folder, `bmc-pins.json`) keeps working with that certificate. Nothing is learned
+  any more; set `tls_fingerprint` for such a target too when you next edit the file. A different certificate
+  than the named one answers `bmc_certificate_changed`, and nothing is sent to it.
 
 When ipmitool fails, the panel shows what went wrong (the `code` in the answer): `bmc_refused` (wrong user name
 or password), `bmc_privilege` (the login worked but the BMC refused the ADMINISTRATOR privilege ipmitool asks

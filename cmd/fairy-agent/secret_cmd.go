@@ -165,6 +165,8 @@ const bmcAddUsage = `usage:
                             [--tls-fingerprint SHA256] [--config PATH]
       adds the first BMC power-on relay target and sets bmc_relay.enabled (root / Administrator); the password
       itself goes in with: fairy-agent secret set NAME
+      a --url (redfish) target needs --tls-fingerprint, the SHA-256 of the BMC's certificate: without it
+      nothing is sent to the BMC, and the first request answers with the fingerprint the BMC shows
 `
 
 // bmcRelayCmd is `fairy-agent bmc-relay add ...`.
@@ -236,5 +238,8 @@ func bmcRelayAdd(cfgPath string, item []configedit.KV, stdout io.Writer) error {
 		return err
 	}
 	fmt.Fprintf(stdout, "bmc_relay target added and bmc_relay.enabled: true in %s\nrestart the agent to use it: %s\n", cfgPath, restartHint())
+	for _, n := range configNotes(cfg) {
+		fmt.Fprintln(stdout, n)
+	}
 	return nil
 }

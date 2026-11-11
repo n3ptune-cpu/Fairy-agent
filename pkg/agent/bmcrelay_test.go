@@ -150,7 +150,8 @@ func TestBMCRelayConfigChecks(t *testing.T) {
 	}
 }
 
-// Redfish against a fake BMC (TLS, self-signed): the certificate is learned on first use and pinned after.
+// Redfish against a fake BMC (TLS, self-signed) whose certificate is named in config.yaml. Without a fingerprint
+// nothing is sent and nothing is learned: bmcrelay_pin_test.go (audit 4, T-07).
 func TestBMCRelayRedfish(t *testing.T) {
 	var resets []string
 	power := "Off"
@@ -181,11 +182,17 @@ func TestBMCRelayRedfish(t *testing.T) {
 	pins := filepath.Join(t.TempDir(), "bmc-pins.json")
 	b := NewBMCRelay(BMCRelayConfig{Enabled: true, Targets: []BMCTarget{{ID: "x11", URL: srv.URL, Username: "fairy", PasswordEnv: "BMC_PW"}}}, pins)
 	ctx := context.Background()
-	if st, out := b.Handle(ctx, BMCRequest{Target: "x11", Action: "status"}); st != 200 || out["power"] != "off" {
+	if st, out := b.Handle(ctx, BMCRequest{Target: "x11", Action: "status"}); st != 409 || out["code"] != "bmc_fingerprint_missing" ||
+		!strings.Contains(fmt.Sprint(out["error"]), fp) {
 		t.Fatal(st, out)
 	}
-	if saved, _ := os.ReadFile(pins); !strings.Contains(string(saved), fp) {
-		t.Fatal("not pinned", string(saved))
+	if _, err := os.Stat(pins); err == nil {
+		t.Fatal("a certificate was pinned by itself")
+	}
+	b = NewBMCRelay(BMCRelayConfig{Enabled: true, Targets: []BMCTarget{{ID: "x11", URL: srv.URL, Username: "fairy", PasswordEnv: "BMC_PW",
+		TLSFingerprint: fp}}}, pins)
+	if st, out := b.Handle(ctx, BMCRequest{Target: "x11", Action: "status"}); st != 200 || out["power"] != "off" {
+		t.Fatal(st, out)
 	}
 	if st, out := b.Handle(ctx, BMCRequest{Target: "x11", Action: "on"}); st != 200 || out["power"] != "on" || strings.Join(resets, ",") != "On" {
 		t.Fatal(st, out, resets)

@@ -7,7 +7,8 @@ package agent
 //	ipmitool: `ipmitool -I lanplus -H <host> -U <user> -E [-C <cipher suite>] chassis power on|status`, the
 //	          password only in the child's IPMI_PASSWORD (never on the command line), minimal environment, 15 s
 //	redfish:  GET /redfish/v1/Systems -> first member; POST <member>/Actions/ComputerSystem.Reset {"ResetType":"On"};
-//	          basic auth, 10 s, the BMC's certificate pinned by SHA-256 (configured, or learned on first use)
+//	          basic auth, 10 s, only to the certificate whose SHA-256 is in tls_fingerprint (a BMC's certificate
+//	          is self-signed); without one nothing is sent (audit 4, T-07)
 //
 // Only BMC addresses in private ranges are accepted (like Wake-on-LAN). Passwords come from the environment
 // (env_file); neither they nor the BMC's answers with them are logged.
@@ -56,7 +57,7 @@ type BMCTarget struct {
 	PasswordEnv    string `yaml:"password_env"`
 	CipherSuite    *int   `yaml:"cipher_suite"`    // ipmitool -C (0-17); unset: ipmitool's default
 	IpmitoolPath   string `yaml:"ipmitool_path"`   // default: C:\Program Files\ipmitool\ (Windows), /usr/bin etc. and PATH (Linux)
-	TLSFingerprint string `yaml:"tls_fingerprint"` // redfish: SHA-256 of the BMC's certificate; empty: learned on first use
+	TLSFingerprint string `yaml:"tls_fingerprint"` // redfish: SHA-256 of the BMC's certificate; needed before anything is sent
 }
 
 var (
@@ -134,6 +135,18 @@ func (c BMCRelayConfig) validate(add func(string)) {
 	}
 }
 
+// RedfishWithoutFingerprint lists the ids of the redfish targets that have no tls_fingerprint. The relay sends
+// such a target nothing (see BMCRelay.redfish), unless an earlier version learned its certificate.
+func (c BMCRelayConfig) RedfishWithoutFingerprint() []string {
+	var ids []string
+	for _, t := range c.Targets {
+		if t.EffectiveBackend() == "redfish" && normFingerprint(t.TLSFingerprint) == "" {
+			ids = append(ids, t.ID)
+		}
+	}
+	return ids
+}
+
 // BMCRequest is the POST /bmc/power body.
 type BMCRequest struct {
 	Target      string `json:"target"`
@@ -164,6 +177,18 @@ func NewBMCRelay(c BMCRelayConfig, pinFile string) *BMCRelay {
 		b.order = append(b.order, t.ID)
 	}
 	return b
+}
+
+// WithoutFingerprint lists the ids of the redfish targets this relay cannot use: no tls_fingerprint in
+// config.yaml and no certificate learned by an earlier version.
+func (b *BMCRelay) WithoutFingerprint() []string {
+	var ids []string
+	for _, id := range b.order {
+		if t := b.targets[id]; t.EffectiveBackend() == "redfish" && b.pinned(t) == "" {
+			ids = append(ids, id)
+		}
+	}
+	return ids
 }
 
 // Targets lists the target ids (for /metrics: ids and backends only, never addresses or users).
@@ -389,27 +414,48 @@ func (p *pinStore) get(id string) string {
 	return p.load()[id]
 }
 
-func (p *pinStore) set(id, fp string) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	m := p.load()
-	m[id] = fp
-	if p.path == "" {
-		return
+// pinned is the SHA-256 of the one certificate the relay talks to for t: tls_fingerprint from config.yaml, or
+// else the certificate an earlier version learned on its first use of t (bmc-pins.json in the state folder; no
+// version learns one any more). "" means there is none, and then nothing is sent to t's address.
+func (b *BMCRelay) pinned(t BMCTarget) string {
+	if fp := normFingerprint(t.TLSFingerprint); fp != "" {
+		return fp
 	}
-	b, _ := json.MarshalIndent(m, "", "  ")
-	if err := os.WriteFile(p.path, b, 0o600); err != nil {
-		slog.Warn("bmc relay: the learned certificate fingerprint is kept in memory only", "error", err.Error())
-	}
+	return normFingerprint(b.pins.get(t.ID))
 }
 
-// client returns an HTTP client that accepts only the pinned certificate (configured, learned, or - the first
-// time - any, then learned).
-func (b *BMCRelay) client(t BMCTarget) (*http.Client, *string) {
-	want := normFingerprint(t.TLSFingerprint)
-	if want == "" {
-		want = b.pins.get(t.ID)
+// shownFingerprint makes a TLS handshake with the BMC at rawURL and returns the SHA-256 of the certificate it
+// shows. Nothing else is sent: no request, no user name, no password.
+func shownFingerprint(ctx context.Context, rawURL string) (string, error) {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return "", err
 	}
+	addr := u.Host
+	if u.Port() == "" {
+		addr = net.JoinHostPort(u.Hostname(), "443")
+	}
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	d := tls.Dialer{Config: &tls.Config{
+		InsecureSkipVerify: true, //nolint:gosec // only the certificate is read here; nothing is sent over this connection
+		MinVersion:         tls.VersionTLS12}}
+	conn, err := d.DialContext(ctx, "tcp", addr)
+	if err != nil {
+		return "", err
+	}
+	defer conn.Close()
+	certs := conn.(*tls.Conn).ConnectionState().PeerCertificates
+	if len(certs) == 0 {
+		return "", errors.New("no certificate")
+	}
+	sum := sha256.Sum256(certs[0].Raw)
+	return hex.EncodeToString(sum[:]), nil
+}
+
+// client returns an HTTP client that accepts only the certificate with the SHA-256 want. With an empty want it
+// accepts none: the handshake fails before any request is written.
+func (b *BMCRelay) client(want string) (*http.Client, *string) {
 	seen := new(string)
 	tr := &http.Transport{TLSClientConfig: &tls.Config{
 		InsecureSkipVerify: true, // replaced by the fingerprint check below (BMCs have self-signed certificates)
@@ -420,7 +466,7 @@ func (b *BMCRelay) client(t BMCTarget) (*http.Client, *string) {
 			}
 			sum := sha256.Sum256(raw[0])
 			*seen = hex.EncodeToString(sum[:])
-			if want != "" && *seen != want {
+			if want == "" || *seen != want {
 				return fmt.Errorf("certificate fingerprint %s is not the pinned %s", *seen, want)
 			}
 			return nil
@@ -435,7 +481,23 @@ func (b *BMCRelay) redfish(ctx context.Context, t BMCTarget, action string) (str
 	if err != nil {
 		return "", err
 	}
-	c, seen := b.client(t)
+	// The BMC's user name and password go only to a certificate that was named before: every request carries
+	// them (Basic). Before, with no fingerprint, the first request went to whatever certificate answered, and
+	// that certificate was "learned" afterwards if it answered at all. Now nothing is learned: without a
+	// fingerprint the relay only looks at the certificate and says what to put into config.yaml.
+	want := b.pinned(t)
+	if want == "" {
+		shown, err := shownFingerprint(ctx, t.URL)
+		if err != nil {
+			return "", bmcErr(502, "bmc_unreachable", "the BMC at %s is not reachable (is the relay cabled to it?), and no tls_fingerprint is set for target %s, so nothing was sent to it", t.URL, t.ID)
+		}
+		return "", bmcErr(409, "bmc_fingerprint_missing",
+			"nothing was sent to the BMC at %s: target %s has no tls_fingerprint, and the BMC's user name and password go only to the certificate named there. "+
+				"The certificate at that address now has the SHA-256 fingerprint %s. Compare it with the certificate the BMC shows in its own web interface; "+
+				"if it is the same, put tls_fingerprint: %s into this target in config.yaml (bmc_relay.targets) and restart the agent",
+			t.URL, t.ID, shown, shown)
+	}
+	c, seen := b.client(want)
 	base := strings.TrimRight(t.URL, "/")
 	// do sends one request. With use, the answer's JSON object is handed to it: use takes the one value it needs.
 	// The answer is limited in size, number of values and depth (devices.DecodeJSON; audit 4, T-02): a BMC's
@@ -478,10 +540,6 @@ func (b *BMCRelay) redfish(ctx context.Context, t BMCTarget, action string) (str
 			return "", bmcErr(502, "bmc_certificate_changed", "the BMC at %s shows a different certificate than the pinned one (%s); if that is expected, set tls_fingerprint", t.URL, *seen)
 		}
 		return "", bmcErr(502, "bmc_unreachable", "the BMC at %s is not reachable (is the relay cabled to it?): %v", t.URL, err)
-	}
-	if normFingerprint(t.TLSFingerprint) == "" && b.pins.get(t.ID) == "" && *seen != "" {
-		b.pins.set(t.ID, *seen)
-		slog.Info("bmc relay: certificate learned and pinned", "target", t.ID, "sha256", *seen)
 	}
 	switch {
 	case st == 401 || st == 403:

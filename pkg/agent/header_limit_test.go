@@ -14,7 +14,7 @@ import (
 // and the agent runs inside 64 MiB): the client for a BMC's Redfish API, and the update's health check.
 func TestAgentClientsLimitTheResponseHeader(t *testing.T) {
 	b := NewBMCRelay(BMCRelayConfig{}, "")
-	c, _ := b.client(BMCTarget{ID: "x"})
+	c, _ := b.client(strings.Repeat("ab", 32))
 	if tr, ok := c.Transport.(*http.Transport); !ok || tr.MaxResponseHeaderBytes != devices.MaxResponseHeaderBytes {
 		t.Fatal("the BMC relay's client has no limit on the response header")
 	}

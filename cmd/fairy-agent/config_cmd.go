@@ -31,6 +31,19 @@ func checkConfig(cfg *agent.Config) error {
 	return err
 }
 
+// configNotes are what check-config says about a config that loads but will not do what its owner expects.
+func configNotes(cfg *agent.Config) []string {
+	var notes []string
+	for _, id := range cfg.BMCRelay.RedfishWithoutFingerprint() {
+		notes = append(notes, "note: bmc_relay target "+id+" has no tls_fingerprint. The agent sends the BMC's user name and password only to "+
+			"the certificate named there, so nothing is sent to this BMC yet. Ask for it once (the panel's power-on through the BMC): "+
+			"the answer names the fingerprint the BMC shows. Compare it with the certificate in the BMC's own web interface, then set "+
+			"tls_fingerprint for this target in config.yaml and restart the agent. (A target that worked before this version keeps working: "+
+			"its certificate was learned then.)")
+	}
+	return notes
+}
+
 // splitConfigArgs takes --config PATH (or --config=PATH, -config) from anywhere in args.
 func splitConfigArgs(args []string) (pos []string, cfgPath string, err error) {
 	cfgPath = agent.DefaultConfigPath()

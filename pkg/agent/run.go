@@ -224,6 +224,9 @@ func Run(ctx context.Context, cfg *Config, b Build) error {
 	if cfg.BMCRelay.Enabled {
 		d.BMCRelay = NewBMCRelay(cfg.BMCRelay, filepath.Join(filepath.Dir(PairingPath(cfg)), "bmc-pins.json"))
 		slog.Info("BMC power-on relay", "targets", d.BMCRelay.Targets())
+		for _, id := range d.BMCRelay.WithoutFingerprint() {
+			slog.Warn("bmc relay: this redfish target has no tls_fingerprint: nothing is sent to its BMC until one is set in config.yaml (a request for it answers with the fingerprint the BMC shows)", "target", id)
+		}
 	}
 	if cfg.SelfUpdate.Enabled {
 		o, err := DefaultUpdaterOptions(cfg, version, b.ReleaseKey)
