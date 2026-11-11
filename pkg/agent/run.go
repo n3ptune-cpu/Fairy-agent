@@ -17,6 +17,7 @@ import (
 	"github.com/n3ptune-cpu/Fairy-agent/pkg/agent/api"
 	"github.com/n3ptune-cpu/Fairy-agent/pkg/agent/collect"
 	"github.com/n3ptune-cpu/Fairy-agent/pkg/agent/ipmi"
+	"github.com/n3ptune-cpu/Fairy-agent/pkg/approval"
 	"github.com/n3ptune-cpu/Fairy-agent/pkg/enroll"
 )
 
@@ -148,6 +149,14 @@ func Run(ctx context.Context, cfg *Config, b Build) error {
 		}
 		if !viaHelper && NeedsHelper(cfg) {
 			slog.Warn("config.yaml uses Core Temp, IPMI or power control, which need the fairy-agent-helper service; it is not installed, so the agent tries them with its own rights. Install it: " + HelperSetupHint)
+		}
+	}
+	if helper == nil {
+		// Not Windows: no helper, so this agent checks passkey approvals itself (approval.go). Without a trust
+		// file (the state until the panel or an administrator sets one) it checks nothing, as before.
+		d.Approval = approval.NewGate(approval.Options{Files: ApprovalFiles(cfg), EnforcedBy: api.EnforcedByAgent, Uptime: SystemUptime})
+		if st := d.Approval.Status(); st.State != api.ApprovalOff {
+			slog.Info("passkey approval of fan, power and update requests", "state", st.State, "issuer", st.Issuer, "error", st.Error)
 		}
 	}
 	if cfg.Sensors.CoreTemp {

@@ -23,6 +23,7 @@ import (
 
 	"github.com/n3ptune-cpu/Fairy-agent/pkg/agent/api"
 	"github.com/n3ptune-cpu/Fairy-agent/pkg/agent/collect"
+	"github.com/n3ptune-cpu/Fairy-agent/pkg/approval"
 	"github.com/n3ptune-cpu/Fairy-agent/pkg/devices"
 	"github.com/n3ptune-cpu/Fairy-agent/pkg/enroll"
 	"github.com/n3ptune-cpu/Fairy-agent/pkg/redact"
@@ -136,7 +137,10 @@ type Deps struct {
 	// Migration is the Windows move from LocalSystem to NT SERVICE\fairy-agent (/metrics "migration"); nil on
 	// Linux.
 	Migration interface{ Status() api.MigrationStatus }
-	Version   string
+	// Approval is the passkey check of this agent's own control routes (pkg/approval), where no helper does
+	// it: everywhere but Windows. nil: this agent checks nothing itself (Windows, and tests of other parts).
+	Approval *approval.Gate
+	Version  string
 }
 
 // Agent answers the panel.
@@ -991,6 +995,9 @@ func (a *Agent) fanMode(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 400, map[string]any{"error": err.Error()})
 		return
 	}
+	if !a.approved(w, api.ApprovalRequest{Verb: api.ApproveFanMode, Mode: &b.Mode}, b.Approval) {
+		return
+	}
 	who := "panel " + clientIP(r)
 	if f, ok := a.d.Fan.(approvedFan); ok && b.Approval != nil { // the Windows helper checks it
 		st, body := f.SetModeApproved(r.Context(), b.Mode, who, b.Approval)
@@ -1015,6 +1022,9 @@ func (a *Agent) fanDuty(w http.ResponseWriter, r *http.Request) {
 	pct, ok2 := intField(b.Percent)
 	if !ok1 || !ok2 {
 		writeJSON(w, 400, map[string]any{"error": "zone and percent must be integers"})
+		return
+	}
+	if !a.approved(w, api.ApprovalRequest{Verb: api.ApproveFanSet, Zone: &zone, Percent: &pct}, b.Approval) {
 		return
 	}
 	who := "panel " + clientIP(r)
@@ -1047,6 +1057,15 @@ func (a *Agent) power(w http.ResponseWriter, r *http.Request) {
 		}
 		req.DelayS = &d
 	}
+	if b.Action == "shutdown" || b.Action == "reboot" || b.Action == "sleep" { // cancel needs no approval
+		delay := defaultPowerDelayS
+		if req.DelayS != nil {
+			delay = *req.DelayS
+		}
+		if !a.approved(w, api.ApprovalRequest{Verb: api.ApprovePower, Action: &b.Action, DelayS: &delay}, b.Approval) {
+			return
+		}
+	}
 	st, body := a.d.Power.Handle(req)
 	writeJSON(w, st, body)
 }
@@ -1077,7 +1096,12 @@ func (a *Agent) update(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 400, map[string]any{"error": err.Error()})
 		return
 	}
-	if !a.updateApproval(w, &b) {
+	if a.d.Approval != nil { // this agent checks itself, now; nothing further down looks at the approval
+		if !a.approved(w, api.ApprovalRequest{Verb: api.ApproveApplyUpdate}, b.Approval) {
+			return
+		}
+		b.Approval = nil
+	} else if !a.updateApproval(w, &b) { // Windows: the helper checks, when the installer is started
 		return
 	}
 	st, body := a.d.Updater.Start(b)

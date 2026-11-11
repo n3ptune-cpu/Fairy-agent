@@ -81,6 +81,10 @@ func (p *Power) canSleep() (bool, string) {
 	return p.sleep.ok, p.sleep.why
 }
 
+// defaultPowerDelayS is the delay of a POST /power without delay_s. It is also the delay an approval must have
+// been given for when the request names none.
+const defaultPowerDelayS = 60
+
 // NewPower returns the power controller.
 func NewPower(exec PowerExec, minDelayS int) *Power {
 	return &Power{exec: exec, minDelay: minDelayS, now: time.Now}
@@ -189,7 +193,7 @@ func (p *Power) Handle(req PowerRequest) (int, map[string]any) {
 	default:
 		return 400, map[string]any{"error": "action must be shutdown, reboot, sleep or cancel"}
 	}
-	delay := 60
+	delay := defaultPowerDelayS
 	if req.DelayS != nil {
 		delay = *req.DelayS
 	}

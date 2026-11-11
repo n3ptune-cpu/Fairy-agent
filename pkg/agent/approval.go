@@ -5,6 +5,17 @@ package agent
 //
 // Windows with the helper: the helper checks, and this agent is not trusted by it. The agent only carries the
 // challenge, the first-time trust and each request's "approval" field to the helper and the answers back.
+//
+// Everywhere else there is no helper: the agent itself is the checker (Deps.Approval), with the same trust
+// file, the same routes and the same rules. That protects against a panel that was taken over and against a
+// stolen control token; it does not protect against this agent process being taken over, because the process
+// is the one that checks.
+//
+// What needs an approval while trust is set, on every system: POST /fan/duty and /fan/mode, POST /power with
+// shutdown, reboot or sleep, POST /update. What never does: POST /power cancel, POST /wol and POST /bmc/power
+// (they wake machines; the relay has no "off"), POST /helper/stop and /start (the service manager, and stop
+// only hands the fans back to the BMC), and everything the agent does by itself with nobody present (the fan
+// watchdog, fans to automatic when it stops).
 
 import (
 	"bytes"
@@ -15,6 +26,7 @@ import (
 	"net/http"
 
 	"github.com/n3ptune-cpu/Fairy-agent/pkg/agent/api"
+	"github.com/n3ptune-cpu/Fairy-agent/pkg/approval"
 )
 
 // approvalBody is the largest body of the routes that take an approval: a token of at most 8192 bytes and 64
@@ -39,12 +51,38 @@ func (a *Agent) helperApproval() (HelperApproval, bool) {
 // hasApproval reports whether something on this machine checks approvals (else the two routes answer 404
 // approval_disabled).
 func (a *Agent) hasApproval() bool {
+	if a.d.Approval != nil {
+		return true
+	}
 	_, ok := a.helperApproval()
 	return ok
 }
 
+// approved is this agent's own passkey check of a request that changes something; false: it answered already
+// and nothing may run. Without a gate of its own (Windows: the helper checks) it lets everything through. The
+// approval's challenge is used up here, before the request is carried out.
+func (a *Agent) approved(w http.ResponseWriter, req api.ApprovalRequest, ap *api.Approval) bool {
+	ref := a.d.Approval.Check(req, ap)
+	if ref == nil {
+		return true
+	}
+	writeRefusal(w, ref)
+	return false
+}
+
+func writeRefusal(w http.ResponseWriter, ref *approval.Refusal) {
+	body := map[string]any{"error": ref.Msg}
+	if ref.Code != "bad_request" {
+		body["code"] = ref.Code
+	}
+	writeJSON(w, ref.Status, body)
+}
+
 // approvalStatus is the "approval" block of GET /metrics.
 func (a *Agent) approvalStatus(ctx context.Context) (api.ApprovalStatus, bool) {
+	if a.d.Approval != nil {
+		return a.d.Approval.Status(), true
+	}
 	if h, ok := a.helperApproval(); ok {
 		return h.ApprovalStatus(ctx)
 	}
@@ -96,6 +134,15 @@ func (a *Agent) approvalChallenge(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 404, map[string]any{"error": "that is disabled on this agent", "code": code})
 		return
 	}
+	if a.d.Approval != nil {
+		c, ref := a.d.Approval.Challenge(req)
+		if ref != nil {
+			writeRefusal(w, ref)
+			return
+		}
+		writeJSON(w, 200, c)
+		return
+	}
 	h, _ := a.helperApproval()
 	st, body := h.Challenge(r.Context(), req)
 	writeJSON(w, st, body)
@@ -109,11 +156,22 @@ func (a *Agent) approvalTrust(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 400, map[string]any{"error": err.Error(), "code": api.CodeTrustInvalid})
 		return
 	}
+	defer func() {
+		a.cacheMu.Lock()
+		a.cache = nil // the next GET /metrics shows the new state
+		a.cacheMu.Unlock()
+	}()
+	if a.d.Approval != nil {
+		st, ref := a.d.Approval.Init(in)
+		if ref != nil {
+			writeRefusal(w, ref)
+			return
+		}
+		writeJSON(w, 200, st)
+		return
+	}
 	h, _ := a.helperApproval()
 	st, body := h.TrustInit(r.Context(), in)
-	a.cacheMu.Lock()
-	a.cache = nil // the next GET /metrics shows the new state
-	a.cacheMu.Unlock()
 	writeJSON(w, st, body)
 }
 
