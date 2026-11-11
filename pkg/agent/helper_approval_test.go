@@ -237,6 +237,9 @@ func TestApprovalThroughAgentAndHelper(t *testing.T) {
 		"not an object":    {[]string{"apply_update"}, 400},
 		"a wrong type":     {map[string]any{"verb": "fan_set", "zone": "0", "percent": 50}, 400},
 		"a value too high": {map[string]any{"verb": "fan_set", "zone": 0, "percent": 101}, 400},
+		// values the request text allows and the helper does not (its own limits: 30 % at least, 10 s at least)
+		"a duty the helper never sets":  {map[string]any{"verb": "fan_set", "zone": 0, "percent": 20}, 400},
+		"a delay the helper never uses": {map[string]any{"verb": "power", "action": "reboot", "delay_s": 5}, 400},
 	} {
 		if st, b := r.post(t, api.PathApprovalChallenge, c.body); st != c.status || b["challenge"] != nil {
 			t.Errorf("challenge for %s: %d %v", name, st, b)

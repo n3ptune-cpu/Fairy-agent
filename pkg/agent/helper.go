@@ -655,6 +655,10 @@ func (c *HelperClient) approvalCall(ctx context.Context, req proto.Request) (int
 			"error": "the running fairy-agent-helper is older than this agent and knows no approvals (restart it: Restart-Service fairy-agent-helper)"}
 	}
 	r, err := c.Call(ctx, req)
+	var bad *proto.Error
+	if errors.As(err, &bad) { // the request itself is not one the helper takes (a value outside its limits): not sent
+		return 400, map[string]any{"error": bad.Msg}
+	}
 	if err != nil {
 		reason := helperReason(err)
 		msg := "helper stopped: start fairy-agent-helper"
