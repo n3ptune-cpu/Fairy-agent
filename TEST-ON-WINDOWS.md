@@ -396,9 +396,17 @@ installer again", says what that keeps and what it moves aside.
 
 ## 13. Passkey approval (next release): a self-built agent on the test VM
 
-**None of this has run on Windows.** The checking code was tested on Linux with a made-up Pocket ID; the
-Windows parts (the helper's folder, the pipe, the service) were only compiled. Do this on the test VM
-(NSX-TEST-VM), not on a PC you use.
+**What has run.** Steps 1 to 29 of the first version of this list were run on the test VM (NSX-TEST-VM,
+Windows 11) on 2026-11-11 with the first version of the code, and all passed: the helper with the check,
+`helper-trust`, the trust file's permissions, a damaged file, the file the helper wrote itself. **This is the
+list for the second version** (after the security review). What is new or changed is marked **[NEW]**; none of
+the new parts has run on Windows. The checking code was tested on Linux with a made-up Pocket ID. Do this on
+the test VM, not on a PC you use.
+
+What changed for you: the panel's first-time set (`POST /approval/trust`) is now accepted only with a passkey
+approval that fits the proposed values. A plain POST, as step 26 used to send it, is **refused**; that refusal
+is the test. The accepted path needs the panel (later). To get the VM to "required" for the other steps, the
+trust is set on the VM itself with `helper-trust set`.
 
 What you need on the VM, in `C:\fairy-selfbuilt\`:
 
@@ -408,27 +416,35 @@ What you need on the VM, in `C:\fairy-selfbuilt\`:
 
 How to read it: one step is one line, in **Windows PowerShell as Administrator**; after `->` is what a good
 answer looks like. Steps 1 to 5 install. Steps 6 to 12 only read or set the trust. From step 13 on, requests
-are sent to the agent; every shutdown that is sent has a delay of 10 minutes and is cancelled in the next step.
-**[KEY]** marks the steps whose output matters most.
+are sent to the agent; every shutdown that is sent is cancelled in the next step.
+**[KEY]** marks the steps whose output matters most. Keep the Administrator window open until the end: once a
+trust is set, only that window can undo it. All control requests together are limited to 12 a minute
+(`control_rate_per_min`); typed by hand you do not reach that, a script has to pace itself (answer `429`).
 
 ### A. Install the self-built agent over build 16
 
 1. What is installed now.
    `& "C:\Program Files\Fairy\fairy-agent.exe" version`
    -> `fairy-agent 16-...`
-2. Allow the script in this window.
+2. Allow the script in this window, and read which address the firewall lets in.
    `Set-ExecutionPolicy -Scope Process Bypass`
+   `(Get-NetFirewallRule -DisplayName "Fairy agent (Tailscale only)" | Get-NetFirewallAddressFilter).RemoteAddress`
+   -> the panel's address as the VM was paired with (the test panel: `192.168.10.10`), or `100.64.0.0/10`.
 3. Install. It stops both services, replaces the program, sets the services up again and starts them.
-   `& "C:\fairy-selfbuilt\install-fairy-agent.ps1" -Helper -Quiet`
+   **Give it the address of step 2** (`192.168.10.10` is an EXAMPLE VALUE: the test panel). The installer
+   always writes the firewall rule anew; without `-PanelAddress` it writes `100.64.0.0/10` (Tailscale only),
+   and a test panel on another network can no longer reach the VM until Re-pair.
+   `& "C:\fairy-selfbuilt\install-fairy-agent.ps1" -Helper -Quiet -PanelAddress 192.168.10.10`
    -> a yellow warning `No SHA256SUMS next to this script` (expected: a self-built program has none), no red
-   error, at the end `fairy-agent` and `fairy-agent-helper` Running.
+   error, at the end `fairy-agent` and `fairy-agent-helper` Running. Step 2's second line again shows the same
+   address as before.
 4. The new program is in place.
    `& "C:\Program Files\Fairy\fairy-agent.exe" version`
-   -> the version the program was built with (`dev`, or what was given at build time).
+   -> the version the program was built with (`16-selfbuilt`, or `dev`).
 5. **[KEY]** The helper answers and knows approvals.
    `& "C:\Program Files\Fairy\fairy-agent.exe" helper-status`
-   -> `helper: running`, a JSON line with `"proto":2`, then `pipe protocol:   2` and
-   `approval:        off (checked by the helper)`.
+   -> `helper: running, answers on \\.\pipe\fairy-agent-helper`, a JSON line with `"proto":2`, then
+   `pipe protocol:   2` and a line that starts with `approval:        off (checked by the helper)`.
 
 ### B. Set the trust on the PC
 
@@ -437,27 +453,32 @@ text works for the steps below if that client does not exist yet), your user id 
 
 6. No trust yet.
    `& "C:\Program Files\Fairy\fairy-agent.exe" helper-trust show`
-   -> `approval:        off (no trust file ...)`
+   -> a first line `trust file:       <path>`, then `approval:        off (no trust file ...)`
 7. Set it. It fetches Pocket ID's signing key, shows it and asks; answer `yes`.
    `& "C:\Program Files\Fairy\fairy-agent.exe" helper-trust set --issuer https://id.example.org --client-id EXAMPLE-CLIENT-ID --user EXAMPLE-USER-ID`
    -> `to be written:`, the issuer, `pinned key:      kid ..., RS256, thumbprint ...`, `allowed users:   1`,
-   `signing keys:    fetched just now from https://...`, then `written.`
+   `signing keys:    fetched just now from https://...`, then a line that starts with `written.`
+   **[NEW]** and under it `NOT PROVEN: ...` (the command writes what it is given; only the panel's first-time
+   set is checked against a real approval). **[NEW]** If a line `note: THE CLOCK: ...` shows: the VM's clock
+   and Pocket ID's differ by more than 45 s; set the VM's clock (`w32tm /resync`) before going on.
    If it says `the issuer calls itself ...`: use exactly that spelling for `--issuer`.
 8. **[KEY]** The helper sees it (wait 5 seconds first).
    `& "C:\Program Files\Fairy\fairy-agent.exe" helper-status`
-   -> `approval:        required (checked by the helper)`, `issuer:`, `client id:`, `pinned key:`,
+   -> `approval:        required (checked by the helper)...`, `issuer:`, `client id:`, `pinned key:`,
    `allowed users:   1`, `fan window:      30 s ...`, `shutdown after boot: off ...`
 9. Who may change the file.
    `icacls "C:\ProgramData\fairy-agent\helper\approval-trust.json"`
    -> `BUILTIN\Administrators:(I)(F)`, `NT AUTHORITY\SYSTEM:(I)(F)`, `NT SERVICE\fairy-agent:(I)(RX)`; no
-   other account with `(F)`, `(M)` or `(W)`.
+   other account with `(F)`, `(M)` or `(W)`. (On a Windows in another language the first two names are
+   translated; what counts is that only Administrators and SYSTEM have more than read.)
 
 ### C. Requests without an approval are refused
 
 10. Where the agent listens.
     `Select-String -Path "C:\ProgramData\fairy-agent\logs\agent.log" -Pattern "fairy-agent listening" | Select-Object -Last 1`
     -> a line with `listen=<address>:9101`
-11. Remember the address (type the one from step 10) and the two tokens.
+11. Remember the address (type the one from step 10) and the two tokens. (The two files are where config.yaml
+    says: `fairy-agent config get token_file` and `... control_token_file`; the lines below are the defaults.)
     `$base = "http://100.64.0.10:9101"`
     `$ctl = Get-Content "C:\ProgramData\fairy-agent\control-token"`
     `$read = Get-Content "C:\ProgramData\fairy-agent\token"`
@@ -466,7 +487,7 @@ text works for the steps below if that client does not exist yet), your user id 
     `Set-Content -Path "C:\fairy-selfbuilt\cancel.json" -Value '{"action":"cancel"}' -Encoding ASCII`
     `Set-Content -Path "C:\fairy-selfbuilt\challenge.json" -Value '{"verb":"power","action":"shutdown","delay_s":600}' -Encoding ASCII`
 13. **[KEY]** A shutdown without approval. (Needs `power_control: enabled: true` in config.yaml; if the answer
-    is `power control is disabled on this agent`, switch it on first:
+    has `"code":"power_control_disabled"`, switch it on first:
     `& "C:\Program Files\Fairy\fairy-agent.exe" config set power_control.enabled true`, then
     `Restart-Service fairy-agent-helper`, `Restart-Service fairy-agent`.)
     `curl.exe -s -w " [%{http_code}]" -H "Authorization: Bearer $ctl" --data-binary "@C:\fairy-selfbuilt\shutdown.json" "$base/power"`
@@ -500,7 +521,7 @@ text works for the steps below if that client does not exist yet), your user id 
     `& "C:\Program Files\Fairy\fairy-agent.exe" helper-trust set --from "C:\fairy-selfbuilt\trust-backup.json" --yes`
     -> `written.`; step 8 again shows `required`.
 
-### E. The first-time set from the panel, and the lock
+### E. The first-time set from the panel needs a proof; the lock
 
 23. Remove the trust on the PC.
     `& "C:\Program Files\Fairy\fairy-agent.exe" helper-trust clear --yes`
@@ -508,47 +529,99 @@ text works for the steps below if that client does not exist yet), your user id 
 24. After 5 seconds the shutdown request of step 13 is accepted, as before this change. Cancel it at once
     (step 14).
     -> `{"action":"shutdown","pending":{...}} [200]`, Windows shows its shutdown notice; after step 14 it is gone.
-25. What the panel would send as the first trust: the four values of the copy.
+25. What a panel without a proof would send as the first trust: the four values of the copy. (The route
+    refuses any other member, so only these four. If your PowerShell's `ConvertTo-Json` writes them
+    differently and step 26 answers `400`, send that answer.)
     `Get-Content "C:\fairy-selfbuilt\trust-backup.json" -Raw | ConvertFrom-Json | Select-Object issuer, client_id, keys, users | ConvertTo-Json -Depth 5 | Set-Content -Path "C:\fairy-selfbuilt\trust-init.json" -Encoding ASCII`
-26. **[KEY]** Send it as the panel would.
+26. **[KEY] [NEW]** Send it as the panel would, WITHOUT the approval that proves it. It must be refused.
     `curl.exe -s -w " [%{http_code}]" -H "Authorization: Bearer $ctl" --data-binary "@C:\fairy-selfbuilt\trust-init.json" "$base/approval/trust"`
-    -> `{"state":"required","enforced_by":"helper",...} [200]`
-27. **[KEY]** The file the HELPER wrote passes the helper's own check (this is the step most likely to show a
-    wrong guess about Windows: it uses a hard link and inherited permissions).
+    -> `{"code":"proof_required","error":"a first-time set of the trust needs a passkey approval that proves it works: ... Nothing was written"} [403]`
+26b. **[NEW]** The helper gives a challenge for a first-time set (the hash here is 43 times `A`, a made-up one;
+    the panel sends the hash of the values it proposes).
+    `Set-Content -Path "C:\fairy-selfbuilt\challenge-trust.json" -Value '{"verb":"trust_set","trust_hash":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}' -Encoding ASCII`
+    `curl.exe -s -w " [%{http_code}]" -H "Authorization: Bearer $ctl" --data-binary "@C:\fairy-selfbuilt\challenge-trust.json" "$base/approval/challenge"`
+    -> `{"needed":true,"request":"trust_set hash=AAAA...","challenge":"<43 characters>","expires_in_s":180} [200]`
+    (no `issuer`, no `client_id`: the machine has none yet).
+27. **[KEY] [NEW]** Nothing was written and nothing is locked.
     `& "C:\Program Files\Fairy\fairy-agent.exe" helper-status`
-    -> `approval:        required (checked by the helper)`. If it says `broken`: send the `reason:` line
-    and the output of step 9.
-28. Step 26 again: locked.
+    -> `approval:        off (checked by the helper)...`
+    `Get-ChildItem -Force "C:\ProgramData\fairy-agent\helper"`
+    -> no `approval-trust.json` and no file whose name starts with `.approval-trust-`.
+28. **[NEW]** Set the trust on the PC (from the copy), then try the panel's set again: locked.
+    `& "C:\Program Files\Fairy\fairy-agent.exe" helper-trust set --from "C:\fairy-selfbuilt\trust-backup.json" --yes`
+    -> `written.` and `NOT PROVEN: ...`. Wait 5 seconds, then step 26's line again:
     -> `{"code":"already_set","error":"this machine already has a trust file; ..."} [409]`
+    and step 26b's line again -> `[409]` `already_set` (no challenge for a second set either).
 29. Step 13 again -> `[403]` `approval_required`.
+
+### E2. Three more checks **[NEW]** (the security review asked for them)
+
+N1. The trust file has one name, and no temporary file was left behind.
+    `fsutil hardlink list "C:\ProgramData\fairy-agent\helper\approval-trust.json"`
+    -> exactly one line (`\ProgramData\fairy-agent\helper\approval-trust.json`).
+    `Get-ChildItem -Force "C:\ProgramData\fairy-agent\helper" | Where-Object { $_.Name -like ".approval-*" }`
+    -> nothing.
+N2. **[KEY]** An update is refused while the helper cannot be asked. (Trust is set, from step 28. If the answer
+    has `"code":"self_update_disabled"`, self-update is off on this VM and the step says nothing.)
+    `Stop-Service fairy-agent-helper`
+    `Restart-Service fairy-agent`
+    wait until step 17's line answers again (some seconds), then:
+    `curl.exe -s -w " [%{http_code}]" -H "Authorization: Bearer $ctl" --data-binary "{}" "$base/update"`
+    -> `{"code":"approval_unavailable","error":"the update was not started: the helper, which checks the approval of an update on this machine, is not answering, and this machine has an approval trust file (start it: ...)"} [503]`
+    The words after "is not answering" matter, please send the line: `and this machine has an approval trust
+    file` = the agent's own account could read and check the helper's folder (good). `cannot be used` or
+    `is not known` = it could not; the update is refused all the same, but then the agent's own check does
+    not work on Windows yet.
+    `Start-Service fairy-agent-helper`
+    -> `helper-status` says `helper: running` again.
+N3. The shutdown shortly after boot takes no long delay. (No restart needed: a delay of a day must be refused
+    whatever the uptime is.)
+    `& "C:\Program Files\Fairy\fairy-agent.exe" helper-trust set --boot-shutdown 900 --yes`
+    wait 5 seconds, then:
+    `Set-Content -Path "C:\fairy-selfbuilt\shutdown-day.json" -Value '{"action":"shutdown","delay_s":86400}' -Encoding ASCII`
+    `curl.exe -s -w " [%{http_code}]" -H "Authorization: Bearer $ctl" --data-binary "@C:\fairy-selfbuilt\shutdown-day.json" "$base/power"`
+    -> `[403]` `approval_required`; then the cancel of step 14 (to be sure), and switch the setting off again:
+    `& "C:\Program Files\Fairy\fairy-agent.exe" helper-trust set --boot-shutdown 0 --yes`
 
 ### F. Optional: one shutdown shortly after boot (for wake, update, shut down)
 
 30. Allow one shutdown without approval in the first 15 minutes after Windows starts.
     `& "C:\Program Files\Fairy\fairy-agent.exe" helper-trust set --boot-shutdown 900 --yes`
 31. Restart the VM (**Restart**, not shut down and power on), sign in, open PowerShell as Administrator, do
-    step 11 again, then within 15 minutes of the start send the shutdown of step 13.
+    step 11 again, then within 15 minutes of the start send the shutdown of step 13 (delay 600 s: the longest
+    this exception takes).
     -> `[200]`; cancel it (step 14). `helper.log` has `UNAPPROVED shutdown accepted shortly after boot` with
     `uptime_s=`. Please send that line: the number shows whether Windows' clock counts as assumed.
 32. The same request again -> `[403]` `approval_required` (only one).
+32b. **[NEW]** One per boot, not one per start of the helper: `Restart-Service fairy-agent-helper`, wait until
+    `helper-status` says running, the same request again -> still `[403]`. The record is
+    `C:\ProgramData\fairy-agent\helper\approval-boot-shutdown.json`.
 33. Switch it off again.
     `& "C:\Program Files\Fairy\fairy-agent.exe" helper-trust set --boot-shutdown 0 --yes`
 
 ### What to send back
 
-The output of steps 5, 8, 9, 13, 15, 20, 26, 27 (and 31 if done), and:
+The output of steps 5, 8, 9, 13, 15, 20, 26, 26b, 27, 28, N1, N2 (and 31, 32b if done), and:
 `Get-Content "C:\ProgramData\fairy-agent\helper\helper.log" -Tail 60`. If the helper did not start after
 step 3: Event Viewer > Windows Logs > Application, source `fairy-agent-helper`.
 
-Not testable yet: an approved request. That needs a real token from Pocket ID, which only the panel half
-(next) obtains. When it exists: press Shut down on the VM's page in the test panel, confirm with the passkey,
-and send the `approval: accepted` or `approval: refused` line of `helper.log`.
+Not testable yet: the first-time set that is accepted, and an approved request. Both need a real token from
+Pocket ID, which only the panel half (next) obtains. When it exists: on a VM without trust, let the panel set
+it (one passkey confirmation) and send the `trust set for the first time ... proven by a passkey approval`
+line of `helper.log`; then press Shut down on the VM's page, confirm with the passkey, and send the
+`approval: accepted` or `approval: refused` line.
+
+Not testable on this VM: fan control that the agent carries out itself (`ipmi.transport: ipmitool`) next to
+the helper. On a PC set up that way: with trust set, `POST /fan/mode` without approval must answer `403
+approval_required`, and `/metrics` must show `"agent_checks":["fan_set","fan_mode"]` in the `approval` block.
 
 ### Going back to build 16
 
 `& "C:\Program Files\Fairy\fairy-agent.exe" helper-trust clear --yes`, then **Re-pair** on the VM's page in
-the test panel and run the line it shows (a program without a build number is replaced by the release).
-`helper\approval-trust.json` is the only new file; build 16 ignores it.
+the test panel and run the line it shows. It puts released build 16 back: the installer replaces a program
+whose build number is not higher, and `16-selfbuilt` (build number 16) is not higher than 16. A program built
+without a version (`dev`) is replaced as well. `helper\approval-trust.json` and
+`helper\approval-boot-shutdown.json` are the only new files; build 16 ignores them.
 
 ## Rollback (back to build 10 / v0.4.4)
 

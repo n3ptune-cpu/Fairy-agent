@@ -367,8 +367,9 @@ Since 0.5.0 (release build 11 or later) fairy-agent on Windows is two services t
 BMC's readings), `fan_status`, `fan_set` (zone 0 or 1, 30-100 %), `fan_mode` (standard, full, optimal or
 heavyio), `fan_auto` (back to the BMC's automatic mode), `power` (shutdown, reboot or sleep after 10 s to 24 h,
 or cancel), `apply_update` (starts the signature-checking updater service, nothing else), and for the passkey
-approval `challenge` (a challenge for one exact fan, power or update request) and `trust_init` (the first
-approval trust, accepted once; see [Passkey approval](#passkey-approval-of-fan-power-and-update-requests-pocket-id)).
+approval `challenge` (a challenge for one exact fan, power or update request, or for the first-time set of
+the trust) and `trust_init` (the first approval trust, accepted once and only with an approval that fits it;
+see [Passkey approval](#passkey-approval-of-fan-power-and-update-requests-pocket-id)).
 With a trust file in its folder the helper runs `fan_set`, `fan_mode`, `power` (other than cancel) and
 `apply_update` only with an approval it has verified itself. No request takes a
 path, a command or free text; anything else is refused, as are requests over 512 bytes (the two new requests
@@ -973,9 +974,16 @@ pinned. The panel cannot skip the check, because the panel is not the one who ch
 
 | Machine | Who checks | Protects against | Does not protect against |
 | --- | --- | --- | --- |
-| Windows with the helper | `fairy-agent-helper` (LocalSystem, no network). The agent only passes things on and is not trusted | a taken-over panel, a stolen control token, a taken-over agent process | an administrator on the PC |
+| Windows with the helper | `fairy-agent-helper` (LocalSystem, no network), for everything it carries out. The agent only passes things on and is not trusted | a taken-over panel, a stolen control token, a taken-over agent process | an administrator on the PC |
 | Linux (and every system but Windows) | the agent process itself | a taken-over panel, a stolen control token | a taken-over agent process: it is the checker |
-| Windows without the helper | nobody | | |
+| Windows, what the agent carries out itself, without the helper: fans driven over the network (`ipmi.transport: ipmitool`); power, fans and update of an agent that was started before the helper was installed, or after it was removed | the agent process itself, with the helper's trust file (it reads it, it cannot change it) | a taken-over panel, a stolen control token | a taken-over agent process |
+| Windows without the helper and without a trust file | nobody: nothing is checked, and there is no way to set a trust there | | |
+
+The rule is the same everywhere: **while trust is set, each request that needs an approval is checked by the
+program that carries it out.** `GET /metrics` says who that is: `"enforced_by"`, and on a Windows machine where
+the agent carries some requests out itself also `"agent_checks": ["fan_set", "fan_mode"]` (those requests are
+the agent's to check; the helper checks the rest). The panel does not have to know: it asks
+`POST /approval/challenge`, and whoever will check answers.
 
 **What needs an approval** while trust is set:
 
@@ -997,9 +1005,19 @@ always did. `GET /metrics` says `"approval": {"state": "off", ...}`.
 The trust is four things: Pocket ID's address (issuer), the client id of the Pocket ID client "Fairy PC
 actions", Pocket ID's signing key(s), and the users who may approve (their id in Pocket ID, the token's `sub`).
 
-* **The first time, from the panel.** While a machine has no trust file, the panel can set the trust once
-  (`POST /approval/trust`). Why this is safe enough: without trust a panel can already do everything, so
-  letting it set the trust once is never worse than "off". From that moment the machine checks.
+* **The first time, from the panel, with a proof that it works.** While a machine has no trust file, the panel
+  can set the trust once (`POST /approval/trust`), and only together with a passkey approval that fits the
+  very values it proposes: the panel asks the machine for a challenge for "set this trust" (bound to a hash of
+  the proposed issuer, client, keys and users), you confirm once at Pocket ID as for any action, and the
+  machine checks that token against the proposed values exactly as it will check every approval afterwards.
+  Only then does it write the trust file. So a wrong spelling of the issuer, the wrong client id or user id,
+  an old key, or a machine whose clock is off, is found out **before** the machine locks: the set is refused
+  (`403 proof_refused`, the text says which check failed; without any approval `403 proof_required`), nothing
+  is written, and the panel can try again. One confirmation can switch on many machines at once.
+  Why letting the panel do this is safe enough: without trust a panel can already do everything, so letting
+  it set the trust once is never worse than "off". What the proof does not do: stop a panel that is already
+  taken over at that moment. It would propose its own Pocket ID and prove against that. Look at the issuer
+  and the key thumbprint in `helper-status` / `helper-trust show` after the first set.
 * **After that, only on the machine.** Once a trust file exists (usable or damaged), every attempt to set,
   change or remove it from the network is refused (`409 already_set`), always, also with a valid approval.
   Another signing key after a key rotation at Pocket ID, other users, the two settings below, switching the
@@ -1023,15 +1041,35 @@ fairy-agent helper-trust set --issuer https://id.example.org --client-id <client
   `jwks_uri` named there, which must be on the same host; redirects are not followed). `--jwks FILE` takes
   them from a file instead. Compare the thumbprint with Pocket ID's before you answer yes. A change is in
   effect within 5 seconds; nothing has to be restarted.
+
+  **`set` on the machine proves nothing.** Unlike the panel's first-time set it needs no approval (you are at
+  the machine), so it writes what it is given, and says so (`NOT PROVEN`). If the issuer, the client id or a
+  user id is wrong, or the clock is off, the first approval is refused. So approve one action from the panel
+  right after a `set`, while you are still at the machine; `helper-trust clear` undoes it. When `set` fetches
+  the keys itself it also compares the machine's clock with Pocket ID's and warns when they are more than
+  45 s apart.
 * **At install time.** The installers take no trust parameters yet. Until they do, a new machine is covered by
   the panel's first-time set at first contact, or by the last line of the block above right after installing.
 
-**The trust file.** `approval-trust.json`. Windows: `C:\ProgramData\fairy-agent\helper\` (the helper's folder:
-only Administrators and SYSTEM change it, the agent's account can read it). Linux:
-`/var/lib/fairy-agent/` (the agent's state folder, because the agent writes the file itself at the first-time
-set; written by root with `helper-trust set` it is `root:fairy-agent`, mode 0640). It holds no secret. The
-folder and the file are checked every time before the file counts: on Windows like the helper's other files
-(owner and access list), on Linux owner root or the agent's user and not writable by group or others.
+**The trust file.** `approval-trust.json`. It holds no secret. Windows: `C:\ProgramData\fairy-agent\helper\`
+(the helper's folder: only Administrators and SYSTEM change it, the agent's account can read it). The folder
+and the file are checked like the helper's other files (owner and access list) every time before the file
+counts.
+
+**Linux: whose file it is.** `/var/lib/fairy-agent/approval-trust.json`, in the agent's state folder, because
+the agent itself writes it at the first-time set. That folder belongs to the agent's service user
+(`fairy-agent`, mode 0700; `root` when the agent runs as root), and whoever owns a folder can replace any file
+in it. So on Linux the trust file is the service user's, whatever its own owner says, and that is honest: the
+agent process is the checker there anyway. What is checked before the file counts: the folder and the file
+belong to root or to the agent's own user, nobody else can write them, and the file is a plain file with one
+name. A folder that fails this (group-writable, another owner) is `broken` even with no trust file in it,
+and fan, power and update requests are then refused until the folder is put right
+(`chown fairy-agent:fairy-agent /var/lib/fairy-agent; chmod 0700 /var/lib/fairy-agent`).
+`fairy-agent helper-trust` is root's command (`sudo`). In the agent's folder it does its file work as the
+agent's user, not as root: `show` tells you what the running agent sees (and says `checked as: uid N`),
+`set` and `clear` work on the file the panel's first-time set left there, and the file `set` writes is again
+the service user's, mode 0600. A local user who is neither root nor `fairy-agent` can neither read nor change
+anything (the folder is 0700).
 
 **A damaged trust file never means "off".** If the file is there but cannot be used (not valid, wrong owner
 or permissions, a link, a folder others can write), the state is `broken` and every request that would need an
@@ -1047,10 +1085,16 @@ only root / Administrators (Linux: or the agent's own user) can remove it.
 * `boot_shutdown_s` (default 0 = off, at most 900): the machine accepts **one** shutdown (not reboot, not
   sleep) without approval while it has been up for less than this many seconds. For machines that are switched
   on only to be updated and switched off again. Each use is written to the log as
-  `UNAPPROVED shutdown accepted shortly after boot`. "One" is per start of the helper / agent: restarting that
-  service inside the window allows another one, still only a shutdown and only inside the window. Windows:
-  "up" is the time since Windows started (GetTickCount64); after a shutdown with Fast Startup that clock does
-  not start at zero, so the setting then does not apply (every shutdown needs an approval).
+  `UNAPPROVED shutdown accepted shortly after boot`. The request may ask for a delay of at most 600 s (it is
+  for "switch off again now", not for a shutdown that happens a day later). "One" is one per boot: the use is
+  recorded next to the trust file (`approval-boot-shutdown.json`), so restarting the helper / agent inside the
+  window gives no second one. Linux tells boots apart by the kernel's boot id. Windows has none; there the
+  record counts for the current boot unless it was made clearly before Windows started, by the clock (after a
+  clock that jumped forward by more than the uptime, or sleep inside the window, one more could be accepted).
+  If the record cannot be read or written, no shutdown is accepted without approval. Windows: "up" is the time
+  since Windows started (GetTickCount64); after a shutdown with Fast Startup that clock does not start at
+  zero, so the setting then does not apply (every shutdown needs an approval). Only what the helper carries
+  out can use it on Windows.
 
 ### How one approval works
 
@@ -1070,7 +1114,16 @@ exact formats are in `pkg/agent/api/approval.go`.
 
 **Clock.** The machine's clock must be within 60 s of Pocket ID's. If it is further off, approvals are refused
 (the answer says `clock` or `auth_time`); nothing is ever accepted because of a wrong clock. Fix:
-`w32tm /resync` (Windows), `timedatectl` (Linux).
+`w32tm /resync` (Windows), `timedatectl` (Linux). The panel's first-time set finds a wrong clock before the
+machine locks (its proof is refused with `clock`).
+
+**What "fresh passkey check" means exactly.** The machine checks that your last authentication at Pocket ID
+(`auth_time`) is not more than 60 s older than the moment it gave the challenge. The 60 s are there because
+the two times come from two clocks. This shows that you authenticated around the time of the request; it does
+not show that the passkey was touched *for* this request. That part is Pocket ID's: keep **Requires
+Re-Authentication** switched ON for the client "Fairy PC actions". With it on, Pocket ID asks for the passkey
+at every approval. If it were off, a taken-over panel could get a token without any click right after you
+signed in to anything at Pocket ID. The machine cannot see that switch.
 
 **The log.** Every accepted and every refused approval is one line: the request, accepted or refused and why,
 the user (`sub`), the key id and the first 8 characters of the challenge. Never the token. Windows:
@@ -1080,17 +1133,28 @@ the user (`sub`), the key id and the first 8 characters of the challenge. Never 
 "enforced_by": "helper" | "agent", "proto": 1, "issuer": ..., "client_id": ..., "keys": [{"kid", "alg",
 "thumbprint"}], "users": <how many>, "fan_window_s": ..., "boot_shutdown_s": ..., "error": ...}`. No user ids
 and no keys, only how many users and each key's thumbprint. `unknown`: the Windows helper is not answering.
-No `approval` block: an agent from before this, or Windows without the helper. Refusals: `403
-approval_required` (none sent), `403 approval_refused` (sent, not accepted; the text says why),
-`503 approval_unavailable` (broken trust file).
+`"agent_checks": [...]` (Windows): the requests the agent carries out and checks itself; `"agent_error"`: why
+it cannot (those are then refused). No `approval` block: an agent from before this, or Windows without the
+helper and without a trust file. Refusals: `403 approval_required` (none sent), `403 approval_refused` (sent,
+not accepted; the text says why), `503 approval_unavailable` (broken trust file, or nothing that could check
+is reachable). For the first-time set: `403 proof_required`, `403 proof_refused`, `409 already_set`.
 
 **Updates on Windows.** The Windows agent starts the updater service with its own right, which the helper
 never sees. So while the helper's check is on, the agent refuses `POST /update` without an approval itself,
 and with one it lets the **helper** start the installer, which checks the approval then (after the download;
 that is why an update's challenge lives 900 s). A refusal at that point shows as a failed update
-(`starting the installer: helper: approval refused ...`). This is the agent keeping to the rule: an agent
-process that was taken over can still start the updater service directly. That service installs only a newer
-release signed with the release key, nothing else.
+(`starting the installer: helper: approval refused ...`), and what was downloaded for it is removed again.
+The agent finds the state out when the request arrives: it asks the helper at that moment, and when the
+helper does not answer (stopped, starting, the PC has just booted) it looks at the trust file itself. Only
+"there is no trust file" lets an update through without approval. A helper that cannot be reached while a
+trust file exists means `503 approval_unavailable` and nothing is downloaded: start the helper first. This is
+the agent keeping to the rule: an agent process that was taken over can still start the updater service
+directly. That service installs only a newer release signed with the release key, nothing else.
+
+**The Windows repair and the trust file.** `install` / `setup-self-update` move anything in the data folder
+that somebody else could have written out of the way (`untrusted-<time>\`). If that is the trust file, approval
+is off afterwards; the repair says so in capital letters (`ATTENTION`) and names the command that switches it
+back on. For a trust file that is merely damaged, use `helper-trust set` or `clear`, not the repair.
 
 **Not solved by this.** Pocket ID's page shows the name "Fairy PC actions", not the action. A taken-over panel
 can ask you to approve one action while it shows another. What the machine guarantees is: the action it runs
@@ -1480,11 +1544,16 @@ on the first install and report anything odd:
   entry on a failed start, automatic restart;
 * CPU %, memory, disks, network counters, uptime, OS name and hardware strings (registry);
 * ACPI thermal-zone temperatures (PDH);
-* **the passkey approval** (TEST-ON-WINDOWS.md, section 13; none of it has run on Windows, and no real Pocket
-  ID token has been checked by it yet): the trust file written by the helper (hard link, inherited
-  permissions) passing the helper's own file check, `helper-trust` as Administrator, version 2 frames on the
-  real pipe, what `helper-status` prints, the clock difference to Pocket ID on real PCs, the size and header
-  of a real Pocket ID token, and whether GetTickCount64 behaves as described for `boot_shutdown_s`;
+* **the passkey approval** (TEST-ON-WINDOWS.md, section 13). Run on a Windows 11 test VM on 2026-11-11 with
+  the first version of this code, and found to work: the helper with the check, version 2 frames on the real
+  pipe, `helper-trust set / show / clear` as Administrator with keys fetched from a real Pocket ID, the trust
+  file's permissions, the file the helper wrote itself (hard link, inherited permissions) passing the helper's
+  own check, a damaged file refusing, `helper-status`. **Not yet run on Windows:** what changed after that
+  run: the first-time set that needs a proof (the refusal without one is step 26 of section 13; the accepted
+  path needs the panel), the agent's own check next to the helper (fans over `ipmitool`; the agent's account
+  reading and checking `helper\`), `POST /update` while the helper is stopped, the record of the shutdown
+  after boot. And still: a real Pocket ID token checked by a machine (its size and header, the clock
+  difference on real PCs), and whether GetTickCount64 behaves as described for `boot_shutdown_s`;
 * **0.6.0's security fixes** (TEST-ON-WINDOWS.md, section 12, is the checklist; none of this has run on
   Windows): the trust check and repair of the data folder (owners and access lists read from the objects
   themselves, the rename to `*.untrusted-<time>`, folders created with their final permissions), the updater
