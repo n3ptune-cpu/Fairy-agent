@@ -91,7 +91,7 @@ control_rate_per_min: 12       # fan / power / Wake-on-LAN / update requests per
 # (not for an agent merged into a Proxmox node: use power_links in the panel's agent entry instead).
 # env_file: /etc/fairy-agent/devices.env     # KEY=value lines for the *_env names below (0640 root:fairy-agent)
 power_sources: []
-  # - {id: desk-plug, type: tuya, name: "Desk plug", device_id: bf0123456789abcdef, ip: 192.168.1.60, local_key_env: TUYA_KEY_DESK, version: "3.4", system_hint: self}
-  # - {id: shelly-1, type: shelly, url: "http://192.168.1.61", password_env: SHELLY_PW}
+  # - {id: desk-plug, type: shelly, name: "Desk plug", url: "http://192.168.1.61", password_env: SHELLY_PW, system_hint: self}
+  # - {id: tasmota-1, type: tasmota, url: "http://192.168.1.62"}
 ups: []
   # - {id: local, host: 127.0.0.1, username: monuser, password_env: NUT_PASSWORD}

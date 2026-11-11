@@ -935,8 +935,11 @@ BMC, through AGENT-2)" while `agent-1` is offline and `agent-2` is online.
 
 When the panel cannot reach a smart plug or UPS itself (for example at a friend's place), the agent there can
 read it and pass the readings on. The entries are the same as in the panel's `power_sources:` and `ups:`
-(Shelly, Tasmota, Tuya, Redfish, NUT); passwords go into a separate file named by `env_file:` as
-`NAME=value` lines and stay on that machine. A Tasmota plug with a web password gets it the one way Tasmota
+(Shelly, Tasmota, Redfish, NUT); passwords go into a separate file named by `env_file:` as
+`NAME=value` lines and stay on that machine. Tuya plugs are no longer supported. An entry with `type: tuya`
+from an earlier version does not stop the agent: it is ignored, and the agent's log at start and
+`fairy-agent check-config` name it in one line (`power source "desk-plug": tuya is no longer supported and is
+ignored`). Remove the entry, and the plug's key from the `env_file`, when you next edit the file. A Tasmota plug with a web password gets it the one way Tasmota
 documents, in the address of the request (`/cm?user=...&password=...`), exactly as in earlier releases. That
 address is never logged and never part of an error message. It crosses the local network unencrypted:
 Tasmota speaks plain HTTP. One answer of a plug or a BMC is read up to 256 KiB of JSON with at most 8192 values,
@@ -945,7 +948,7 @@ too many values" or "is nested too deep" (a hostile or broken device could other
 memory with one answer). These limits are for one answer of one device: while an answer arrives, up to
 256 KiB of it are held for each device, so a great many devices that all send the largest allowed answer at
 the same moment (about 170 of them in an agent that may use 64 MiB) can still use the memory up. UPS servers
-(NUT) and Tuya plugs are read in another way and have limits of their own (see "Security in short"). Plugs
+(NUT) are read in another way and have limits of their own (see "Security in short"). Plugs
 send a few hundred bytes and a BMC's Power document 15 to 100 KiB, so this
 should never show. If it does for a BMC (`type: redfish` or `ipmi`), point `power_path:` at a smaller document
 of that BMC, for example `/redfish/v1/Chassis/<id>/EnvironmentMetrics`. `system_hint: self` links a plug to the agent's own machine, but
@@ -1163,7 +1166,9 @@ The file is `C:\ProgramData\fairy-agent\config.yaml` (Windows) or `/etc/fairy-ag
 | `log_file` | Windows: `C:\ProgramData\fairy-agent\logs\agent.log` (5 MB, one old copy); Linux: the journal | |
 
 Unknown settings are an error (so a typo does not silently do nothing). `fairy-agent check-config` checks the
-file and the tokens without starting anything.
+file and the tokens without starting anything. The one thing from an earlier version that is ignored instead, with
+a line in the log and in `check-config`, is a `power_sources` entry with `type: tuya`
+(see [Plugs and UPSes on this machine's network](#plugs-and-upses-on-this-machines-network)).
 
 ### Changing a setting from the command line
 
@@ -1299,7 +1304,7 @@ are lists of devices: edit those in the file.
 * Time limits on every connection; requests are small and bounded. What a UPS server (NUT) sends is bounded too
   (4 KiB per line, 1 MiB per poll, 64 UPSes), so one broken or hostile upsd cannot exhaust memory. (One such
   answer can cost the agent about 15 MiB for a moment, so about ten hostile upsd entries at once still can.
-  The limits of plug and BMC answers, 256 KiB each, do not apply to NUT and Tuya.)
+  The limits of plug and BMC answers, 256 KiB each, do not apply to NUT.)
 * The log cannot fill the disk: the log file is rotated at 5 MB (one old file kept), and the same message is
   written at most 30 times a minute (the rest are counted: `suppressed=N` on the next one).
 * Windows: the agent runs as its own virtual account with a single privilege; what needs more goes through the
