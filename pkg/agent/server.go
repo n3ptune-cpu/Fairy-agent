@@ -148,7 +148,11 @@ type Agent struct {
 	hasCtl  bool
 	control *limiter
 	badAuth *limiter
-	never   map[string]bool
+	// healthBad counts /health requests from this machine whose proof was wrong (health.go). It is not badAuth:
+	// that one is keyed by the address, which the update's health check shares with every local program.
+	healthBad *limiter
+	rootLane  bool // root's connections from this machine can be told from others (rootPorts)
+	never     map[string]bool
 
 	mu           sync.Mutex
 	lastLog      map[string]time.Time
@@ -173,6 +177,7 @@ type Agent struct {
 func New(cfg *Config, tokens Tokens, d Deps) *Agent {
 	a := &Agent{cfg: cfg, d: d, readH: sha256.Sum256([]byte(tokens.Read)),
 		control: newLimiter(cfg.ControlRatePerMin, time.Minute), badAuth: newLimiter(20, time.Minute),
+		healthBad: newLimiter(healthWrongPerMin, time.Minute), rootLane: rootPorts() > 0,
 		lastLog: map[string]time.Time{}, never: map[string]bool{}, now: time.Now, sampling: make(chan struct{}, 1),
 		tempWait: localTempWait, procWaiters: make(chan struct{}, maxProcessWaiters), fanStatuses: make(chan struct{}, maxFanStatus)}
 	if tokens.Control != "" {

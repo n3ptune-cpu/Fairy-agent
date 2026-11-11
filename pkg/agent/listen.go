@@ -813,6 +813,14 @@ func (c *limitedConn) Close() error {
 	return err
 }
 
+// Root reports whether the connection is in root's own slots: it comes from this machine and from a source
+// port only root can use (ConnLimits.RootPort).
+func (c *limitedConn) Root() bool {
+	c.l.mu.Lock()
+	defer c.l.mu.Unlock()
+	return c.sender == rootKey
+}
+
 // Vouch is called by the agent when a request with a valid token arrived on the connection.
 func (c *limitedConn) Vouch() { c.l.vouch(c) }
 

@@ -1224,7 +1224,14 @@ are lists of devices: edit those in the file.
   * `GET /health` is what the update installer asks after a swap. It answers only the update's own check on
     the machine itself, which first proves that it holds the read token. Every other request gets
     `404 {"error":"not found"}`, like any unknown path. The answer contains neither the token nor the version,
-    and gives nobody a value to test a guessed token against.
+    and another machine gets nothing to test a guessed token against. A program on the machine itself can try
+    guesses of the read token there, because only the right one is answered. Each try costs it a slow
+    computation, and a token made by `fairy-agent join` or `gen-token` cannot be guessed; a token you chose
+    yourself should be long and random. A wrong try is written to the agent's log (at most one line a minute).
+    On Linux, after 10 wrong tries in a minute further tries from the machine are not looked at for the rest
+    of that minute. The update's own check is not held up by that: root sends it from a port only root can
+    use. On Windows wrong tries are logged but not limited (the update's check cannot be told from another
+    local program there, and it must never be refused).
 * The join code is never an argument of a program: the install scripts and `fairy-agent join` take it from
   standard input or from the environment, and never print it. The old form with the code as an argument
   (`--join CODE`, `-Join CODE`, `fairy-agent join --code CODE`) is still accepted, prints a deprecation line
