@@ -104,12 +104,12 @@ func TestEncodeRequestValidates(t *testing.T) {
 }
 
 func TestEveryVerbHasASchema(t *testing.T) {
-	want := []string{"apply_update", "coretemp_read", "fan_auto", "fan_mode", "fan_set", "fan_status", "ipmi_sensors", "ping", "power", "status"}
+	want := []string{"apply_update", "challenge", "coretemp_read", "fan_auto", "fan_mode", "fan_set", "fan_status", "ipmi_sensors", "ping", "power", "status", "trust_init"}
 	if got := strings.Join(Verbs(), ","); got != strings.Join(want, ",") {
 		t.Fatal(got)
 	}
 	for _, v := range Verbs() {
-		if Control(v) != (v == "fan_set" || v == "fan_mode" || v == "fan_auto" || v == "power" || v == "apply_update") {
+		if Control(v) != (v == "fan_set" || v == "fan_mode" || v == "fan_auto" || v == "power" || v == "apply_update" || v == "challenge" || v == "trust_init") {
 			t.Error("control class of", v)
 		}
 	}

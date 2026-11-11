@@ -17,10 +17,30 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/n3ptune-cpu/Fairy-agent/pkg/agent/api"
 )
 
-// Version is the protocol version; a request with another "v" is refused.
-const Version = 1
+// Version is the protocol version of every request that existed before approvals. Nothing about those requests
+// or their frames changed, so an agent and a helper of different ages still understand each other for them.
+//
+// Version2 is the version of what is new: the verbs challenge and trust_init, and any request that carries an
+// approval. Such a request says so twice: "v": 2 in the JSON, and the FrameV2 bit in the frame's length prefix
+// (only frames with that bit may be longer than MaxRequest). Each request has exactly one version: a Version2
+// frame holds only requests that need Version2, a plain frame only the others.
+//
+// How the two ages fail: a helper from before Version2 reads a FrameV2 length as a frame of over 2 GiB, answers
+// too_large and closes the connection, having run nothing. A helper of this version refuses, while trust is
+// set, every request that needs an approval and carries none, whatever version or age the agent has.
+const (
+	Version  = 1
+	Version2 = 2
+	// MaxVersion is what this build speaks (StatusData.Proto).
+	MaxVersion = Version2
+)
+
+// FrameV2 is set in the 4-byte length prefix of a Version2 request frame.
+const FrameV2 = 1 << 31
 
 // ServiceName is the helper's Windows service.
 const ServiceName = "fairy-agent-helper"
@@ -30,8 +50,11 @@ const PipeName = `\\.\pipe\fairy-agent-helper`
 
 // Size limits of one frame (the 4-byte length prefix not counted).
 const (
-	MaxRequest  = 512     // the largest valid request is well under 200 bytes
-	MaxResponse = 1 << 20 // the BMC's sensor list; Core Temp's block is under 7 KB
+	MaxRequest = 512 // a Version request: the largest valid one is well under 200 bytes
+	// MaxRequestV2 is the limit of a Version2 request: an ID token of at most 8192 bytes, at most 64 entries of
+	// about 200 bytes, or a first trust (4 keys of 8192 bits, 32 users).
+	MaxRequestV2 = 32 << 10
+	MaxResponse  = 1 << 20 // the BMC's sensor list; Core Temp's block is under 7 KB
 )
 
 // Verbs.
@@ -46,6 +69,9 @@ const (
 	VerbFanAuto      = "fan_auto"
 	VerbPower        = "power"
 	VerbApplyUpdate  = "apply_update"
+	// Version2 only.
+	VerbChallenge = "challenge"  // a challenge for one exact fan_set, fan_mode, power or apply_update request
+	VerbTrustInit = "trust_init" // the first trust, accepted only while the helper has none
 )
 
 // MinDuty is the lowest fan duty any request may ask for, whatever config.yaml says.
@@ -73,12 +99,16 @@ type Request struct {
 	Action  *string `json:"action,omitempty"`
 	DelayS  *int    `json:"delay_s,omitempty"`
 	By      *string `json:"by,omitempty"` // who asked (for the audit log): letters, digits, " ._@-", up to 64
+	// Version2 only.
+	Approval *api.Approval  `json:"approval,omitempty"` // fan_set, fan_mode, power (not cancel), apply_update
+	For      *string        `json:"for,omitempty"`      // challenge: the verb the challenge is for, with that verb's fields
+	Trust    *api.TrustInit `json:"trust,omitempty"`    // trust_init
 }
 
 // Control reports whether the verb changes something (the helper's control rate limit and audit log).
 func Control(verb string) bool {
 	switch verb {
-	case VerbFanSet, VerbFanMode, VerbFanAuto, VerbPower, VerbApplyUpdate:
+	case VerbFanSet, VerbFanMode, VerbFanAuto, VerbPower, VerbApplyUpdate, VerbChallenge, VerbTrustInit:
 		return true
 	}
 	return false
@@ -87,11 +117,36 @@ func Control(verb string) bool {
 // fields each verb takes ("by" is allowed on every control verb).
 var verbFields = map[string][]string{
 	VerbPing: {}, VerbStatus: {}, VerbCoreTempRead: {}, VerbIPMISensors: {}, VerbFanStatus: {},
-	VerbFanSet:      {"zone", "percent", "by"},
-	VerbFanMode:     {"mode", "by"},
+	VerbFanSet:      {"zone", "percent", "by", "approval"},
+	VerbFanMode:     {"mode", "by", "approval"},
 	VerbFanAuto:     {"by"},
-	VerbPower:       {"action", "delay_s", "by"},
-	VerbApplyUpdate: {"by"},
+	VerbPower:       {"action", "delay_s", "by", "approval"},
+	VerbApplyUpdate: {"by", "approval"},
+	VerbChallenge:   {"for", "zone", "percent", "mode", "action", "delay_s", "by"},
+	VerbTrustInit:   {"trust", "by"},
+}
+
+// ApprovalRequestOf is r as the request an approval is given for, when r is one that needs an approval while
+// trust is set: fan_set, fan_mode, power other than cancel, apply_update. For a challenge it is the request the
+// challenge is asked for. ok is false for every other request (reads, fan_auto, power cancel, trust_init).
+func ApprovalRequestOf(r Request) (api.ApprovalRequest, bool) {
+	verb := r.Verb
+	if verb == VerbChallenge && r.For != nil {
+		verb = *r.For
+	}
+	switch verb {
+	case VerbFanSet:
+		return api.ApprovalRequest{Verb: api.ApproveFanSet, Zone: r.Zone, Percent: r.Percent}, true
+	case VerbFanMode:
+		return api.ApprovalRequest{Verb: api.ApproveFanMode, Mode: r.Mode}, true
+	case VerbPower:
+		if r.Action != nil && *r.Action != "cancel" {
+			return api.ApprovalRequest{Verb: api.ApprovePower, Action: r.Action, DelayS: r.DelayS}, true
+		}
+	case VerbApplyUpdate:
+		return api.ApprovalRequest{Verb: api.ApproveApplyUpdate}, true
+	}
+	return api.ApprovalRequest{}, false
 }
 
 // Verbs lists every verb, sorted.
@@ -116,6 +171,13 @@ const (
 	CodeUnavailable = "unavailable" // e.g. Core Temp is not running
 	CodeDenied      = "denied"      // e.g. Core Temp's memory refused the helper
 	CodeFailed      = "failed"
+	// Approval (the texts are pkg/agent/api's, so the panel reads the same code whoever refused).
+	CodeApprovalRequired    = api.CodeApprovalRequired    // trust is set and the request carried no approval
+	CodeApprovalRefused     = api.CodeApprovalRefused     // the approval it carried was not accepted
+	CodeApprovalUnavailable = api.CodeApprovalUnavailable // the trust file cannot be used: nothing is approved
+	CodeTrustAlreadySet     = api.CodeTrustAlreadySet     // trust_init when a trust file exists
+	CodeTrustInvalid        = api.CodeTrustInvalid
+	CodeTrustUnsupportedKey = api.CodeTrustUnsupportedKey
 )
 
 // Error is a refused request: a code from the list above and a short message.
@@ -130,19 +192,23 @@ func bad(f string, a ...any) *Error { return &Error{Code: CodeBadRequest, Msg: f
 
 // Validate checks a request against its verb's schema.
 func (r *Request) Validate() error {
-	if r.V != Version {
-		return bad("protocol version %d, want %d", r.V, Version)
+	if r.V != Version && r.V != Version2 {
+		return bad("protocol version %d, want %d or %d", r.V, Version, Version2)
 	}
 	allowed, ok := verbFields[r.Verb]
 	if !ok {
 		return &Error{Code: CodeUnknownVerb, Msg: "unknown verb"}
 	}
 	present := map[string]bool{"zone": r.Zone != nil, "percent": r.Percent != nil, "mode": r.Mode != nil,
-		"action": r.Action != nil, "delay_s": r.DelayS != nil, "by": r.By != nil}
+		"action": r.Action != nil, "delay_s": r.DelayS != nil, "by": r.By != nil,
+		"approval": r.Approval != nil, "for": r.For != nil, "trust": r.Trust != nil}
 	for f, p := range present {
 		if p && !slices.Contains(allowed, f) {
 			return bad("%s does not take %s", r.Verb, f)
 		}
+	}
+	if want := FrameVersion(*r); r.V != want {
+		return bad("this %s request is protocol version %d, not %d", r.Verb, want, r.V)
 	}
 	if r.By != nil && !byRe.MatchString(*r.By) {
 		return bad("by must be 1-64 letters, digits, spaces or ._@-")
@@ -170,18 +236,59 @@ func (r *Request) Validate() error {
 			if r.DelayS != nil {
 				return bad("cancel takes no delay_s")
 			}
+			if r.Approval != nil {
+				return bad("cancel takes no approval")
+			}
 		} else if r.DelayS == nil || *r.DelayS < MinDelayS || *r.DelayS > MaxDelayS {
 			return bad("delay_s must be %d-%d", MinDelayS, MaxDelayS)
 		}
+	case VerbChallenge:
+		// the request the challenge is for must itself be a valid request, and one that needs an approval
+		if r.For == nil {
+			return bad("challenge needs for")
+		}
+		inner := Request{V: Version, Verb: *r.For, Zone: r.Zone, Percent: r.Percent, Mode: r.Mode, Action: r.Action, DelayS: r.DelayS}
+		if _, ok := ApprovalRequestOf(inner); !ok || inner.Verb == VerbChallenge {
+			return bad("a challenge is for fan_set, fan_mode, power (not cancel) or apply_update")
+		}
+		if err := inner.Validate(); err != nil {
+			return err
+		}
+	case VerbTrustInit:
+		if r.Trust == nil {
+			return bad("trust_init needs trust")
+		}
+	}
+	if r.Approval != nil && (len(r.Approval.Token) > api.MaxApprovalToken || len(r.Approval.Entries) > api.MaxApprovalEntries) {
+		return &Error{Code: CodeTooLarge, Msg: "approval too large"}
 	}
 	return nil
 }
 
-// DecodeRequest parses and validates one request frame: exactly one JSON object, no unknown fields, no
-// duplicate or extra data, at most MaxRequest bytes.
-func DecodeRequest(b []byte) (Request, error) {
+// FrameVersion is the one protocol version r is sent in: Version2 for challenge, trust_init and a request with
+// an approval, Version for everything else.
+func FrameVersion(r Request) int {
+	if r.Verb == VerbChallenge || r.Verb == VerbTrustInit || r.Approval != nil {
+		return Version2
+	}
+	return Version
+}
+
+// DecodeRequest parses and validates one plain (Version) request frame: exactly one JSON object, no unknown
+// fields, no duplicate or extra data, at most MaxRequest bytes.
+func DecodeRequest(b []byte) (Request, error) { return decodeRequest(b, Version) }
+
+// DecodeRequestV2 is DecodeRequest for a frame that arrived with FrameV2: at most MaxRequestV2 bytes, and a
+// request that needs Version2.
+func DecodeRequestV2(b []byte) (Request, error) { return decodeRequest(b, Version2) }
+
+func decodeRequest(b []byte, version int) (Request, error) {
 	var r Request
-	if len(b) > MaxRequest {
+	limit := MaxRequest
+	if version == Version2 {
+		limit = MaxRequestV2
+	}
+	if len(b) > limit {
 		return r, &Error{Code: CodeTooLarge, Msg: "request too large"}
 	}
 	dec := json.NewDecoder(bytes.NewReader(b))
@@ -198,6 +305,9 @@ func DecodeRequest(b []byte) (Request, error) {
 	if err := r.Validate(); err != nil {
 		return Request{}, err
 	}
+	if r.V != version { // Validate made sure r.V is the request's one version; the frame must be of the same
+		return Request{}, bad("a protocol version %d request in a version %d frame", r.V, version)
+	}
 	return r, nil
 }
 
@@ -211,8 +321,8 @@ func firstLine(s string) string {
 
 // EncodeRequest validates and encodes a request (the agent side).
 func EncodeRequest(r Request) ([]byte, error) {
-	if r.V == 0 {
-		r.V = Version
+	if r.V == 0 { // the old version for everything the old protocol has, so an older helper still understands it
+		r.V = FrameVersion(r)
 	}
 	if err := r.Validate(); err != nil {
 		return nil, err
@@ -221,7 +331,11 @@ func EncodeRequest(r Request) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	if len(b) > MaxRequest {
+	limit := MaxRequest
+	if r.V == Version2 {
+		limit = MaxRequestV2
+	}
+	if len(b) > limit {
 		return nil, &Error{Code: CodeTooLarge, Msg: "request too large"}
 	}
 	return b, nil
@@ -253,8 +367,14 @@ func WithStatus(status int, data any) Response {
 func Fail(code, msg string) Response {
 	st := 500
 	switch code {
-	case CodeBadRequest, CodeUnknownVerb:
+	case CodeBadRequest, CodeUnknownVerb, CodeTrustInvalid, CodeTrustUnsupportedKey:
 		st = 400
+	case CodeApprovalRequired, CodeApprovalRefused:
+		st = 403
+	case CodeTrustAlreadySet:
+		st = 409
+	case CodeApprovalUnavailable:
+		st = 503
 	case CodeTooLarge:
 		st = 413
 	case CodeRateLimited:
@@ -301,6 +421,48 @@ func WriteFrame(w io.Writer, b []byte, limit int) error {
 	copy(buf[4:], b)
 	_, err := w.Write(buf)
 	return err
+}
+
+// WriteRequest writes one request frame of the given version (FrameVersion): a Version2 frame has FrameV2 set
+// in its length prefix and may be MaxRequestV2 bytes long.
+func WriteRequest(w io.Writer, b []byte, version int) error {
+	limit, flag := MaxRequest, uint32(0)
+	if version == Version2 {
+		limit, flag = MaxRequestV2, FrameV2
+	}
+	if len(b) > limit {
+		return fmt.Errorf("frame of %d bytes exceeds %d", len(b), limit)
+	}
+	buf := make([]byte, 4+len(b))
+	binary.BigEndian.PutUint32(buf, uint32(len(b))|flag)
+	copy(buf[4:], b)
+	_, err := w.Write(buf)
+	return err
+}
+
+// ReadRequest reads one request frame and returns its version: Version for a plain frame (at most MaxRequest
+// bytes, exactly as before Version2), Version2 for one with FrameV2 (at most MaxRequestV2). A longer one is
+// ErrFrameTooLarge, and nothing of it is read.
+func ReadRequest(r io.Reader) ([]byte, int, error) {
+	var hdr [4]byte
+	if _, err := io.ReadFull(r, hdr[:]); err != nil {
+		return nil, 0, err
+	}
+	n, version, limit := binary.BigEndian.Uint32(hdr[:]), Version, uint32(MaxRequest)
+	if n&FrameV2 != 0 {
+		n, version, limit = n&^FrameV2, Version2, MaxRequestV2
+	}
+	if n > limit {
+		return nil, version, ErrFrameTooLarge
+	}
+	b := make([]byte, n)
+	if _, err := io.ReadFull(r, b); err != nil {
+		if errors.Is(err, io.EOF) {
+			err = io.ErrUnexpectedEOF
+		}
+		return nil, version, err
+	}
+	return b, version, nil
 }
 
 // ErrFrameTooLarge is a frame whose length prefix exceeds the limit (nothing of it is read).

@@ -1,6 +1,9 @@
 package proto
 
-import "github.com/n3ptune-cpu/Fairy-agent/pkg/agent/collect"
+import (
+	"github.com/n3ptune-cpu/Fairy-agent/pkg/agent/api"
+	"github.com/n3ptune-cpu/Fairy-agent/pkg/agent/collect"
+)
 
 // StatusData is the answer to status.
 type StatusData struct {
@@ -14,6 +17,12 @@ type StatusData struct {
 	// before the helper or the agent restarted: Windows goes on counting a shutdown down). Absent: none.
 	// Older agents ignore the field; older helpers never send it.
 	Power *PowerPending `json:"power_pending,omitempty"`
+	// Proto is the highest protocol version this helper speaks (MaxVersion). Absent: a helper from before
+	// Version2, which knows no challenge, no approval and no trust.
+	Proto int `json:"proto,omitempty"`
+	// Approval is the helper's approval check: off, required or broken, and what it trusts. Absent: an older
+	// helper.
+	Approval *api.ApprovalStatus `json:"approval,omitempty"`
 }
 
 // PowerPending is a pending power action in StatusData.

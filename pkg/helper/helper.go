@@ -27,6 +27,7 @@ import (
 	"github.com/n3ptune-cpu/Fairy-agent/pkg/agent"
 	"github.com/n3ptune-cpu/Fairy-agent/pkg/agent/api"
 	"github.com/n3ptune-cpu/Fairy-agent/pkg/agent/collect"
+	"github.com/n3ptune-cpu/Fairy-agent/pkg/approval"
 	"github.com/n3ptune-cpu/Fairy-agent/pkg/helper/proto"
 )
 
@@ -42,8 +43,12 @@ type Parts struct {
 	// shorten the warning time below what the administrator set. 0 means the protocol's minimum.
 	MinDelayS int
 	Updater   func(ctx context.Context) error
-	Audit     *slog.Logger // the audit log (helper.log); nil = slog.Default()
-	Now       func() time.Time
+	// Approval is the passkey check (pkg/approval): with a trust file in the helper's folder, fan_set, fan_mode,
+	// power (other than cancel) and apply_update run only with an approval the helper has verified itself. The
+	// agent is not trusted with any part of it. nil: no check (tests of the other parts).
+	Approval *approval.Gate
+	Audit    *slog.Logger // the audit log (helper.log); nil = slog.Default()
+	Now      func() time.Time
 }
 
 // Server answers the agent's requests.
@@ -76,6 +81,8 @@ func New(p Parts) *Server {
 // stops the IPMI transport.
 func FromConfig(cfg *agent.Config, version string, audit *slog.Logger) (Parts, func(), error) {
 	p := Parts{Version: version, Audit: audit}
+	p.Approval = approval.NewGate(approval.Options{Files: agent.ApprovalFiles(cfg), EnforcedBy: api.EnforcedByHelper,
+		Uptime: agent.SystemUptime, Log: audit})
 	closer := func() {}
 	if cfg.Sensors.CoreTemp {
 		p.CoreTemp = collect.ReadCoreTemp
@@ -161,9 +168,22 @@ func (s *Server) Shutdown(ctx context.Context) {
 	s.p.Audit.Info("helper stopping: fans in BMC mode", "mode", mode)
 }
 
-// Handle answers one request frame from client (a description for the audit log).
+// Handle answers one plain (protocol version 1) request frame from client (a description for the audit log).
 func (s *Server) Handle(ctx context.Context, client string, frame []byte) proto.Response {
-	req, err := proto.DecodeRequest(frame)
+	return s.handle(ctx, client, frame, proto.Version)
+}
+
+// HandleV2 answers one request frame that arrived as a version 2 frame.
+func (s *Server) HandleV2(ctx context.Context, client string, frame []byte) proto.Response {
+	return s.handle(ctx, client, frame, proto.Version2)
+}
+
+func (s *Server) handle(ctx context.Context, client string, frame []byte, version int) proto.Response {
+	decode := proto.DecodeRequest
+	if version == proto.Version2 {
+		decode = proto.DecodeRequestV2
+	}
+	req, err := decode(frame)
 	if err != nil {
 		s.p.Audit.Warn("refused request", "client", client, "reason", err.Error())
 		return proto.FromError(err)
@@ -189,6 +209,9 @@ func deref(p *string) string {
 
 func args(r proto.Request) string {
 	var a []string
+	if r.For != nil {
+		a = append(a, "for="+*r.For)
+	}
 	if r.Zone != nil {
 		a = append(a, fmt.Sprintf("zone=%d", *r.Zone))
 	}
@@ -213,6 +236,69 @@ func disabled(what string) proto.Response {
 
 func (s *Server) who(r proto.Request) string { return "agent (" + deref(r.By) + ")" }
 
+// off is the "disabled" answer when the part that would carry out verb is switched off (nil: it is on).
+func (s *Server) off(verb string) *proto.Response {
+	var resp proto.Response
+	switch {
+	case (verb == proto.VerbFanSet || verb == proto.VerbFanMode) && s.p.Fan == nil:
+		resp = disabled("fan control")
+	case verb == proto.VerbPower && s.p.Power == nil:
+		resp = disabled("power control")
+	case verb == proto.VerbApplyUpdate && s.p.Updater == nil:
+		resp = disabled("self-update")
+	default:
+		return nil
+	}
+	return &resp
+}
+
+func refusal(ref *approval.Refusal) proto.Response {
+	return proto.Response{Status: ref.Status, Code: ref.Code, Error: ref.Msg}
+}
+
+// approve is the passkey check of a request that changes something: nil when r may run. While trust is set,
+// fan_set, fan_mode, power (other than cancel) and apply_update pass only with an approval this helper verified
+// itself (or inside the fan window, or as the one shutdown shortly after boot). fan_auto and power cancel are
+// never asked: they only make things safer, and the agent sends them with nobody present. The approval's
+// challenge is used up here, before anything of the request is carried out.
+func (s *Server) approve(r proto.Request) *proto.Response {
+	ar, needs := proto.ApprovalRequestOf(r)
+	if !needs || r.Verb == proto.VerbChallenge || s.p.Approval == nil {
+		return nil
+	}
+	if ref := s.p.Approval.Check(ar, r.Approval); ref != nil {
+		resp := refusal(ref)
+		return &resp
+	}
+	return nil
+}
+
+// challenge answers the verb challenge: a challenge bound to the request it names.
+func (s *Server) challenge(r proto.Request) proto.Response {
+	if resp := s.off(*r.For); resp != nil {
+		return *resp
+	}
+	ar, _ := proto.ApprovalRequestOf(r)
+	if s.p.Approval == nil {
+		canon, _ := ar.Canonical()
+		return proto.OK(api.ChallengeResponse{Reason: "off", Request: canon})
+	}
+	c, ref := s.p.Approval.Challenge(ar)
+	if ref != nil {
+		return refusal(ref)
+	}
+	return proto.OK(c)
+}
+
+// approvalStatus is the approval block of the status answer.
+func (s *Server) approvalStatus() *api.ApprovalStatus {
+	st := api.ApprovalStatus{State: api.ApprovalOff, EnforcedBy: api.EnforcedByHelper, Proto: api.ApprovalProto}
+	if s.p.Approval != nil {
+		st = s.p.Approval.Status()
+	}
+	return &st
+}
+
 func (s *Server) dispatch(ctx context.Context, r proto.Request) proto.Response {
 	switch r.Verb {
 	case proto.VerbPing:
@@ -220,7 +306,19 @@ func (s *Server) dispatch(ctx context.Context, r proto.Request) proto.Response {
 	case proto.VerbStatus:
 		ok, note := s.canSleep()
 		return proto.OK(proto.StatusData{Version: s.p.Version, Started: s.started.UTC().Format(time.RFC3339),
-			Features: s.Features(), Watchdog: s.p.Fan != nil, SleepOK: ok, SleepNote: note, Power: s.pendingPower()})
+			Features: s.Features(), Watchdog: s.p.Fan != nil, SleepOK: ok, SleepNote: note, Power: s.pendingPower(),
+			Proto: proto.MaxVersion, Approval: s.approvalStatus()})
+	case proto.VerbChallenge:
+		return s.challenge(r)
+	case proto.VerbTrustInit:
+		if s.p.Approval == nil {
+			return proto.Fail(proto.CodeDisabled, "this helper has no approval check")
+		}
+		st, ref := s.p.Approval.Init(*r.Trust)
+		if ref != nil {
+			return refusal(ref)
+		}
+		return proto.OK(st)
 	case proto.VerbCoreTempRead:
 		if s.p.CoreTemp == nil {
 			return disabled("Core Temp")
@@ -257,11 +355,17 @@ func (s *Server) dispatch(ctx context.Context, r proto.Request) proto.Response {
 		if s.p.Fan == nil {
 			return disabled("fan control")
 		}
+		if no := s.approve(r); no != nil {
+			return *no
+		}
 		st, body := s.p.Fan.SetDuty(ctx, *r.Zone, *r.Percent, s.who(r))
 		return proto.WithStatus(st, body)
 	case proto.VerbFanMode:
 		if s.p.Fan == nil {
 			return disabled("fan control")
+		}
+		if no := s.approve(r); no != nil {
+			return *no
 		}
 		st, body := s.p.Fan.SetMode(ctx, *r.Mode, s.who(r))
 		return proto.WithStatus(st, body)
@@ -279,6 +383,9 @@ func (s *Server) dispatch(ctx context.Context, r proto.Request) proto.Response {
 	case proto.VerbApplyUpdate:
 		if s.p.Updater == nil {
 			return disabled("self-update")
+		}
+		if no := s.approve(r); no != nil {
+			return *no
 		}
 		if err := s.p.Updater(ctx); err != nil {
 			return proto.Fail(proto.CodeFailed, "starting the updater: "+short(err))
@@ -298,6 +405,9 @@ func (s *Server) power(r proto.Request) proto.Response {
 			return proto.Fail(proto.CodeFailed, "cancel: "+short(err))
 		}
 		return proto.OK(proto.PowerData{Action: "cancel"})
+	}
+	if no := s.approve(r); no != nil { // before anything else of a shutdown, reboot or sleep
+		return *no
 	}
 	if min := s.minDelay(); *r.DelayS < min {
 		return proto.Fail(proto.CodeBadRequest, fmt.Sprintf("delay_s must be %d-%d (power_control.min_delay_s in config.yaml, read when the helper starts)", min, proto.MaxDelayS))
@@ -387,7 +497,7 @@ func (s *Server) ServeConn(ctx context.Context, rw io.ReadWriter, client string)
 		if d != nil {
 			_ = d.SetDeadline(time.Now().Add(IdleTimeout))
 		}
-		frame, err := proto.ReadFrame(rw, proto.MaxRequest)
+		frame, version, err := proto.ReadRequest(rw)
 		if errors.Is(err, proto.ErrFrameTooLarge) {
 			s.p.Audit.Warn("refused request", "client", client, "reason", "too large")
 			s.reply(rw, d, proto.Fail(proto.CodeTooLarge, "request too large"))
@@ -396,7 +506,7 @@ func (s *Server) ServeConn(ctx context.Context, rw io.ReadWriter, client string)
 		if err != nil {
 			return
 		}
-		if !s.reply(rw, d, s.Handle(ctx, client, frame)) {
+		if !s.reply(rw, d, s.handle(ctx, client, frame, version)) {
 			return
 		}
 	}
