@@ -1328,3 +1328,52 @@ func TestHelperChecksTheFolderBeforeItReadsTheConfig(t *testing.T) {
 		t.Fatal(cfg, err)
 	}
 }
+
+// TestRepairSaysSoWhenItMovesTheApprovalTrustAside (review L5): the repair moves what it cannot trust out of
+// the way. For the approval trust file that means "approval is off from now on", which must not happen without
+// a word. A trust file as the helper or an administrator wrote it is kept and nothing is said.
+func TestRepairSaysSoWhenItMovesTheApprovalTrustAside(t *testing.T) {
+	t.Setenv("FAIRY_AGENT_TOKEN", "")
+	t.Setenv("FAIRY_AGENT_CONTROL_TOKEN", "")
+	// healthy: Administrators' or SYSTEM's file with the folder's permissions
+	p := newPC(t)
+	p.installed(t)
+	trust := p.put(t, "helper/approval-trust.json", sddlDataFile, `{"version":1}`)
+	rep, err := repairDataDir(p.fs, p.cfgPath, tSvc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(trust); err != nil || len(rep.Aside) != 0 || strings.Contains(strings.Join(rep.Notes, "\n"), "ATTENTION") {
+		t.Fatalf("a healthy trust file: %v, moved aside %v, notes %v", err, rep.Aside, rep.Notes)
+	}
+	// a trust file somebody else owns: moved aside, and the report says what that means
+	p = newPC(t)
+	p.installed(t)
+	trust = p.put(t, "helper/approval-trust.json", sddlPlantedFile, `{"version":1}`)
+	rep, err = repairDataDir(p.fs, p.cfgPath, tSvc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	notes := strings.Join(rep.Notes, "\n")
+	if _, err := os.Stat(trust); err == nil || len(rep.Aside) != 1 {
+		t.Fatalf("a planted trust file was kept: aside %v", rep.Aside)
+	}
+	for _, want := range []string{"ATTENTION", "approval is OFF", "helper-trust set --from"} {
+		if !strings.Contains(notes, want) {
+			t.Errorf("the report lacks %q:\n%s", want, notes)
+		}
+	}
+	// another file in helper\ that is moved aside says nothing about approvals
+	p = newPC(t)
+	p.installed(t)
+	p.put(t, "helper/helper.log", sddlPlantedFile, "log")
+	if rep, err = repairDataDir(p.fs, p.cfgPath, tSvc); err != nil || strings.Contains(strings.Join(rep.Notes, "\n"), "ATTENTION") {
+		t.Errorf("another file: %v %v", err, rep.Notes)
+	}
+	for rel, want := range map[string]bool{"helper": true, "Helper": true, "helper/approval-trust.json": true, "HELPER/Approval-Trust.JSON": true,
+		"helper/helper.log": false, "approval-trust.json": false, "state/approval-trust.json": false, "helper/sub/approval-trust.json": false} {
+		if movesApprovalTrust(rel) != want {
+			t.Errorf("movesApprovalTrust(%q) = %v", rel, !want)
+		}
+	}
+}

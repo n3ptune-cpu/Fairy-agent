@@ -49,6 +49,7 @@ import (
 
 	"github.com/n3ptune-cpu/Fairy-agent/pkg/agent"
 	"github.com/n3ptune-cpu/Fairy-agent/pkg/agent/collect"
+	"github.com/n3ptune-cpu/Fairy-agent/pkg/approval"
 )
 
 const (
@@ -931,7 +932,21 @@ func (w *dirRepair) aside(p, rel, why string) error {
 		w.rep.ConfigAside = true
 	}
 	w.rep.note("%s %s. It was not used: it is now %s.", p, why, to)
+	if movesApprovalTrust(rel) {
+		// Not a state the machine may slip into unnoticed: with the trust file gone the helper's check is off.
+		w.rep.note("ATTENTION: that was (or held) this machine's passkey approval trust (helper\\%s). With it moved away, "+
+			"approval is OFF: fan, power and update requests need no approval, and the panel can set the trust again. "+
+			"To switch it back on, look at the file that was moved and, if it is yours, run: fairy-agent helper-trust set --from <that file>",
+			approval.TrustFileName)
+	}
 	return nil
+}
+
+// movesApprovalTrust reports whether moving rel (a path below the data folder, with forward slashes) aside
+// takes the approval trust file away: the file itself, or the helper's folder as a whole.
+func movesApprovalTrust(rel string) bool {
+	rel = strings.ToLower(rel)
+	return rel == "helper" || rel == "helper/"+strings.ToLower(approval.TrustFileName)
 }
 
 // isAsideDir: a folder an earlier run (or this one) moved things into, directly in the data folder. It is
