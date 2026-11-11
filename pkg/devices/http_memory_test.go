@@ -271,8 +271,9 @@ func TestDecodeJSONStopsAfterTheFirstValue(t *testing.T) {
 	}
 }
 
-// Only one decoded answer exists at a time: a second one waits until the first has been used. So many devices
-// answering at once cost what one costs.
+// Only one decoded answer exists at a time: a second one waits until the first has been used. So the decoded
+// values of many devices answering at once cost what those of one cost. (The text of each answer that is still
+// arriving is held outside this, up to 256 KiB each: see jsonGate.)
 func TestDecodeJSONOneAtATime(t *testing.T) {
 	inside, second, release := make(chan struct{}), make(chan struct{}), make(chan struct{})
 	go func() {

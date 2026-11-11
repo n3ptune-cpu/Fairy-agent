@@ -312,8 +312,9 @@ folder as, for example, `C:\ProgramData\fairy-agent.untrusted-20261110-142530`, 
 because Fairy could not tell who had prepared it: an untrusted `config.yaml` can name another token file or
 switch features on, and the services that read it run with high rights. What to do:
 
-1. Do what the `IMPORTANT:` line says: **Re-pair** the PC in the panel. If `config.yaml` was replaced, switch
-   the features on again, in the panel or in the new `config.yaml`.
+1. Do what the `IMPORTANT:` line says: **Re-pair** the PC in the panel, from a panel that is already updated
+   (Re-pair installs the agent release that panel was built for; an old panel puts an older agent back). If
+   `config.yaml` was replaced, switch the features on again, in the panel or in the new `config.yaml`.
 2. If you want to see your old settings, open the old `config.yaml` in Notepad and read it. Type what you need
    into the new file. Do not copy the old file back, and do not run anything from the old folder.
 3. List what was moved aside (read-only), in PowerShell as Administrator:
@@ -941,7 +942,11 @@ address is never logged and never part of an error message. It crosses the local
 Tasmota speaks plain HTTP. One answer of a plug or a BMC is read up to 256 KiB of JSON with at most 8192 values,
 nested at most 32 deep; a larger one is refused and the source shows "answer from device is too large", "has
 too many values" or "is nested too deep" (a hostile or broken device could otherwise use up the agent's
-memory with one answer). Plugs send a few hundred bytes and a BMC's Power document 15 to 100 KiB, so this
+memory with one answer). These limits are for one answer of one device: while an answer arrives, up to
+256 KiB of it are held for each device, so a great many devices that all send the largest allowed answer at
+the same moment (about 170 of them in an agent that may use 64 MiB) can still use the memory up. UPS servers
+(NUT) and Tuya plugs are read in another way and have limits of their own (see "Security in short"). Plugs
+send a few hundred bytes and a BMC's Power document 15 to 100 KiB, so this
 should never show. If it does for a BMC (`type: redfish` or `ipmi`), point `power_path:` at a smaller document
 of that BMC, for example `/redfish/v1/Chassis/<id>/EnvironmentMetrics`. `system_hint: self` links a plug to the agent's own machine, but
 only for an agent that is a host of its own: for an agent merged into a Proxmox node (`node:` in the panel) it
@@ -1290,7 +1295,9 @@ are lists of devices: edit those in the file.
   `only_from_panel: true` nobody but the panel and this machine gets a connection at all.
 * A response header from a device, a BMC, an agent or the release server may be at most 64 KiB.
 * Time limits on every connection; requests are small and bounded. What a UPS server (NUT) sends is bounded too
-  (4 KiB per line, 1 MiB per poll, 64 UPSes), so a broken or hostile upsd cannot exhaust memory.
+  (4 KiB per line, 1 MiB per poll, 64 UPSes), so one broken or hostile upsd cannot exhaust memory. (One such
+  answer can cost the agent about 15 MiB for a moment, so about ten hostile upsd entries at once still can.
+  The limits of plug and BMC answers, 256 KiB each, do not apply to NUT and Tuya.)
 * The log cannot fill the disk: the log file is rotated at 5 MB (one old file kept), and the same message is
   written at most 30 times a minute (the rest are counted: `suppressed=N` on the next one).
 * Windows: the agent runs as its own virtual account with a single privilege; what needs more goes through the

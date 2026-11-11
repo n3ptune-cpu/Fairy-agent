@@ -94,8 +94,16 @@ const (
 )
 
 // jsonGate lets one decoded answer exist at a time: it is held from the decoding until the caller has taken
-// what it needs. Many devices answering at once then cost what one costs. Nothing waits for the network while
-// holding it (an answer is read completely first), so one slow device cannot hold up the others.
+// what it needs. So the decoded values of many devices answering at once cost what those of one cost. Nothing
+// waits for the network while holding it (an answer is read completely first), so one slow device cannot hold
+// up the others.
+//
+// The text of an answer is outside the gate: every answer that is still arriving holds its own buffer, up to
+// maxJSONBody. That does add up over devices. The review of this fix measured it with the real agent in
+// 64 MiB: 128 hostile sources that each send 255 KiB and then say nothing use 48 MiB, about 170 at the same
+// moment use it up (before the fix one answer was enough). Reading fewer at a time would let silent devices
+// hold up honest ones, so it is left so. NUT and Tuya answers do not come through here at all: they have
+// limits of their own (NUTMaxReply, the Tuya frame size), which this fix did not change.
 var jsonGate sync.Mutex
 
 // jsonBudget counts the values and the depth of the first JSON value in a text, as it arrives.

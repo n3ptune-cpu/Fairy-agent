@@ -635,5 +635,6 @@ fairy-update             # the same (the small wrapper from 3.1)
   "Rollback" (0.4.x does not know the helper or the new account)
 * Panel: `mv /usr/local/bin/fairy.old /usr/local/bin/fairy && systemctl restart fairy`
 
-Nothing installs an older release through the panel. By hand it needs `--force`: `fairy-agent update --force`
-on the machine, `fairy update --force` on the panel's host.
+Nothing installs an older release through the panel's Update button. (Re-pair from a panel that is not
+updated yet does: it installs the agent release that panel was built for.) By hand it needs `--force`:
+`fairy-agent update --force` on the machine, `fairy update --force` on the panel's host.
