@@ -6,9 +6,11 @@ package agent
 // too long, so every update was rolled back, and root's own `fairy-agent update` too.
 //
 // Now connections from this machine that come from a source port only root can use have four slots of their
-// own (ConnLimits.RootPort), and the health check of a root installer comes from such a port. In these tests
-// the ports that count as "only root" are chosen by the test, so they run without root and on every system.
-// (On Linux the real ports and the real check are tested in rootports_linux_test.go.)
+// own (ConnLimits.RootPort), and the health check of a root installer comes from such a port. That takes the
+// agent's own connection limits out of such a program's hands; it does not protect the kernel's listen queue,
+// which a much faster flood can still fill (see RootConns). In these tests the ports that count as "only
+// root" are chosen by the test, so they run without root and on every system. (On Linux the real ports and
+// the real check are tested in rootports_linux_test.go.)
 
 import (
 	"bufio"

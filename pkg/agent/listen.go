@@ -200,7 +200,15 @@ const (
 	// counted on their own, outside every other cap: the health check of a root installer comes from such a
 	// port. The eight slots and the places to wait that this machine's other connections share can be filled
 	// by any local program, without a token and without any right (audit 4, T-03: 16 silent sockets were
-	// enough, and every update was rolled back). These four cannot: the system gives those ports to root only.
+	// enough, and every update was rolled back). These four cannot be filled that way: the system gives those
+	// ports to root and to programs with CAP_NET_BIND_SERVICE only.
+	//
+	// This takes the agent's own limits out of a local program's hands, and no more. A connection must get
+	// through the kernel's listen queue before it is counted here, and that queue is one for all senders: a
+	// program that opens connections as fast as the machine allows (the review measured 322000 attempts a
+	// second on four cores) keeps it full, and the check fails whatever its port. That was so before audit 4
+	// and is still so. A queue of root's own would need a second socket (a Unix socket in a folder only root
+	// and the agent can enter is the plan for a later update).
 	RootConns = 4
 	// An agent whose tokens were set up by hand has no panel address on record. There, an address that showed
 	// a valid token counts as the panel (the cap, the reserved slots, the waiting) for knownSenderFor after
@@ -229,9 +237,10 @@ type ConnLimits struct {
 	// Local reports whether a connection comes from this machine itself (default: a loopback address, or the
 	// very address it connected to).
 	Local func(remote, local netip.Addr) bool
-	// RootPort reports whether only root can open a connection from this source port on this machine. Such
-	// connections from this machine have RootConns slots of their own. Default: the ports below 1024 on Linux
-	// while the system reserves them (rootPorts); on other systems there are no such ports and no such slots.
+	// RootPort reports whether only root (or a program with CAP_NET_BIND_SERVICE) can open a connection from
+	// this source port on this machine. Such connections from this machine have RootConns slots of their own.
+	// Default: the ports below 1024 on Linux while the system reserves them (rootPorts); on other systems
+	// there are no such ports and no such slots.
 	RootPort func(port int) bool
 }
 

@@ -1262,12 +1262,23 @@ are lists of devices: edit those in the file.
   reset. 16 of the 64 are kept for the panel and this machine, 4 of those for this machine alone. So a flood
   from another device cannot lock the panel out or exhaust the agent's memory. Programs on the machine itself
   share 8 connections, and any of them can fill those. So on Linux the update's health check, which root runs,
-  connects from a port below 1024 (one of 512 to 1023 that no well-known service listens on), and connections from this machine that come from such a port
-  have 4 more slots of their own: only root can use those ports, so no other local program can keep the check
-  out and make an update roll back. (Not on a machine where `net.ipv4.ip_unprivileged_port_start` was lowered
-  below 1024, and not on Windows, which has no ports reserved for administrators: there a local program that
-  keeps opening connections to the agent can still make the check fail, the update is then rolled back, and
-  nothing else is harmed.) An agent set up by hand (tokens written into the files, never added through Add
+  connects from a port below 1024 (one of 512 to 1023 that no well-known service listens on), and connections
+  from this machine that come from such a port have 4 more slots of their own. Only root, or a program that
+  was given the right to use such ports (`CAP_NET_BIND_SERVICE`), can connect from one. So a program on the
+  machine without that right can no longer use the agent's own connection limits to keep the check out, which
+  a few open connections used to do. This does not make the check safe from every local program. What is left:
+  * Before a connection reaches the agent it waits in the system's queue for the port, and that queue is one
+    for all senders. A program that opens connections as fast as the machine allows (hundreds of thousands a
+    second, every processor core busy for as long as the update runs) can keep the queue full, and then the
+    check fails whatever port it comes from.
+  * A program that has the right to use ports below 1024 can fill the 4 slots.
+  * There are no such slots on a machine where `net.ipv4.ip_unprivileged_port_start` was lowered below 1024,
+    and none on Windows, which has no ports reserved for administrators: there a local program that keeps
+    opening connections to the agent can make the check fail as before.
+  * The first update to this version is still checked by the old installer, from an ordinary port.
+
+  In each of these cases the update is rolled back, the version that ran before keeps running, and nothing
+  else is harmed. An agent set up by hand (tokens written into the files, never added through Add
   host) has no panel address on record. There an address that has shown a valid token counts as the panel for
   an hour after its last request. Until the panel's first request with the token got through (after the agent
   was restarted, or after an hour without a request from the panel) the panel is a stranger there like any
