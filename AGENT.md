@@ -890,7 +890,9 @@ BMC addresses are accepted. Two backends per target:
   so that an update breaks nothing: a target whose certificate an earlier version learned on its first use
   (kept in the agent's state folder, `bmc-pins.json`) keeps working with that certificate. Nothing is learned
   any more; set `tls_fingerprint` for such a target too when you next edit the file. A different certificate
-  than the named one answers `bmc_certificate_changed`, and nothing is sent to it.
+  than the named one answers `bmc_certificate_changed`, and nothing is sent to it; that answer shows the new
+  certificate's fingerprint, and it must be compared in the same way before it is set. Both answers are short
+  enough for the panel to show them whole; the agent's log has the same with the BMC's address.
 
 When ipmitool fails, the panel shows what went wrong (the `code` in the answer): `bmc_refused` (wrong user name
 or password), `bmc_privilege` (the login worked but the BMC refused the ADMINISTRATOR privilege ipmitool asks

@@ -491,11 +491,15 @@ func (b *BMCRelay) redfish(ctx context.Context, t BMCTarget, action string) (str
 		if err != nil {
 			return "", bmcErr(502, "bmc_unreachable", "the BMC at %s is not reachable (is the relay cabled to it?), and no tls_fingerprint is set for target %s, so nothing was sent to it", t.URL, t.ID)
 		}
+		// The fingerprint in this answer is the one of a certificate nobody has checked. The panel shows the first
+		// 300 bytes of the text, so the warning comes first and the whole text is shorter than that with the
+		// longest id (40 letters); the address is in the log line only.
+		slog.Warn("bmc relay: target has no tls_fingerprint, nothing was sent; the certificate at its address was only looked at. "+
+			"Compare it with the certificate in the BMC's own web interface before you put it into config.yaml (bmc_relay.targets)",
+			"target", t.ID, "url", t.URL, "certificate_sha256", shown)
 		return "", bmcErr(409, "bmc_fingerprint_missing",
-			"nothing was sent to the BMC at %s: target %s has no tls_fingerprint, and the BMC's user name and password go only to the certificate named there. "+
-				"The certificate at that address now has the SHA-256 fingerprint %s. Compare it with the certificate the BMC shows in its own web interface; "+
-				"if it is the same, put tls_fingerprint: %s into this target in config.yaml (bmc_relay.targets) and restart the agent",
-			t.URL, t.ID, shown, shown)
+			"Compare first: target %s has no tls_fingerprint, nothing was sent. Only if the BMC's own web page shows a certificate with SHA-256 %s, "+
+				"set tls_fingerprint to it in config.yaml and restart the agent", t.ID, shown)
 	}
 	c, seen := b.client(want)
 	base := strings.TrimRight(t.URL, "/")
@@ -537,7 +541,12 @@ func (b *BMCRelay) redfish(ctx context.Context, t BMCTarget, action string) (str
 	})
 	if err != nil {
 		if strings.Contains(err.Error(), "fingerprint") {
-			return "", bmcErr(502, "bmc_certificate_changed", "the BMC at %s shows a different certificate than the pinned one (%s); if that is expected, set tls_fingerprint", t.URL, *seen)
+			// as above: an unchecked certificate's fingerprint, the warning first, under 300 bytes
+			slog.Warn("bmc relay: the BMC shows another certificate than the one set for the target (tls_fingerprint, or learned by an earlier version); nothing was sent",
+				"target", t.ID, "url", t.URL, "expected_sha256", want, "certificate_sha256", *seen)
+			return "", bmcErr(502, "bmc_certificate_changed",
+				"Compare first: target %s shows another certificate than the one set, nothing was sent. Only if the BMC's own web page shows SHA-256 %s, "+
+					"set tls_fingerprint to it in config.yaml and restart the agent", t.ID, *seen)
 		}
 		return "", bmcErr(502, "bmc_unreachable", "the BMC at %s is not reachable (is the relay cabled to it?): %v", t.URL, err)
 	}

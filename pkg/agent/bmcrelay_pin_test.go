@@ -124,7 +124,7 @@ func TestBMCRelayRedfishSendsNoPasswordToAnUnnamedCertificate(t *testing.T) {
 			if st != 409 || body["code"] != "bmc_fingerprint_missing" {
 				t.Fatalf("hangUp=%v request %d (%s): want 409 bmc_fingerprint_missing, got %d %v", hangUp, i+1, action, st, body)
 			}
-			if !strings.Contains(msg, "tls_fingerprint: "+l.fingerprint) || !strings.Contains(msg, "srv1") {
+			if !strings.Contains(msg, l.fingerprint+", set tls_fingerprint to it in config.yaml") || !strings.Contains(msg, "srv1") {
 				t.Fatalf("the answer does not say what to set: %q", msg)
 			}
 			if strings.Contains(msg, "t07-test-bmc-password") {
