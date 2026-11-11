@@ -151,13 +151,16 @@ func Run(ctx context.Context, cfg *Config, b Build) error {
 			slog.Warn("config.yaml uses Core Temp, IPMI or power control, which need the fairy-agent-helper service; it is not installed, so the agent tries them with its own rights. Install it: " + HelperSetupHint)
 		}
 	}
-	if helper == nil {
-		// Not Windows: no helper, so this agent checks passkey approvals itself (approval.go). Without a trust
-		// file (the state until the panel or an administrator sets one) it checks nothing, as before.
-		d.Approval = approval.NewGate(approval.Options{Files: ApprovalFiles(cfg), EnforcedBy: api.EnforcedByAgent, Uptime: SystemUptime})
-		if st := d.Approval.Status(); st.State != api.ApprovalOff {
-			slog.Info("passkey approval of fan, power and update requests", "state", st.State, "issuer", st.Issuer, "error", st.Error)
-		}
+	// Every agent checks the passkey approval of what it carries out itself (approval.go). Without a trust file
+	// (the state until the panel or an administrator sets one) that checks nothing, as before. Not Windows:
+	// there is no helper, the agent is the only checker and the trust file is its own. Windows: the trust file
+	// is the helper's, in a folder this account reads and cannot change; the agent's gate only reads it, and
+	// checks the requests that do not go through the helper (fans over ipmitool; everything of an agent that
+	// was started without the helper).
+	d.Approval = approval.NewGate(approval.Options{Files: ApprovalFiles(cfg), EnforcedBy: api.EnforcedByAgent,
+		Uptime: SystemUptime, BootID: SystemBootID, ReadOnly: helper != nil})
+	if st := d.Approval.Status(); st.State != api.ApprovalOff {
+		slog.Info("passkey approval of fan, power and update requests", "state", st.State, "issuer", st.Issuer, "error", st.Error)
 	}
 	if cfg.Sensors.CoreTemp {
 		if viaHelper {
@@ -304,6 +307,11 @@ func Run(ctx context.Context, cfg *Config, b Build) error {
 		slog.Info("waiting for the panel to pair (Add host)", "panel", st.Panel, "until", time.Unix(st.ExpiresAt, 0).Format(time.RFC3339))
 	}
 	a = New(cfg, tokens, d)
+	if own := a.ownChecks(); helper != nil && len(own) > 0 {
+		// said once, so the log shows who checks what on this machine
+		slog.Info("passkey approval: this agent carries these requests out itself and checks them itself; the helper checks the rest",
+			"requests", strings.Join(own, ","), "state", d.Approval.Status().State)
+	}
 
 	addr, err := ListenAddr(ctx, cfg, StartupWait)
 	if err != nil {

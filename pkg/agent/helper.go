@@ -70,9 +70,6 @@ type HelperClient struct {
 	seen     string
 	seenAt   time.Time
 	loggedAs string
-	// needApproval: the helper's latest status said that its approval check is on (required or broken). It
-	// stays set while the helper is not answering, and is cleared only by a helper that says "off".
-	needApproval bool
 }
 
 // NewHelperClient returns a client; nothing is dialled until the first call.
@@ -228,7 +225,6 @@ func (c *HelperClient) refresh(ctx context.Context) api.HelperStatus {
 	}
 	if st.State == api.HelperRunning {
 		c.last, c.hasLast = sd, true
-		c.needApproval = sd.Approval != nil && sd.Approval.State != api.ApprovalOff
 	}
 	if c.loggedAs != st.State {
 		c.loggedAs = st.State
@@ -609,8 +605,10 @@ type HelperApproval interface {
 	// ApprovalStatus is the "approval" block; ok is false when there is nothing to report (no helper installed,
 	// or one from before approvals).
 	ApprovalStatus(ctx context.Context) (st api.ApprovalStatus, ok bool)
-	// ApprovalNeeded reports whether the helper's check was on when it last answered.
-	ApprovalNeeded() bool
+	// ApprovalNow asks the helper for its approval state at this moment. known is false when it does not
+	// answer now (stopped, starting, its pipe down) or is a helper from before approvals: then nothing is known,
+	// and what it said earlier does not count.
+	ApprovalNow(ctx context.Context) (st api.ApprovalStatus, known bool)
 	// Challenge and TrustInit pass the request to the helper and return the HTTP status and body.
 	Challenge(ctx context.Context, req api.ApprovalRequest) (int, any)
 	TrustInit(ctx context.Context, in api.TrustInit) (int, any)
@@ -637,11 +635,15 @@ func (c *HelperClient) ApprovalStatus(ctx context.Context) (api.ApprovalStatus, 
 	return *c.last.Approval, true
 }
 
-// ApprovalNeeded: see HelperApproval.
-func (c *HelperClient) ApprovalNeeded() bool {
+// ApprovalNow: see HelperApproval. It asks the helper now and does not use the cached status.
+func (c *HelperClient) ApprovalNow(ctx context.Context) (api.ApprovalStatus, bool) {
+	st := c.refresh(ctx)
 	c.stMu.Lock()
 	defer c.stMu.Unlock()
-	return c.needApproval
+	if !st.Running() || !c.hasLast || c.last.Approval == nil {
+		return api.ApprovalStatus{}, false
+	}
+	return *c.last.Approval, true
 }
 
 // approvalCall sends a protocol version 2 request and turns the helper's answer into an HTTP answer.

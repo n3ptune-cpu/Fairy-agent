@@ -324,7 +324,8 @@ func TestUpdateWithHelperApproval(t *testing.T) {
 	if r.ownStarts.Load() != 1 || r.helperStarts.Load() != 1 {
 		t.Fatalf("approved update: own %d, helper %d", r.ownStarts.Load(), r.helperStarts.Load())
 	}
-	// the helper stopped: the agent still knows its check was on, and does not fall back to its own right
+	// the helper stopped: nothing can check an approval, so the update is refused; the agent does not fall back
+	// to its own right (this rig's agent has no look of its own at the trust file: the state is not known)
 	if st, b := r.post(t, api.PathHelperStop, map[string]any{}); st != 200 {
 		t.Fatalf("helper stop with trust set (fans to automatic needs no approval): %d %v", st, b)
 	}
@@ -332,7 +333,9 @@ func TestUpdateWithHelperApproval(t *testing.T) {
 		t.Fatalf("approval block while stopped: %v", blk)
 	}
 	st, b = r.post(t, "/update", map[string]any{})
-	wantRefusal(t, "update while the helper is stopped", st, b, 403, api.CodeApprovalRequired)
+	wantRefusal(t, "update while the helper is stopped", st, b, 503, api.CodeApprovalUnavailable)
+	st, b = r.post(t, "/update", map[string]any{"approval": ok})
+	wantRefusal(t, "update with an approval while the helper is stopped", st, b, 503, api.CodeApprovalUnavailable)
 	st, b = r.post(t, api.PathApprovalChallenge, map[string]any{"verb": "apply_update"})
 	wantRefusal(t, "challenge while the helper is stopped", st, b, 503, api.ReasonHelperStopped)
 	st, b = r.post(t, api.PathApprovalTrust, r.iss.Init())

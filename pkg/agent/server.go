@@ -137,8 +137,11 @@ type Deps struct {
 	// Migration is the Windows move from LocalSystem to NT SERVICE\fairy-agent (/metrics "migration"); nil on
 	// Linux.
 	Migration interface{ Status() api.MigrationStatus }
-	// Approval is the passkey check of this agent's own control routes (pkg/approval), where no helper does
-	// it: everywhere but Windows. nil: this agent checks nothing itself (Windows, and tests of other parts).
+	// Approval is this agent's own passkey check (pkg/approval) of the requests it carries out itself: all of
+	// them where there is no helper (every system but Windows); on Windows the ones that do not go through the
+	// helper, with a gate that only reads the helper's trust file. Run always sets it. nil (tests of other
+	// parts): this agent checks nothing itself, and on a machine whose helper says that approvals are not off
+	// it refuses what it would have to check.
 	Approval *approval.Gate
 	Version  string
 }
@@ -995,7 +998,7 @@ func (a *Agent) fanMode(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 400, map[string]any{"error": err.Error()})
 		return
 	}
-	if !a.approved(w, api.ApprovalRequest{Verb: api.ApproveFanMode, Mode: &b.Mode}, b.Approval) {
+	if !a.approved(w, r, api.ApprovalRequest{Verb: api.ApproveFanMode, Mode: &b.Mode}, b.Approval) {
 		return
 	}
 	who := "panel " + clientIP(r)
@@ -1024,7 +1027,7 @@ func (a *Agent) fanDuty(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 400, map[string]any{"error": "zone and percent must be integers"})
 		return
 	}
-	if !a.approved(w, api.ApprovalRequest{Verb: api.ApproveFanSet, Zone: &zone, Percent: &pct}, b.Approval) {
+	if !a.approved(w, r, api.ApprovalRequest{Verb: api.ApproveFanSet, Zone: &zone, Percent: &pct}, b.Approval) {
 		return
 	}
 	who := "panel " + clientIP(r)
@@ -1062,7 +1065,7 @@ func (a *Agent) power(w http.ResponseWriter, r *http.Request) {
 		if req.DelayS != nil {
 			delay = *req.DelayS
 		}
-		if !a.approved(w, api.ApprovalRequest{Verb: api.ApprovePower, Action: &b.Action, DelayS: &delay}, b.Approval) {
+		if !a.approved(w, r, api.ApprovalRequest{Verb: api.ApprovePower, Action: &b.Action, DelayS: &delay}, b.Approval) {
 			return
 		}
 	}
@@ -1096,13 +1099,15 @@ func (a *Agent) update(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 400, map[string]any{"error": err.Error()})
 		return
 	}
-	if a.d.Approval != nil { // this agent checks itself, now; nothing further down looks at the approval
-		if !a.approved(w, api.ApprovalRequest{Verb: api.ApproveApplyUpdate}, b.Approval) {
+	if a.helperRuns(api.ApproveApplyUpdate) { // Windows with the helper: it checks, when the installer is started
+		if !a.updateApproval(w, r, &b) {
+			return
+		}
+	} else { // this agent starts the installer itself and checks itself, now; nothing further down looks at the approval
+		if !a.approved(w, r, api.ApprovalRequest{Verb: api.ApproveApplyUpdate}, b.Approval) {
 			return
 		}
 		b.Approval = nil
-	} else if !a.updateApproval(w, &b) { // Windows: the helper checks, when the installer is started
-		return
 	}
 	st, body := a.d.Updater.Start(b)
 	writeJSON(w, st, body)

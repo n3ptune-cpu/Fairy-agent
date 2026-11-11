@@ -3,19 +3,26 @@ package agent
 // The passkey approval of control actions, the agent's part. The protocol is described in pkg/agent/api
 // (approval.go); the checking is pkg/approval.
 //
-// Windows with the helper: the helper checks, and this agent is not trusted by it. The agent only carries the
-// challenge, the first-time trust and each request's "approval" field to the helper and the answers back.
+// The rule, on every system and with every way of reaching the hardware: while trust is set, each request that
+// needs an approval is checked by the program that carries it out.
 //
-// Everywhere else there is no helper: the agent itself is the checker (Deps.Approval), with the same trust
-// file, the same routes and the same rules. That protects against a panel that was taken over and against a
-// stolen control token; it does not protect against this agent process being taken over, because the process
-// is the one that checks.
+// Windows with the helper: what the helper carries out, the helper checks, and this agent is not trusted by
+// it. The agent only carries the challenge, the first-time trust and each request's "approval" field to the
+// helper and the answers back (helperRuns).
 //
-// What needs an approval while trust is set, on every system: POST /fan/duty and /fan/mode, POST /power with
-// shutdown, reboot or sleep, POST /update. What never does: POST /power cancel, POST /wol and POST /bmc/power
-// (they wake machines; the relay has no "off"), POST /helper/stop and /start (the service manager, and stop
-// only hands the fans back to the BMC), and everything the agent does by itself with nobody present (the fan
-// watchdog, fans to automatic when it stops).
+// What this agent process carries out itself, it checks itself (Deps.Approval), with the same trust file, the
+// same package and the same rules: everything where there is no helper (every system but Windows), and on
+// Windows the parts that do not go through the helper: fans driven over the network (ipmi.transport:
+// ipmitool), and power, fans and update of an agent that was started without the helper. On Windows the trust
+// file is the helper's and this agent only reads it. The agent's own check protects against a panel that was
+// taken over and against a stolen control token; it does not protect against this agent process being taken
+// over, because the process is the one that checks.
+//
+// What needs an approval while trust is set: POST /fan/duty and /fan/mode, POST /power with shutdown, reboot
+// or sleep, POST /update. What never does: POST /power cancel, POST /wol and POST /bmc/power (they wake
+// machines; the relay has no "off"), POST /helper/stop and /start (the service manager, and stop only hands
+// the fans back to the BMC), and everything the agent does by itself with nobody present (the fan watchdog,
+// fans to automatic when it stops).
 
 import (
 	"bytes"
@@ -48,21 +55,85 @@ func (a *Agent) helperApproval() (HelperApproval, bool) {
 	return h, true
 }
 
-// hasApproval reports whether something on this machine checks approvals (else the two routes answer 404
-// approval_disabled).
-func (a *Agent) hasApproval() bool {
-	if a.d.Approval != nil {
-		return true
+// approvalVerbs are the requests that need an approval while trust is set.
+var approvalVerbs = []string{api.ApproveFanSet, api.ApproveFanMode, api.ApprovePower, api.ApproveApplyUpdate}
+
+// helperRuns reports whether the Windows helper carries out the request verb, and so is the one that checks
+// its approval: fans through the helper (ipmi.transport: wmi), power through the helper, and the update of an
+// agent that hands approved updates to the helper. Everything else this process carries out itself.
+func (a *Agent) helperRuns(verb string) bool {
+	switch verb {
+	case api.ApproveFanSet, api.ApproveFanMode:
+		_, ok := a.d.Fan.(approvedFan)
+		return ok
+	case api.ApprovePower:
+		return a.d.Power != nil && a.d.Power.throughHelper()
+	case api.ApproveApplyUpdate:
+		return a.d.Updater != nil && a.d.Updater.throughHelper()
 	}
-	_, ok := a.helperApproval()
-	return ok
+	return false
 }
 
-// approved is this agent's own passkey check of a request that changes something; false: it answered already
-// and nothing may run. Without a gate of its own (Windows: the helper checks) it lets everything through. The
-// approval's challenge is used up here, before the request is carried out.
-func (a *Agent) approved(w http.ResponseWriter, req api.ApprovalRequest, ap *api.Approval) bool {
-	ref := a.d.Approval.Check(req, ap)
+// ownChecks are the requests this agent carries out itself, of the parts that are switched on.
+func (a *Agent) ownChecks() []string {
+	var out []string
+	for _, verb := range approvalVerbs {
+		if a.featureOff(verb) == "" && !a.helperRuns(verb) {
+			out = append(out, verb)
+		}
+	}
+	return out
+}
+
+// hasApproval reports whether something on this machine checks approvals (else the two routes answer 404
+// approval_disabled): the agent itself where there is no helper; on Windows the helper, or, without one, the
+// agent as soon as a trust file is there all the same.
+func (a *Agent) hasApproval() bool {
+	if a.d.Helper == nil {
+		return a.d.Approval != nil
+	}
+	if _, ok := a.helperApproval(); ok {
+		return true
+	}
+	return a.d.Approval != nil && a.d.Approval.Status().State != api.ApprovalOff
+}
+
+// noOwnCheck is the answer when this agent would have to check a request itself and has nothing to check it
+// with, on a machine whose helper says that approvals are not off. Run always gives the agent its own check;
+// this is what keeps a request from running unchecked if that is ever forgotten.
+func noOwnCheck() *approval.Refusal {
+	return &approval.Refusal{Status: 503, Code: api.CodeApprovalUnavailable,
+		Msg: "this agent carries out this request itself, without the helper, and has nothing to check an approval with, so it is not run"}
+}
+
+// ownGateMissing reports whether a request this agent carries out itself must be refused because the agent has
+// no check of its own while the machine's helper does not say that approvals are off.
+func (a *Agent) ownGateMissing(ctx context.Context) bool {
+	if a.d.Approval != nil {
+		return false
+	}
+	h, ok := a.helperApproval()
+	if !ok {
+		return false // no helper and no gate: nothing on this machine knows approvals (tests of other parts)
+	}
+	st, ok := h.ApprovalStatus(ctx)
+	return ok && st.State != api.ApprovalOff
+}
+
+// approved is the passkey check of a request that changes something; false: it answered already and nothing
+// may run. What the helper carries out, the helper checks when the request reaches it, so that passes here.
+// What this process carries out itself is checked here, by the agent's own gate, and the approval's challenge
+// is used up before the request is carried out.
+func (a *Agent) approved(w http.ResponseWriter, r *http.Request, req api.ApprovalRequest, ap *api.Approval) bool {
+	if a.helperRuns(req.Verb) {
+		return true
+	}
+	var ref *approval.Refusal
+	if a.ownGateMissing(r.Context()) {
+		ref = noOwnCheck()
+	} else {
+		ref = a.d.Approval.Check(req, ap)
+	}
 	if ref == nil {
 		return true
 	}
@@ -78,13 +149,37 @@ func writeRefusal(w http.ResponseWriter, ref *approval.Refusal) {
 	writeJSON(w, ref.Status, body)
 }
 
-// approvalStatus is the "approval" block of GET /metrics.
+// approvalStatus is the "approval" block of GET /metrics. Where the helper checks, it is the helper's, with
+// the requests this agent checks itself named in it ("agent_checks"): the block says who enforces what.
 func (a *Agent) approvalStatus(ctx context.Context) (api.ApprovalStatus, bool) {
-	if a.d.Approval != nil {
+	if a.d.Helper == nil { // not Windows: this agent is the checker
+		if a.d.Approval == nil {
+			return api.ApprovalStatus{}, false
+		}
 		return a.d.Approval.Status(), true
 	}
 	if h, ok := a.helperApproval(); ok {
-		return h.ApprovalStatus(ctx)
+		if st, ok := h.ApprovalStatus(ctx); ok {
+			if own := a.ownChecks(); len(own) > 0 {
+				st.AgentChecks = own
+				switch {
+				case a.d.Approval == nil:
+					st.AgentError = "this agent has no check of its own; these requests are refused while approval is not off"
+				default:
+					if os := a.d.Approval.Status(); os.State == api.ApprovalBroken {
+						st.AgentError = os.Error
+					}
+				}
+			}
+			return st, true
+		}
+	}
+	// Windows without a helper that knows approvals: nothing to report, unless a trust file is there all the
+	// same (the helper was removed after trust was set): then this agent checks what it carries out.
+	if a.d.Approval != nil {
+		if st := a.d.Approval.Status(); st.State != api.ApprovalOff {
+			return st, true
+		}
 	}
 	return api.ApprovalStatus{}, false
 }
@@ -116,10 +211,16 @@ func (a *Agent) featureOff(verb string) string {
 	case verb == api.ApproveApplyUpdate && a.d.Updater == nil:
 		return "self_update_disabled"
 	}
-	return ""
+	return "" // also trust_set: no part to switch off
 }
 
-// approvalChallenge is POST /approval/challenge: a challenge for one exact request.
+func approvalDisabled(w http.ResponseWriter) {
+	writeJSON(w, 404, map[string]any{"error": "approval is disabled on this agent", "code": api.CodeApprovalDisabled})
+}
+
+// approvalChallenge is POST /approval/challenge: a challenge for one exact request, from whoever will check
+// its approval: the helper for what the helper carries out and for the first-time set of the trust (the trust
+// file is the helper's), this agent for what it carries out itself.
 func (a *Agent) approvalChallenge(w http.ResponseWriter, r *http.Request) {
 	var req api.ApprovalRequest
 	if err := decodeStrictBody(r, &req); err != nil {
@@ -134,22 +235,33 @@ func (a *Agent) approvalChallenge(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 404, map[string]any{"error": "that is disabled on this agent", "code": code})
 		return
 	}
-	if a.d.Approval != nil {
+	h, viaHelper := a.helperApproval()
+	if viaHelper && req.Verb != api.ApproveTrustSet && !a.helperRuns(req.Verb) {
+		viaHelper = false // a helper is here, and this request is one the agent carries out itself
+	}
+	if viaHelper {
+		st, body := h.Challenge(r.Context(), req)
+		writeJSON(w, st, body)
+		return
+	}
+	switch {
+	case a.ownGateMissing(r.Context()):
+		writeRefusal(w, noOwnCheck())
+	case a.d.Approval == nil:
+		approvalDisabled(w)
+	default:
 		c, ref := a.d.Approval.Challenge(req)
 		if ref != nil {
 			writeRefusal(w, ref)
 			return
 		}
 		writeJSON(w, 200, c)
-		return
 	}
-	h, _ := a.helperApproval()
-	st, body := h.Challenge(r.Context(), req)
-	writeJSON(w, st, body)
 }
 
-// approvalTrust is POST /approval/trust: the first-time set of the trust. Whoever checks approvals decides; it
-// is accepted only while the machine has no trust file.
+// approvalTrust is POST /approval/trust: the first-time set of the trust, with the approval that proves it.
+// Whoever owns the trust file decides (Windows: the helper; elsewhere this agent); it is accepted only while
+// the machine has no trust file.
 func (a *Agent) approvalTrust(w http.ResponseWriter, r *http.Request) {
 	var in api.TrustInit
 	if err := decodeStrictBody(r, &in); err != nil {
@@ -161,37 +273,93 @@ func (a *Agent) approvalTrust(w http.ResponseWriter, r *http.Request) {
 		a.cache = nil // the next GET /metrics shows the new state
 		a.cacheMu.Unlock()
 	}()
-	if a.d.Approval != nil {
-		st, ref := a.d.Approval.Init(in)
-		if ref != nil {
-			writeRefusal(w, ref)
-			return
+	if h, ok := a.helperApproval(); ok {
+		st, body := h.TrustInit(r.Context(), in)
+		if a.d.Approval != nil {
+			// The helper may have written the trust file a moment ago. What this agent carries out itself is
+			// checked by its own gate, which would otherwise look at the file again only within five seconds.
+			a.d.Approval.StatusNow()
 		}
-		writeJSON(w, 200, st)
+		writeJSON(w, st, body)
 		return
 	}
-	h, _ := a.helperApproval()
-	st, body := h.TrustInit(r.Context(), in)
-	writeJSON(w, st, body)
+	if a.d.Approval == nil {
+		approvalDisabled(w)
+		return
+	}
+	// not Windows: this agent writes the trust file. Windows without the helper: the agent's gate only reads
+	// (already_set when a trust file is there, else it says that the trust is set on the machine).
+	st, ref := a.d.Approval.Init(in)
+	if ref != nil {
+		writeRefusal(w, ref)
+		return
+	}
+	writeJSON(w, 200, st)
 }
 
-// updateApproval decides what POST /update does with the request's approval; false: it answered already.
+// helperCheckState is what an update that goes through the helper has to go by, found out now, when the
+// request is here: api.ApprovalOff (nothing is checked), api.ApprovalRequired (the helper checks an approval),
+// or api.ApprovalBroken / api.ApprovalUnknown with the reason (nothing can be approved).
 //
-// Windows with the helper: the agent normally starts the updater service with its own right, which the helper
-// never sees. So while the helper's check is on, an update needs an approval here already, and the installer
-// is then started through the helper, which checks the approval (Updater.ApplyApproved). This is the agent
-// keeping to the rule, not the helper enforcing it: an agent process that was taken over can still start the
-// updater service itself (which installs only a newer release signed with the release key).
-func (a *Agent) updateApproval(w http.ResponseWriter, b *UpdateRequest) bool {
+// The helper's own answer counts when it answers at this moment. When it does not (stopped, starting, the
+// agent started before it, its pipe is down), the agent looks at the trust file itself, and only "there is no
+// trust file, in a folder that passes its check" counts as off. A helper that cannot be reached is never taken
+// as "approval is off".
+func (a *Agent) helperCheckState(ctx context.Context) (string, string) {
+	own := ""
+	if a.d.Approval != nil {
+		own = a.d.Approval.StatusNow().State
+	}
 	h, ok := a.helperApproval()
-	if !ok || !h.ApprovalNeeded() {
+	if ok {
+		if st, known := h.ApprovalNow(ctx); known {
+			if st.State == api.ApprovalOff && own == api.ApprovalRequired {
+				return api.ApprovalRequired, "" // set on the machine a moment ago; the helper reads it within seconds
+			}
+			return st.State, st.Error
+		}
+	}
+	if own == api.ApprovalOff {
+		return api.ApprovalOff, ""
+	}
+	why := "the helper, which checks the approval of an update on this machine, is not answering"
+	switch own {
+	case api.ApprovalRequired:
+		why += ", and this machine has an approval trust file"
+	case api.ApprovalBroken:
+		why += ", and this machine's approval trust file cannot be used"
+	default:
+		why += ", so whether an update needs an approval is not known"
+	}
+	return api.ApprovalUnknown, why + " (start it: POST /helper/start, or Start-Service fairy-agent-helper on the machine)"
+}
+
+// updateApproval decides what POST /update does with the request's approval where approved updates go through
+// the helper (Windows with the helper); false: it answered already.
+//
+// The agent normally starts the updater service with its own right, which the helper never sees. So while
+// approvals are not off, an update needs an approval here already, and the installer is then started through
+// the helper, which checks the approval (Updater.ApplyApproved). When the state cannot be established, or the
+// trust file is broken, the update is refused: nothing is downloaded and nothing is started. This is the
+// agent keeping to the rule, not the helper enforcing it: an agent process that was taken over can still
+// start the updater service itself (which installs only a newer release signed with the release key).
+func (a *Agent) updateApproval(w http.ResponseWriter, r *http.Request, b *UpdateRequest) bool {
+	state, why := a.helperCheckState(r.Context())
+	switch state {
+	case api.ApprovalOff:
 		b.Approval = nil // nothing checks it: as before
 		return true
+	case api.ApprovalRequired:
+		if b.Approval == nil {
+			writeJSON(w, 403, map[string]any{"code": api.CodeApprovalRequired,
+				"error": "this needs a passkey approval (Pocket ID) and the request carried none"})
+			return false
+		}
+		return true
 	}
-	if b.Approval == nil {
-		writeJSON(w, 403, map[string]any{"code": api.CodeApprovalRequired,
-			"error": "this needs a passkey approval (Pocket ID) and the request carried none"})
-		return false
+	if why == "" {
+		why = "the approval trust file on this machine cannot be used"
 	}
-	return true
+	writeJSON(w, 503, map[string]any{"code": api.CodeApprovalUnavailable, "error": "the update was not started: " + why})
+	return false
 }

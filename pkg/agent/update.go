@@ -226,6 +226,10 @@ func (u *Updater) refreshLast(force bool) {
 	}
 }
 
+// throughHelper reports whether an update that carries an approval is started through the Windows helper,
+// which then is the one that checks the approval.
+func (u *Updater) throughHelper() bool { return u.o.ApplyApproved != nil }
+
 func (u *Updater) ts() float64 { return collect.Round(float64(u.now().UnixMilli())/1000, 3) }
 
 // Status is the current state.
@@ -336,6 +340,13 @@ func (u *Updater) run(who string, ap *api.Approval, done chan struct{}) {
 		apply = func(ctx context.Context) error { return u.o.ApplyApproved(ctx, ap) }
 	}
 	if err := apply(ctx); err != nil {
+		// The installer was not started (the helper refused the approval, say). The stage must not stay: it
+		// is complete, and whatever starts the updater service next would install it without anybody asking.
+		if u.o.StageDir != "" {
+			if cerr := clearDir(u.o.StageDir); cerr != nil {
+				slog.Error("self-update: the staged release could not be removed after the installer was not started", "error", safeErr(cerr))
+			}
+		}
 		u.fail("starting the installer: "+safeErr(err), ch.Version)
 		return
 	}

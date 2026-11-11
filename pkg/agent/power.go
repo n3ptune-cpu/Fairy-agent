@@ -158,6 +158,13 @@ type PowerRequest struct {
 	Approval *api.Approval `json:"-"`
 }
 
+// throughHelper reports whether shutdown, reboot and sleep are carried out by the Windows helper, which then is
+// the one that checks their approval.
+func (p *Power) throughHelper() bool {
+	_, ok := p.exec.(powerApproved)
+	return ok
+}
+
 // Handle carries out one request and returns the HTTP status and body.
 func (p *Power) Handle(req PowerRequest) (int, map[string]any) {
 	p.mu.Lock()
