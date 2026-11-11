@@ -1213,6 +1213,39 @@ func (w *dirRepair) inside(d string, depth int, seen *int) string {
 	return ""
 }
 
+// leaked reports whether p is one of the files the repair found readable by someone else (Leaked). p is a
+// path as config.yaml spells it (token_file), the keys of Leaked are paths as the repair built them: they are
+// compared as the system compares file names (pathKey), not letter by letter. Compared letter by letter, a
+// token file named with "/" or in another letter case in config.yaml was not found: its permissions were
+// repaired and the token that may have been read stayed in use (audit 4, T-38).
+func (r dirReport) leaked(p string, windows bool) bool {
+	want := pathKey(p, windows)
+	for k := range r.Leaked {
+		if pathKey(k, windows) == want {
+			return true
+		}
+	}
+	return false
+}
+
+// pathKey is a path in the one spelling under which two names of the same file are equal: without "."
+// segments and doubled separators, and on Windows with "\" for "/" and without regard to letter case. (A
+// file's 8.3 short name is not known here; tokenPathProblem does not accept one for a token file.)
+func pathKey(p string, windows bool) string {
+	if !windows {
+		return filepath.Clean(p)
+	}
+	segs := strings.Split(strings.ToLower(strings.ReplaceAll(p, "/", `\`)), `\`)
+	out := segs[:0]
+	for i, s := range segs {
+		if i > 0 && (s == "" || s == ".") {
+			continue
+		}
+		out = append(out, s)
+	}
+	return strings.Join(out, `\`)
+}
+
 // isTokenName: the default token files, which must be files.
 func (w *dirRepair) isTokenName(rel string) bool {
 	r := strings.ToLower(rel)
@@ -1238,7 +1271,7 @@ func fillDataDir(cfgPath string, rep dirReport, out io.Writer) error {
 	for _, p := range configTokenFiles(cfgPath) {
 		_, statErr := os.Lstat(p)
 		missing := errors.Is(statErr, os.ErrNotExist)
-		exposed := rep.RootLeak || rep.Leaked[p]
+		exposed := rep.RootLeak || rep.leaked(p, runtime.GOOS == "windows")
 		if !missing && !exposed {
 			continue
 		}
