@@ -18,7 +18,7 @@ func (e *Error) Error() string { return e.Msg }
 func Errf(f string, a ...any) error { return &Error{Msg: fmt.Sprintf(f, a...)} }
 
 // Safe marks err's message as safe to show in the API, for errors whose text is known to hold no secrets
-// (configutil.EnvSecret, tuya). Without it, Describe reduces unknown errors to a generic word.
+// (configutil.EnvSecret). Without it, Describe reduces unknown errors to a generic word.
 func Safe(err error) error { return &Error{Msg: err.Error()} }
 
 // Reading is one power measurement: watts, volts, amps, kWh total (nil = unknown).

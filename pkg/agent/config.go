@@ -52,7 +52,7 @@ type Config struct {
 	// FAIRY_AGENT_CONTROL_TOKEN in the environment win over the files.
 	TokenFile        string `yaml:"token_file"`
 	ControlTokenFile string `yaml:"control_token_file"`
-	// EnvFile holds KEY=value secrets for relayed devices (password_env / local_key_env names).
+	// EnvFile holds KEY=value secrets for relayed devices (password_env names).
 	EnvFile string `yaml:"env_file"`
 	// LogFile: Windows default C:\ProgramData\fairy-agent\logs\agent.log; Linux default "" = stderr (journal).
 	LogFile string `yaml:"log_file"`

@@ -83,14 +83,13 @@ func TestRedfishDoesNotFollowRedirects(t *testing.T) {
 
 // Audit 3, L35: "below 1 or above 300" is never true for NaN, so `interval: .nan` passed and became the pause
 // between two polls of the device.
-func TestIntervalAndScaleMustBeNumbers(t *testing.T) {
+func TestIntervalMustBeANumber(t *testing.T) {
 	for name, iv := range map[string]float64{"NaN": math.NaN(), "+Inf": math.Inf(1), "-Inf": math.Inf(-1), "0.5": 0.5, "301": 301} {
 		for _, typ := range []map[string]any{
 			{"id": "p", "type": "tasmota", "url": "http://192.0.2.1"},
 			{"id": "p", "type": "shelly", "url": "http://192.0.2.1"},
 			{"id": "p", "type": "nut", "host": "192.0.2.1"},
 			{"id": "p", "type": "redfish", "url": "https://192.0.2.1", "password_env": "X"},
-			{"id": "p", "type": "tuya", "device_id": "d", "ip": "192.0.2.1", "local_key_env": "K"},
 			{"id": "p", "type": "agent", "agent": "pc"},
 		} {
 			typ["interval"] = iv
@@ -102,21 +101,6 @@ func TestIntervalAndScaleMustBeNumbers(t *testing.T) {
 	for _, iv := range []float64{1, 2.5, 300} {
 		if _, err := Build(map[string]any{"id": "p", "type": "tasmota", "url": "http://192.0.2.1", "interval": iv}, nil); err != nil {
 			t.Errorf("interval %v: %v", iv, err)
-		}
-	}
-	tuya := func(scale float64) error {
-		_, err := Build(map[string]any{"id": "t", "type": "tuya", "device_id": "d", "ip": "192.0.2.1", "local_key_env": "K",
-			"dps": map[string]any{"power": map[string]any{"dp": "19", "scale": scale}}}, nil)
-		return err
-	}
-	for name, sc := range map[string]float64{"NaN": math.NaN(), "+Inf": math.Inf(1), "-Inf": math.Inf(-1)} {
-		if err := tuya(sc); err == nil || !strings.Contains(err.Error(), "scale must be a number") {
-			t.Errorf("scale %s: %v", name, err)
-		}
-	}
-	for _, sc := range []float64{0, 0.1, 1, -1, 1000} { // 0 means "not set" (1), as before
-		if err := tuya(sc); err != nil {
-			t.Errorf("scale %v: %v", sc, err)
 		}
 	}
 }

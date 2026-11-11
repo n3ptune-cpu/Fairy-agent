@@ -30,7 +30,7 @@ func DecodeStrict(raw map[string]any, out any) error {
 }
 
 // Types are the built-in `type:` values of power_sources entries.
-var Types = []string{"agent", "ipmi", "nut", "redfish", "shelly", "tasmota", "tuya"}
+var Types = []string{"agent", "ipmi", "nut", "redfish", "shelly", "tasmota"}
 
 // Removed are `type:` values that earlier versions read and this one does not (tuya, the plugs' local protocol:
 // nobody had set one up). A config file that still has such an entry must never stop the agent or
@@ -101,8 +101,9 @@ func Build(raw map[string]any, agentPower AgentPowerFn) (Source, error) {
 		return buildRedfish(decode)
 	case "agent":
 		return buildAgentPower(decode, agentPower)
-	case "tuya":
-		return buildTuya(decode)
+	}
+	if slices.Contains(Removed, typ) { // only reached by a caller that did not use DropRemoved
+		return nil, fmt.Errorf("power source %q: type %s is no longer supported", fmt.Sprint(raw["id"]), typ)
 	}
 	return nil, fmt.Errorf("power source %q: unknown type %q (known: %s)", fmt.Sprint(raw["id"]), typ, strings.Join(Types, ", "))
 }

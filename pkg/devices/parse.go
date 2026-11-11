@@ -70,38 +70,3 @@ func ParseRedfishPower(d map[string]any) (watts, volts *float64, err error) {
 	}
 	return watts, volts, nil
 }
-
-// DpsField maps a reading to a Tuya data point and the scale that turns its raw integer into the unit.
-type DpsField struct {
-	DP    string  `json:"dp" yaml:"dp"`
-	Scale float64 `json:"scale" yaml:"scale"`
-}
-
-// DefaultTuyaDPS is the data-point mapping of common metering plugs. DP 17 ("add_ele") is an increment, not a
-// total, so it isn't mapped.
-func DefaultTuyaDPS() map[string]DpsField {
-	return map[string]DpsField{"power": {"19", 0.1}, "voltage": {"20", 0.1}, "current": {"18", 0.001}}
-}
-
-// ParseTuyaDPS turns a plug's data points into a Reading (default mapping when none is configured).
-func ParseTuyaDPS(dps map[string]any, mapping map[string]DpsField) Reading {
-	if len(mapping) == 0 {
-		mapping = DefaultTuyaDPS()
-	}
-	get := func(field string) *float64 {
-		m, ok := mapping[field]
-		if !ok {
-			return nil
-		}
-		raw := f64(dps[m.DP])
-		if raw == nil {
-			return nil
-		}
-		scale := m.Scale
-		if scale == 0 {
-			scale = 1
-		}
-		return numRound(*raw*scale, 3) // nil when the scaled value is impossible (or the scale is not a number)
-	}
-	return Reading{get("power"), get("voltage"), get("current"), get("energy_kwh_total")}
-}

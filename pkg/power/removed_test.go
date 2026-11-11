@@ -58,3 +58,29 @@ func TestDropRemovedLeavesOtherListsAlone(t *testing.T) {
 		t.Errorf("a list of one old entry: kept %v, notes %q", kept, notes)
 	}
 }
+
+// The type is gone from the built-in ones. Build, which a caller reaches only without DropRemoved, says that it
+// is no longer supported (not "unknown"), and every other type still builds.
+func TestTuyaIsNoLongerABuiltInType(t *testing.T) {
+	for _, typ := range Types {
+		if typ == "tuya" {
+			t.Fatalf("Types still lists tuya: %v", Types)
+		}
+	}
+	_, err := Build(map[string]any{"id": "desk-plug", "type": "tuya", "device_id": "plug1", "ip": "192.0.2.3", "local_key_env": "DESK_KEY"}, nil)
+	if err == nil || !strings.Contains(err.Error(), `power source "desk-plug": type tuya is no longer supported`) {
+		t.Fatalf("Build: %v", err)
+	}
+	for _, raw := range []map[string]any{
+		{"id": "p", "type": "shelly", "url": "http://192.0.2.1"},
+		{"id": "p", "type": "tasmota", "url": "http://192.0.2.1"},
+		{"id": "p", "type": "nut", "host": "192.0.2.1"},
+		{"id": "p", "type": "redfish", "url": "https://192.0.2.1", "password_env": "X"},
+		{"id": "p", "type": "ipmi", "url": "https://192.0.2.1", "password_env": "X"},
+		{"id": "p", "type": "agent", "agent": "pc"},
+	} {
+		if s, err := Build(raw, nil); err != nil || s.Info().Type != raw["type"] {
+			t.Errorf("type %v: %v", raw["type"], err)
+		}
+	}
+}

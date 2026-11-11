@@ -102,8 +102,8 @@ const (
 // maxJSONBody. That does add up over devices. The review of this fix measured it with the real agent in
 // 64 MiB: 128 hostile sources that each send 255 KiB and then say nothing use 48 MiB, about 170 at the same
 // moment use it up (before the fix one answer was enough). Reading fewer at a time would let silent devices
-// hold up honest ones, so it is left so. NUT and Tuya answers do not come through here at all: they have
-// limits of their own (NUTMaxReply, the Tuya frame size), which this fix did not change.
+// hold up honest ones, so it is left so. NUT answers do not come through here at all: they have a limit of
+// their own (NUTMaxReply), which this fix did not change.
 var jsonGate sync.Mutex
 
 // jsonBudget counts the values and the depth of the first JSON value in a text, as it arrives.

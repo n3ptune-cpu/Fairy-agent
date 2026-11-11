@@ -25,7 +25,6 @@ func FuzzDeviceJSON(f *testing.F) {
 	f.Add([]byte(`{"apower":1e308,"voltage":1e400,"aenergy":{"total":1e15}}`), 0)
 	f.Add([]byte(`{"emeters":[{"power":1,"total":1e300}],"meters":[{"power":2,"total":9e307}]}`), 1)
 	f.Add([]byte(`{"PowerControl":[{"PowerConsumedWatts":1e13}],"PowerSupplies":[{"LineInputVoltage":-1e13}]}`), 0)
-	f.Add([]byte(`{"19":1e308,"20":2300,"18":1e12}`), 0)
 	f.Fuzz(func(t *testing.T, raw []byte, channel int) {
 		var d map[string]any
 		dec := json.NewDecoder(bytes.NewReader(raw))
@@ -45,7 +44,6 @@ func FuzzDeviceJSON(f *testing.F) {
 		if w, v, err := ParseRedfishPower(d); err == nil {
 			all = append(all, Reading{Watts: w, Voltage: v})
 		}
-		all = append(all, ParseTuyaDPS(d, nil), ParseTuyaDPS(d, map[string]DpsField{"power": {"19", 1e300}, "voltage": {"20", -1e-300}}))
 		for _, r := range all {
 			reviewFinite(t, string(raw), r.Watts, r.Voltage, r.Current, r.EnergyKWh)
 			if _, err := json.Marshal(r); err != nil {

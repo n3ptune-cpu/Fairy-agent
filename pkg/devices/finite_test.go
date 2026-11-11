@@ -133,22 +133,6 @@ func TestParsersDropImpossibleNumbers(t *testing.T) {
 	}
 }
 
-// Scaling: a possible raw value times the configured scale can leave the range; so can a scale that is not a
-// number (yaml reads .nan and .inf as floats).
-func TestTuyaScalingIsChecked(t *testing.T) {
-	dps := map[string]any{"19": 9e11, "20": 2301.0, "18": 412.0}
-	for name, scale := range map[string]float64{"huge product": 1e6, "NaN scale": math.NaN(), "+Inf scale": math.Inf(1), "-Inf scale": math.Inf(-1)} {
-		r := ParseTuyaDPS(dps, map[string]DpsField{"power": {DP: "19", Scale: scale}, "voltage": {DP: "20", Scale: 0.1}})
-		if r.Watts != nil || r.Voltage == nil || *r.Voltage != 230.1 {
-			t.Errorf("%s: %+v", name, r)
-		}
-		mustMarshal(t, name, r)
-	}
-	if r := ParseTuyaDPS(map[string]any{"19": 1e308}, nil); r.Watts != nil {
-		t.Errorf("impossible raw value: %v", *r.Watts)
-	}
-}
-
 // The UPS power source (type nut): text from upsd. strconv reads "NaN" and "Inf" as numbers.
 func TestNUTWattsRejectsImpossibleNumbers(t *testing.T) {
 	for _, s := range []string{"NaN", "nan", "Inf", "+Inf", "-Inf", "Infinity", "1e999", "1e308", "-1e308", "0x1p1023", "", "abc"} {
