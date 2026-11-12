@@ -948,7 +948,12 @@ read it and pass the readings on. The entries are the same as in the panel's `po
 `NAME=value` lines and stay on that machine. Tuya plugs are no longer supported. An entry with `type: tuya`
 from an earlier version does not stop the agent: it is ignored, and the agent's log at start and
 `fairy-agent check-config` name it in one line (`power source "desk-plug": tuya is no longer supported and is
-ignored`). Remove the entry, and the plug's key from the `env_file`, when you next edit the file. A Tasmota plug with a web password gets it the one way Tasmota
+ignored (remove the entry from config.yaml, and the line TUYA_KEY_DESK=... from the env file: the plug's key
+is not used any more)`). That line names the variable the entry kept the plug's local key in (its
+`local_key_env`), never the key. Remove both when you next edit the files: the entry from `config.yaml`, and
+that variable's line from the `env_file` (the key is a secret of the plug and still works on your network).
+Until you do, the agent leaves that line alone and does not load it: a secret that only an ignored entry names
+is not put into the agent's environment. (If another entry names the same variable, it is loaded as before.) A Tasmota plug with a web password gets it the one way Tasmota
 documents, in the address of the request (`/cm?user=...&password=...`), exactly as in earlier releases. That
 address is never logged and never part of an error message. It crosses the local network unencrypted:
 Tasmota speaks plain HTTP. One answer of a plug or a BMC is read up to 256 KiB of JSON with at most 8192 values,

@@ -38,13 +38,53 @@ var Types = []string{"agent", "ipmi", "nut", "redfish", "shelly", "tasmota"}
 // shows its lines (in the log at start and in the config check).
 var Removed = []string{"tuya"}
 
+// removedSecretEnv: for each removed type, the member of its entries that names the environment variable with
+// the device's secret (tuya: the plug's local key). The entry is ignored, but the secret is usually still in
+// the env file, and nothing uses it any more.
+var removedSecretEnv = map[string]string{"tuya": "local_key_env"}
+
+// secretEnvOf is the name of the environment variable a removed entry kept its secret in ("": none, or not a
+// name that can be an environment variable's, which is then neither printed nor acted on).
+func secretEnvOf(raw map[string]any) string {
+	typ, _ := raw["type"].(string)
+	name, _ := raw[removedSecretEnv[typ]].(string)
+	if name == "" || len(name) > 128 {
+		return ""
+	}
+	for i := 0; i < len(name); i++ {
+		c := name[i]
+		if !(c == '_' || c >= 'A' && c <= 'Z' || c >= 'a' && c <= 'z' || i > 0 && c >= '0' && c <= '9') {
+			return ""
+		}
+	}
+	return name
+}
+
+// RemovedSecretEnv are the names of the environment variables that the entries of a removed type in raws kept
+// their secrets in (each once, in the order of the list). Call it before DropRemoved takes the entries out.
+// Only names: a value is never read here.
+func RemovedSecretEnv(raws []map[string]any) []string {
+	var names []string
+	for _, raw := range raws {
+		if typ, _ := raw["type"].(string); !slices.Contains(Removed, typ) {
+			continue
+		}
+		if n := secretEnvOf(raw); n != "" && !slices.Contains(names, n) {
+			names = append(names, n)
+		}
+	}
+	return names
+}
+
 // DropRemoved returns raws without the entries of a type that is no longer supported (Removed), and one line
 // for each entry it took out, such as
 //
-//	power source "desk-plug": tuya is no longer supported and is ignored (remove the entry from config.yaml)
+//	power source "desk-plug": tuya is no longer supported and is ignored (remove the entry from config.yaml, and the line DESK_KEY=... from the env file: the plug's key is not used any more)
 //
-// Such an entry is not checked in any other way: whatever else it holds, it is only ignored. An entry without
-// an id is named by its place in the list. Without such an entry, raws comes back as it is.
+// The line names the variable that held the device's secret, never its value (and only a name that can be an
+// environment variable's). Such an entry is not checked in any other way: whatever else it holds, it is only
+// ignored. An entry without an id is named by its place in the list. Without such an entry, raws comes back as
+// it is.
 func DropRemoved(raws []map[string]any) (kept []map[string]any, notes []string) {
 	for i, raw := range raws {
 		typ, _ := raw["type"].(string)
@@ -56,7 +96,11 @@ func DropRemoved(raws []map[string]any) (kept []map[string]any, notes []string) 
 		if id, ok := raw["id"].(string); ok && id != "" {
 			name = fmt.Sprintf("%q", id)
 		}
-		notes = append(notes, fmt.Sprintf("power source %s: %s is no longer supported and is ignored (remove the entry from config.yaml)", name, typ))
+		also := ""
+		if env := secretEnvOf(raw); env != "" {
+			also = ", and the line " + env + "=... from the env file: the plug's key is not used any more"
+		}
+		notes = append(notes, fmt.Sprintf("power source %s: %s is no longer supported and is ignored (remove the entry from config.yaml%s)", name, typ, also))
 	}
 	if notes == nil {
 		return raws, nil

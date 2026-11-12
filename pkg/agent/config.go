@@ -18,6 +18,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"slices"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -84,6 +85,9 @@ type Config struct {
 
 	path    string
 	ignored []string
+	// unusedEnv: the environment variables that only entries taken out by power.DropRemoved named (a Tuya
+	// plug's local key). Nothing in this config uses them, so they are not loaded from env_file (UnusedSecret).
+	unusedEnv []string
 }
 
 // ProcessesConfig is the process list (the panel's Processes tab).
@@ -219,12 +223,50 @@ func Parse(data []byte, path string) (*Config, error) {
 		return nil, fmt.Errorf("%s: %w", path, err)
 	}
 	c.path = path
+	gone := power.RemovedSecretEnv(c.PowerSources)
 	c.PowerSources, c.ignored = power.DropRemoved(c.PowerSources)
 	c.defaults()
 	if err := c.Validate(); err != nil {
 		return nil, err
 	}
+	c.unusedEnv = c.notNamedElsewhere(gone)
 	return c, nil
+}
+
+// notNamedElsewhere returns those of names that nothing in this config names as an environment variable: no
+// kept power_sources or ups entry (any member ending in "_env"), not the BMC's password, no BMC relay target.
+// The agent's own variables (FAIRY_...) are never among them. Names are compared without regard to case, as
+// Windows does.
+func (c *Config) notNamedElsewhere(names []string) []string {
+	var used []string
+	for _, raws := range [][]map[string]any{c.PowerSources, c.UPS} {
+		for _, raw := range raws {
+			for k, v := range raw {
+				if s, ok := v.(string); ok && strings.HasSuffix(k, "_env") {
+					used = append(used, s)
+				}
+			}
+		}
+	}
+	used = append(used, c.IPMI.PasswordEnv)
+	for _, t := range c.BMCRelay.Targets {
+		used = append(used, t.PasswordEnv)
+	}
+	var out []string
+	for _, n := range names {
+		if strings.HasPrefix(strings.ToUpper(n), "FAIRY_") || slices.ContainsFunc(used, func(u string) bool { return strings.EqualFold(u, n) }) {
+			continue
+		}
+		out = append(out, n)
+	}
+	return out
+}
+
+// UnusedSecret reports whether name is an environment variable that only an ignored entry of config.yaml named
+// (a removed Tuya plug's local key): the secret is still in env_file, and the agent has no use for it. Such a
+// line is not loaded into the agent's environment (loadSecrets).
+func (c *Config) UnusedSecret(name string) bool {
+	return slices.ContainsFunc(c.unusedEnv, func(u string) bool { return strings.EqualFold(u, name) })
 }
 
 // Load reads config.yaml.
@@ -470,7 +512,12 @@ func (c *Config) LoadTokens() (Tokens, error) {
 }
 
 // LoadEnvFile sets KEY=value lines from the env file (variables already set win) and returns their names.
-func LoadEnvFile(path string) ([]string, error) {
+func LoadEnvFile(path string) ([]string, error) { return loadEnvFile(path, nil) }
+
+// loadEnvFile is LoadEnvFile with lines to leave out: a line whose name skip accepts is checked like every
+// other and its name is returned (so it is hidden from child processes all the same, should it be in the
+// environment from elsewhere), but its value is not put into this process's environment.
+func loadEnvFile(path string, skip func(name string) bool) ([]string, error) {
 	if path == "" {
 		return nil, nil
 	}
@@ -495,6 +542,9 @@ func LoadEnvFile(path string) ([]string, error) {
 			v = v[1 : len(v)-1]
 		}
 		names = append(names, k)
+		if skip != nil && skip(k) {
+			continue
+		}
 		if _, set := os.LookupEnv(k); !set {
 			_ = os.Setenv(k, v)
 		}

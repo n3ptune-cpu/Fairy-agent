@@ -94,8 +94,12 @@ type Build struct {
 // systemctl, busctl and PowerShell get an environment without them (collect.MinimalEnv, collect.Command; a
 // test reads the source to keep it so). It must run before a transport is built (IPMITransport copies the
 // environment for ipmitool then).
+//
+// A secret that only an ignored entry of config.yaml named (the local key of a Tuya plug, which this version no
+// longer reads) is not loaded at all: the agent does not keep in its environment what it has no use for. The
+// line stays in env_file until the owner removes it; the start log and check-config name the variable.
 func loadSecrets(cfg *Config) error {
-	names, err := LoadEnvFile(cfg.EnvFile)
+	names, err := loadEnvFile(cfg.EnvFile, cfg.UnusedSecret)
 	if err != nil {
 		return err
 	}

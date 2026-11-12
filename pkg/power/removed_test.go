@@ -84,3 +84,39 @@ func TestTuyaIsNoLongerABuiltInType(t *testing.T) {
 		}
 	}
 }
+
+// TestDropRemovedNamesTheKeyVariable (audit 5, r1-a2-06): the note said only "remove the entry from
+// config.yaml"; the plug's local key stayed in the env file. It now names the variable (never a value), and
+// only a name that can be an environment variable's: what is in the entry is somebody's text.
+func TestDropRemovedNamesTheKeyVariable(t *testing.T) {
+	raws := []map[string]any{
+		{"id": "desk-plug", "type": "tuya", "local_key_env": "DESK_KEY"},
+		{"id": "b", "type": "tuya", "local_key_env": "DESK_KEY"}, // the same variable: named in both notes, once in the list
+		{"id": "c", "type": "tuya", "local_key_env": "_k9"},
+		{"id": "d", "type": "tuya"},
+		{"id": "e", "type": "tuya", "local_key_env": 5},
+		{"id": "f", "type": "tuya", "local_key_env": "A B"},
+		{"id": "g", "type": "tuya", "local_key_env": "X\nlevel=ERROR msg=forged"},
+		{"id": "h", "type": "tuya", "local_key_env": "9X"},
+		{"id": "i", "type": "tuya", "local_key_env": strings.Repeat("K", 129)},
+		{"id": "j", "type": "tuya", "local_key_env": "K=secret-value"},
+		{"id": "s", "type": "shelly", "url": "http://192.0.2.1", "password_env": "SHELLY_PW", "local_key_env": "NOT_REMOVED"},
+	}
+	if got := strings.Join(RemovedSecretEnv(raws), ","); got != "DESK_KEY,_k9" {
+		t.Fatalf("RemovedSecretEnv: %s", got)
+	}
+	_, notes := DropRemoved(raws)
+	if len(notes) != 10 {
+		t.Fatalf("notes: %q", notes)
+	}
+	const generic = "(remove the entry from config.yaml)"
+	for i, want := range []string{"the line DESK_KEY=... from the env file", "the line DESK_KEY=... from the env file", "the line _k9=... from the env file",
+		generic, generic, generic, generic, generic, generic, generic} {
+		if !strings.Contains(notes[i], want) || strings.ContainsAny(notes[i], "\n\r") || strings.Contains(notes[i], "secret-value") || strings.Contains(notes[i], "forged") {
+			t.Errorf("note %d: %q, want it to hold %q and nothing of the entry's own text", i, notes[i], want)
+		}
+	}
+	if RemovedSecretEnv(nil) != nil || RemovedSecretEnv([]map[string]any{{"id": "s", "type": "shelly", "password_env": "P"}}) != nil {
+		t.Error("names for a list without a removed entry")
+	}
+}

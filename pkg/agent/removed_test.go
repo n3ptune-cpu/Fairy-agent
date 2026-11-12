@@ -12,6 +12,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/n3ptune-cpu/Fairy-agent/pkg/agent/collect"
 )
 
 const ignoredTuya = `power source "desk-plug": tuya is no longer supported and is ignored`
@@ -209,10 +211,78 @@ func TestRunStartsWithOldTuyaEntryAndWarns(t *testing.T) {
 	if strings.Count(log, "tuya is no longer supported and is ignored") != 1 {
 		t.Fatalf("want the line once in the log:\n%s", log)
 	}
+	// audit 5, r1-a2-06: the line names the variable of the plug's key, never its value, and the running agent
+	// does not hold the key in its environment; the secret of the plug that is still read is there
+	if !strings.Contains(log, "the line OLD_PLUG_KEY=... from the env file") || strings.Contains(log, "not-a-real-key") {
+		t.Errorf("the log must name the key's variable and never its value:\n%s", log)
+	}
+	if v, set := os.LookupEnv("OLD_PLUG_KEY"); set {
+		t.Errorf("the agent loaded the removed plug's key into its environment (%d bytes)", len(v))
+	}
+	if os.Getenv("OLD_SHELLY_PW") != "not-real" {
+		t.Error("the secret of a device that is still read was not loaded")
+	}
 	for _, line := range strings.Split(log, "\n") {
 		if strings.Contains(line, "tuya is no longer supported") &&
 			(!strings.Contains(line, "level=WARN") || !strings.Contains(line, `power source \"desk-plug\"`) || !strings.Contains(line, "config.yaml")) {
 			t.Errorf("log line: %s", line)
 		}
+	}
+}
+
+// TestOldTuyaKeyIsNotLoadedIntoTheEnvironment (audit 5, r1-a2-06): the plug's local key stays in env_file after
+// the upgrade, and the agent used to load it into its environment at every start, for nothing. A secret that
+// only an ignored entry names is not loaded any more. Everything else is: a variable that a kept entry names
+// too, the agent's own variables, and a variable that was in the environment before the agent looked.
+func TestOldTuyaKeyIsNotLoadedIntoTheEnvironment(t *testing.T) {
+	for _, n := range []string{"OLD_PLUG_KEY", "SHARED_PW", "OTHER_SECRET", "INHERITED_KEY", "FAIRY_AGENT_TOKEN_TEST"} {
+		os.Unsetenv(n)
+		t.Cleanup(func() { os.Unsetenv(n) })
+	}
+	env := filepath.Join(t.TempDir(), "devices.env")
+	if err := os.WriteFile(env, []byte("OLD_PLUG_KEY=key-of-the-old-plug\nSHARED_PW=shared\nOTHER_SECRET=other\nINHERITED_KEY=from-the-file\n"+
+		"FAIRY_AGENT_TOKEN_TEST=agents-own\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("INHERITED_KEY", "from-the-service")
+	cfg := mustParse(t, fmt.Sprintf(`env_file: %q
+power_sources:
+  - {id: desk-plug, type: tuya, device_id: plug1, ip: 192.0.2.60, local_key_env: OLD_PLUG_KEY}
+  - {id: second-plug, type: tuya, device_id: plug2, ip: 192.0.2.61, local_key_env: SHARED_PW}
+  - {id: third-plug, type: tuya, device_id: plug3, ip: 192.0.2.62, local_key_env: INHERITED_KEY}
+  - {id: odd-plug, type: tuya, device_id: plug4, ip: 192.0.2.63, local_key_env: FAIRY_AGENT_TOKEN_TEST}
+  - {id: shelly-1, type: shelly, url: "http://192.0.2.70", gen: "2", password_env: shared_pw}
+`, env))
+	if !cfg.UnusedSecret("OLD_PLUG_KEY") || !cfg.UnusedSecret("old_plug_key") || cfg.UnusedSecret("SHARED_PW") || cfg.UnusedSecret("OTHER_SECRET") ||
+		cfg.UnusedSecret("FAIRY_AGENT_TOKEN_TEST") || cfg.UnusedSecret("") {
+		t.Fatal("which secrets count as unused is wrong")
+	}
+	if err := loadSecrets(cfg); err != nil {
+		t.Fatal(err)
+	}
+	if v, set := os.LookupEnv("OLD_PLUG_KEY"); set {
+		t.Errorf("the removed plug's key is in the agent's environment (%d bytes)", len(v))
+	}
+	for name, want := range map[string]string{
+		"SHARED_PW":              "shared",           // a kept entry names it too (in another letter case)
+		"OTHER_SECRET":           "other",            // nothing to do with a removed entry
+		"INHERITED_KEY":          "from-the-service", // was set before: not the file's to give, not the agent's to take
+		"FAIRY_AGENT_TOKEN_TEST": "agents-own",       // the agent's own names are never left out
+	} {
+		if got := os.Getenv(name); got != want {
+			t.Errorf("%s = %q, want %q", name, got, want)
+		}
+	}
+	// every line of the env file is still checked, and a child process sees none of its names
+	for _, kv := range collect.MinimalEnv() {
+		if k, _, _ := strings.Cut(kv, "="); k == "OLD_PLUG_KEY" || k == "INHERITED_KEY" || k == "SHARED_PW" {
+			t.Errorf("a child process would get %s", k)
+		}
+	}
+	if err := os.WriteFile(env, []byte("OLD_PLUG_KEY\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := loadSecrets(cfg); err == nil {
+		t.Error("a broken line of an unused secret was not reported")
 	}
 }

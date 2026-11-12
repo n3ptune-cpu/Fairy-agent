@@ -34,7 +34,8 @@ ups:
 	var out, errb bytes.Buffer
 	code := checkConfigCmd(p, &out, &errb)
 	want := "config OK: " + p + "\n" +
-		`note: power source "desk-plug": tuya is no longer supported and is ignored (remove the entry from config.yaml)` + "\n"
+		`note: power source "desk-plug": tuya is no longer supported and is ignored (remove the entry from config.yaml, ` +
+		`and the line OLD_PLUG_KEY=... from the env file: the plug's key is not used any more)` + "\n"
 	if code != 0 || out.String() != want || errb.Len() != 0 {
 		t.Fatalf("exit %d\nstdout: %s\nstderr: %s", code, out.String(), errb.String())
 	}
