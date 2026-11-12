@@ -1141,7 +1141,10 @@ tell the helper another id (the helper reads the file, and takes no id over the 
 
 **A trust file from before machine ids** (written by the test build of 2026-11-11; no release ever wrote
 one) has no `"machine_id"`. Nothing is ever checked with such a file. The service that owns the file adds an
-id when it starts: `fairy-agent-helper` on Windows, `fairy-agent` elsewhere. It adds that one member and
+id the first time it looks at such a file: `fairy-agent-helper` on Windows, `fairy-agent` elsewhere. That is
+when it starts, and also later: a running service looks at the file whenever it is asked something (the
+panel's poll, a request), at most every 5 seconds, so a file like that which appears under a running service
+(put back from a backup, say) gets its id within seconds as well. It adds that one member and
 changes nothing else, the file keeps its owner and mode, and the log says so once (`the trust file had no
 machine id ... one was added`). Where it cannot (Linux: the file is root's and the agent does not run as
 root; Windows: the helper that runs is not this version), the file stays as it was and the state is `broken`
