@@ -1155,7 +1155,12 @@ agent process is the checker there anyway. What is checked before the file count
 belong to root or to the agent's own user, nobody else can write them, and the file is a plain file with one
 name. A folder that fails this (group-writable, another owner) is `broken` even with no trust file in it,
 and fan, power and update requests are then refused until the folder is put right
-(`chown fairy-agent:fairy-agent /var/lib/fairy-agent; chmod 0700 /var/lib/fairy-agent`).
+(`chown fairy-agent:fairy-agent /var/lib/fairy-agent; chmod 0700 /var/lib/fairy-agent`). A set from the panel
+is refused in that state like on every machine that is not "off" (`409 already_set`); its text then says
+`this machine has no trust file, and none can be set from the network: the folder of the trust file is not
+safe: ...`, not that there is a file. (Without the folder at all the state is "off": there is no file. A set
+from the panel then fails with `the folder of the trust file does not exist`; a standard install has the
+folder.)
 `fairy-agent helper-trust` is root's command (`sudo`). In the agent's folder it does its file work as the
 agent's user, not as root: `show` tells you what the running agent sees (and says `checked as: uid N`),
 `set` and `clear` work on the file the panel's first-time set left there, and the file `set` writes is again

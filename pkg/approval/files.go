@@ -66,6 +66,13 @@ func (f Files) Load() (state string, t *Trust, raw []byte, err error) {
 	return api.ApprovalRequired, t, raw, nil
 }
 
+// exists reports whether there is anything under the trust file's name. When that cannot be told, the answer
+// is yes: the callers treat "no file" as the special case.
+func (f Files) exists() bool {
+	_, err := os.Lstat(f.Path)
+	return !errors.Is(err, os.ErrNotExist)
+}
+
 // read is the first half of Load: the checks of the folder and the file, and the file's bytes. The state is
 // api.ApprovalRequired when there is a file that passed them (what is in it is not looked at here); st is then
 // what the file is.
@@ -201,6 +208,10 @@ func (f Files) AddMachineID(rnd io.Reader) (string, error) {
 // write puts t into a temporary file in the trust file's folder and returns its name.
 func (f Files) write(t *Trust) (string, error) {
 	dir := filepath.Dir(f.Path)
+	if _, err := os.Lstat(dir); errors.Is(err, os.ErrNotExist) {
+		// Load calls this state "off" (no folder, so no file); a set finds out here that it cannot be done
+		return "", fmt.Errorf("the folder of the trust file does not exist: %s", dir)
+	}
 	if f.CheckDir != nil {
 		if err := f.CheckDir(dir); err != nil {
 			return "", fmt.Errorf("the folder of the trust file is not safe: %w", err)

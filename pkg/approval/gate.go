@@ -350,7 +350,7 @@ func (g *Gate) Challenge(req api.ApprovalRequest) (api.ChallengeResponse, *Refus
 	case req.Verb == api.ApproveTrustSet:
 		// the one request that is approved while there is no trust: the first-time set itself (Init)
 		if g.state != api.ApprovalOff {
-			return out, alreadySet()
+			return out, g.notSettable()
 		}
 		if g.o.ReadOnly {
 			return out, notHere()
@@ -754,7 +754,7 @@ func (g *Gate) Init(in api.TrustInit) (api.ApprovalStatus, *Refusal) {
 	g.reload(true)
 	if g.state != api.ApprovalOff {
 		g.o.Log.Warn("approval: trust set from the panel refused", "result", "refused", "reason", api.CodeTrustAlreadySet)
-		return g.status(), alreadySet()
+		return g.status(), g.notSettable()
 	}
 	if g.o.ReadOnly {
 		return g.status(), notHere()
@@ -823,6 +823,23 @@ func notHere() *Refusal {
 func alreadySet() *Refusal {
 	return &Refusal{Status: 409, Code: api.CodeTrustAlreadySet,
 		Msg: "this machine already has a trust file; it is changed only on the machine, by an administrator: fairy-agent helper-trust set"}
+}
+
+// notSettable is alreadySet for the one state other than off in which there is no trust file: the folder it
+// would be in fails its check (broken, by the rule of Files). The status and the code are alreadySet's, for a
+// panel that goes by them: nothing can be set from the network here either. The text says what is true: there
+// is no file, and why none can be written (audit 5, r2-a1-07: it said "already has a trust file"). Any other
+// state, also one in which it cannot be told whether a file is there, answers alreadySet. Caller holds g.mu.
+func (g *Gate) notSettable() *Refusal {
+	if g.state != api.ApprovalBroken || g.o.Files.exists() {
+		return alreadySet()
+	}
+	why := firstLine(g.loadErr)
+	if why == "" {
+		why = "the folder of the trust file cannot be used"
+	}
+	return &Refusal{Status: 409, Code: api.CodeTrustAlreadySet,
+		Msg: "this machine has no trust file, and none can be set from the network: " + why + ". Repair that on the machine, as an administrator; the trust can be set after that (there: fairy-agent helper-trust set)"}
 }
 
 func firstLine(s string) string {
