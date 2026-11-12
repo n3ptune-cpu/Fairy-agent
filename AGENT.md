@@ -1190,11 +1190,13 @@ only root / Administrators (Linux: or the agent's own user) can remove it.
    the oldest is at least 90 s old it is dropped for the new one (the log names it); if not, the new request
    is refused (`429 too_many_challenges`, the text says in how many seconds to ask again). So a challenge
    that somebody is confirming at Pocket ID cannot be pushed out for its first 90 s by a burst of requests
-   for others, and nobody can keep the list shut for longer than that with a few requests. A panel asks for
+   for others, and one burst cannot keep the list shut for longer than 90 s. A panel asks for
    one challenge per machine and action and uses it within seconds; it does not meet this. (What whoever
-   holds the control token can still do: ask for challenges until the request budget is used up, so that
-   nobody gets one for the rest of that minute; and, on Windows, drop the challenge of an update whose
-   download takes longer than 90 s. Either stops approvals, never lets anything through.)
+   holds the control token can still do, for as long as he keeps asking: sixteen challenge requests every
+   90 s keep the list full, and one more request than the budget allows in every minute keeps the budget
+   used up, so nobody else gets a challenge while he goes on. Once he stops, the list has room again after
+   at most 90 s and the budget after at most 60 s. On Windows he can also drop the challenge of an update
+   whose download takes longer than 90 s. All of this stops approvals; none of it lets anything through.)
 2. The panel sends the browser to Pocket ID once, as the client "Fairy PC actions", with a nonce made from the
    challenge, the request and the id of the machine it is for (the id the panel has on record for the machine
    you chose, not one that came with the challenge). Pocket ID asks for the passkey and signs an ID token with
