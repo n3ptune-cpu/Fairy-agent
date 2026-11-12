@@ -19,6 +19,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/n3ptune-cpu/Fairy-agent/pkg/agent/api"
@@ -162,6 +163,7 @@ type Agent struct {
 	cache        []byte
 	cacheAt      time.Time
 	cacheMu      sync.Mutex
+	cacheOld     atomic.Bool   // the kept /metrics answer is from before a power request: not served again
 	procMu       sync.Mutex    // guards procCall and procLast
 	procCall     *procCall     // the process listing that is being made now (nil: none)
 	procLast     *procList     // the latest finished one
@@ -819,7 +821,9 @@ func writableEntries(v any) json.RawMessage {
 func (a *Agent) metrics(w http.ResponseWriter, r *http.Request) {
 	a.cacheMu.Lock()
 	defer a.cacheMu.Unlock()
-	if a.cache == nil || time.Since(a.cacheAt) > 250*time.Millisecond {
+	// cacheOld is taken down before the new answer is made, not after: a power request that comes in while
+	// it is being made puts it up again, and the answer after this one is made anew as well.
+	if a.cache == nil || a.cacheOld.Swap(false) || time.Since(a.cacheAt) > 250*time.Millisecond {
 		b, dropped := encodeMetrics(a.Metrics(r.Context()))
 		if b == nil {
 			writeJSON(w, 500, map[string]any{"error": "internal error"})
@@ -1216,6 +1220,11 @@ func (a *Agent) power(w http.ResponseWriter, r *http.Request) {
 		req.Gate = gate
 	}
 	st, body := a.d.Power.Handle(req)
+	// The /metrics answer kept from before this request (up to 250 ms old) is not served after it: a cancel
+	// answered 200 and the next /metrics still showed the shutdown as pending (audit 6, r4-p2-10); a shutdown
+	// was accepted and the next /metrics said nothing was pending. A flag, not the lock of the kept answer: this
+	// answer must not wait for a /metrics that is being made.
+	a.cacheOld.Store(true)
 	writeJSON(w, st, body)
 }
 
