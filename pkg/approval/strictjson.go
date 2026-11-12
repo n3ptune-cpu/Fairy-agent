@@ -41,6 +41,12 @@ func checkJSON(b []byte) error {
 	return nil
 }
 
+// CheckJSON is the strict look at a JSON text for the other programs' inputs that carry or frame an approval (a
+// control request's body, a frame on the helper's pipe): exactly one value in valid UTF-8, nothing after it, no
+// name twice in one object (without regard to case), nested at most eight deep. encoding/json alone takes the
+// last of two members of one name, so two readers of one text could each believe another value.
+func CheckJSON(b []byte) error { return checkJSON(b) }
+
 func walkJSON(dec *json.Decoder, depth int) error {
 	tok, err := dec.Token()
 	if err != nil {

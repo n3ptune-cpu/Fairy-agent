@@ -1029,3 +1029,65 @@ func TestCmdlineIsRedactedWheneverItIsOn(t *testing.T) {
 		}
 	}
 }
+
+// TestControlBodyWithAMemberTwice (audit 5, r2-a1-06): a control request's body in which a member is there
+// twice was read with the last one counting (also when the two names differ only in letter case). Such a body
+// is refused now, on every control route and on the two approval routes, and nothing is carried out. A body
+// with a member the request does not know is taken as before.
+func TestControlBodyWithAMemberTwice(t *testing.T) {
+	r := newRig(t, "power_control: {enabled: true}\nwol: {enabled: true, allowed_macs: [\"3c:ec:ef:00:11:22\"]}\ncontrol_rate_per_min: 60\n")
+	r.a.d.Approval = approval.NewGate(approval.Options{Files: approval.Files{Path: filepath.Join(t.TempDir(), approval.TrustFileName)}, EnforcedBy: api.EnforcedByAgent})
+	raw := func(path, body string) (int, map[string]any) {
+		t.Helper()
+		req, _ := http.NewRequest("POST", r.srv.URL+path, strings.NewReader(body))
+		req.Header.Set("Authorization", "Bearer "+ctlTok)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		out := map[string]any{}
+		_ = json.NewDecoder(resp.Body).Decode(&out)
+		return resp.StatusCode, out
+	}
+	const twice = "invalid JSON body: a name is used twice in one object"
+	for path, bodies := range map[string][]string{
+		"/power": {
+			`{"action":"cancel","action":"shutdown","delay_s":60}`,
+			`{"action":"shutdown","delay_s":86400,"delay_s":60}`,
+			`{"action":"cancel","ACTION":"shutdown","delay_s":60}`,
+			`{"action":"shutdown","delay_s":60,"approval":{"token":"a","token":"b","entries":[]}}`,
+			`{"action":"shutdown","delay_s":60,"requested_by":{"a":1,"A":2}}`,
+		},
+		"/wol":                    {`{"mac":"3c:ec:ef:00:11:22","mac":"3c:ec:ef:00:11:23"}`},
+		api.PathApprovalChallenge: {`{"verb":"power","action":"cancel","action":"shutdown","delay_s":60}`, `{"verb":"apply_update","Verb":"power"}`},
+		api.PathApprovalTrust:     {`{"issuer":"https://a.test.invalid","issuer":"https://b.test.invalid"}`},
+	} {
+		for _, body := range bodies {
+			if st, b := raw(path, body); st != 400 || b["error"] != twice {
+				t.Errorf("POST %s %s: %d %v, want 400 %q", path, body, st, b, twice)
+			}
+		}
+	}
+	if st, b := raw("/power", "{\"action\":\"cancel\",\"requested_by\":\"\xff\"}"); st != 400 || b["error"] != "invalid JSON body: not valid UTF-8" {
+		t.Errorf("a body that is not UTF-8: %d %v", st, b)
+	}
+	for _, body := range []string{``, `{`, `{"action":"cancel"} x`, `{"action":"cancel"}{"action":"shutdown"}`} {
+		if st, b := raw("/power", body); st != 400 || b["error"] != "invalid JSON body" {
+			t.Errorf("POST /power %q: %d %v, want 400 as before", body, st, b)
+		}
+	}
+	if len(r.power.Scheduled) != 0 || len(r.sent) != 0 {
+		t.Fatalf("something was carried out: %v %v", r.power.Scheduled, r.sent)
+	}
+	// as before: a member this request does not know, and each member once
+	if st, b := raw("/power", `{"action":"shutdown","delay_s":60,"comment":"from an older panel","requested_by":"admin"}`); st != 200 {
+		t.Errorf("a body with an unknown member: %d %v", st, b)
+	}
+	if st, b := raw("/power", `{"action":"cancel"}`); st != 200 {
+		t.Errorf("cancel: %d %v", st, b)
+	}
+	if st, b := raw("/wol", `{"mac":"3c:ec:ef:00:11:22"}`); st != 200 || len(r.sent) != 1 {
+		t.Errorf("wol: %d %v", st, b)
+	}
+}

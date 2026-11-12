@@ -225,3 +225,51 @@ func TestLimiterClasses(t *testing.T) {
 		t.Fatal("a read was kept out by the others")
 	}
 }
+
+// TestDecodeRequestRefusesAMemberTwice (audit 5, r2-a1-06): the comment said "no duplicate", and encoding/json
+// took the last of two members of one name: `{"verb":"ping", ..., "verb":"power"}` was a power request. A frame
+// with a name twice in one object, at any depth and in any letter case, is refused, in both frame versions.
+func TestDecodeRequestRefusesAMemberTwice(t *testing.T) {
+	entry := `{"machine_id":"mmmmmmmmmmmmmmmmmmmmmm","challenge":"` + strings.Repeat("A", 43) + `","request":"apply_update"}`
+	for _, c := range []struct {
+		in string
+		v3 bool
+	}{
+		{`{"v":1,"verb":"ping","verb":"power","action":"shutdown","delay_s":60}`, false},
+		{`{"v":1,"verb":"power","action":"cancel","action":"shutdown","delay_s":60}`, false},
+		{`{"v":1,"verb":"power","action":"shutdown","delay_s":86400,"delay_s":60}`, false},
+		{`{"v":1,"verb":"fan_set","zone":0,"percent":30,"PERCENT":100}`, false},
+		{`{"v":1,"V":1,"verb":"ping"}`, false},
+		{`{"v":3,"verb":"challenge","for":"power","action":"sleep","action":"shutdown","delay_s":60}`, true},
+		{`{"v":3,"verb":"challenge","for":"fan_mode","for":"power","action":"shutdown","delay_s":60}`, true},
+		{`{"v":3,"verb":"apply_update","approval":{"token":"a.b.c","token":"d.e.f","entries":[` + entry + `]}}`, true},
+		{`{"v":3,"verb":"apply_update","approval":{"token":"a.b.c","entries":[` + strings.Replace(entry, `"request":"apply_update"`, `"request":"x","request":"apply_update"`, 1) + `]}}`, true},
+		{"{\"v\":1,\"verb\":\"power\",\"action\":\"cancel\",\"by\":\"\xff\"}", false}, // not UTF-8
+	} {
+		decode := DecodeRequest
+		if c.v3 {
+			decode = DecodeRequestV3
+		}
+		_, err := decode([]byte(c.in))
+		if err == nil || code(err) != CodeBadRequest {
+			t.Errorf("%.90s: %v, want %s", c.in, err, CodeBadRequest)
+		}
+	}
+	// the same frames with each member once are requests
+	for _, c := range []struct {
+		in string
+		v3 bool
+	}{
+		{`{"v":1,"verb":"power","action":"shutdown","delay_s":60}`, false},
+		{`{"v":3,"verb":"challenge","for":"power","action":"shutdown","delay_s":60}`, true},
+		{`{"v":3,"verb":"apply_update","approval":{"token":"a.b.c","entries":[` + entry + `]}}`, true},
+	} {
+		decode := DecodeRequest
+		if c.v3 {
+			decode = DecodeRequestV3
+		}
+		if _, err := decode([]byte(c.in)); err != nil {
+			t.Errorf("%.90s: %v", c.in, err)
+		}
+	}
+}

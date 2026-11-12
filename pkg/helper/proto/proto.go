@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/n3ptune-cpu/Fairy-agent/pkg/agent/api"
+	"github.com/n3ptune-cpu/Fairy-agent/pkg/approval"
 )
 
 // Version is the protocol version of every request that existed before approvals. Nothing about those requests
@@ -338,6 +339,13 @@ func decodeRequest(b []byte, version int) (Request, error) {
 	}
 	if len(b) > limit {
 		return r, &Error{Code: CodeTooLarge, Msg: "request too large"}
+	}
+	// no member twice (encoding/json would take the last one), valid UTF-8, nothing after the object
+	if err := approval.CheckJSON(b); err != nil {
+		if err.Error() == "data after the JSON value" {
+			return Request{}, bad("one request per frame")
+		}
+		return Request{}, bad("invalid request: %s", err.Error())
 	}
 	dec := json.NewDecoder(bytes.NewReader(b))
 	dec.DisallowUnknownFields()

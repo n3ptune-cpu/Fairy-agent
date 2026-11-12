@@ -535,15 +535,35 @@ func (l *limiter) allowPeek(key string) bool {
 	return n < l.n
 }
 
+// decodeBody reads the body of a control request: one JSON value and nothing after it, and no member twice in
+// one object (strictBody). Members the request does not know are ignored, as before.
 func decodeBody(r *http.Request, v any) error {
 	b, err := io.ReadAll(r.Body)
 	if err != nil {
 		return errors.New("request body too large")
 	}
+	if err := strictBody(b); err != nil {
+		return err
+	}
 	if err := json.Unmarshal(b, v); err != nil {
 		return errors.New("invalid JSON body")
 	}
 	return nil
+}
+
+// strictBody refuses a body that encoding/json would read and that is not one plain JSON text: a member that
+// is there twice (json takes the last one, also when the names differ only in case; another reader of the same
+// request, or of its approval, could take the first), text that is not UTF-8, objects nested deeper than any
+// request is. The panel's bodies are made by a JSON encoder and have none of these (audit 5, r2-a1-06).
+func strictBody(b []byte) error {
+	err := approval.CheckJSON(b)
+	if err == nil {
+		return nil
+	}
+	if msg := err.Error(); msg != "not valid JSON" && msg != "data after the JSON value" {
+		return errors.New("invalid JSON body: " + msg)
+	}
+	return errors.New("invalid JSON body")
 }
 
 // Metrics builds the /metrics payload.
