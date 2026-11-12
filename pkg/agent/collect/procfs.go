@@ -608,17 +608,47 @@ func CmdlineString(data []byte) string {
 }
 
 // ProcName is the process name: comm, or the program's file name when comm was cut at 15 characters.
+//
+// The file name is taken from the first argument, and never more than the file name. A program that writes
+// its own title (Chromium and Electron helpers, anything started with a made-up argv[0]) has its whole
+// command line there, in one piece: "/opt/app/some-long-helper-name --type=renderer --token=...". The name
+// is what follows comm up to the first white space, so it holds no argument, whatever processes.cmdline says
+// (audit 5, r2-a2-02: with cmdline off, and unfiltered, the arguments were sent in "name"). A file name with
+// a space after its fifteenth character is cut there; one that cannot be found stays comm.
 func ProcName(comm string, cmdline []byte) string {
 	if len(comm) < 15 || len(cmdline) == 0 {
 		return comm
 	}
 	arg0, _, _ := strings.Cut(string(cmdline), "\x00")
-	base := filepath.Base(arg0)
-	if strings.HasPrefix(base, comm) {
-		return base
+	// comm is the start of the file name, so the file name is where comm begins a part of a path. A part that
+	// ends with "/" is a folder of the same beginning: the next one is looked at.
+	for from := 0; from < len(arg0); {
+		i := strings.Index(arg0[from:], comm)
+		if i < 0 {
+			break
+		}
+		i += from
+		from = i + 1
+		if i > 0 && arg0[i-1] != '/' {
+			continue
+		}
+		end := i + len(comm)
+		for end < len(arg0) && arg0[end] != '/' && !isSpaceOrControl(arg0[end]) {
+			end++
+		}
+		if end < len(arg0) && arg0[end] == '/' {
+			continue
+		}
+		if end-i > 255 { // no file name is longer
+			return comm
+		}
+		return arg0[i:end]
 	}
 	return comm
 }
+
+// isSpaceOrControl: a byte that ends a file name inside a title (space, tab, line ends, any control character).
+func isSpaceOrControl(c byte) bool { return c <= ' ' || c == 0x7f }
 
 // Round rounds v to the given number of decimal places.
 func Round(v float64, places int) float64 {

@@ -1482,7 +1482,7 @@ runs the same program), rename the current `fairy-agent.exe` away, rename `fairy
 | Board fans and voltages | yes (hwmon chips) | only through the BMC (Supermicro, `ipmi:`) |
 | CPU watts | yes (RAPL, see the table above) | only with [Core Temp](#core-temp-optional-windows) |
 | Battery (laptops) | charge %, state, AC, draw in watts, time left, health | charge %, state, AC, Windows' own time-left estimate (no watts) |
-| Processes | all; command lines only with `processes.cmdline: true` (a filter blanks the secrets it recognises: best effort) | all names; details for programs it may open; the program's path instead of its command line; per-program dedicated GPU memory for every card (Windows' "GPU Process Memory" counter, like Task Manager) |
+| Processes | all; command lines only with `processes.cmdline: true` (a filter blanks the secrets it recognises: best effort). The name is the program's file name and never holds an argument, also for a program that writes its whole command line into its title | all names; details for programs it may open; the program's path instead of its command line; per-program dedicated GPU memory for every card (Windows' "GPU Process Memory" counter, like Task Manager) |
 
 **Not possible on Windows without a driver**, and therefore never done: CPU core temperatures, CPU package
 watts, motherboard sensor chips (fans, voltages), and other programs' command-line arguments. Tools that show
@@ -1677,7 +1677,9 @@ are lists of devices: edit those in the file.
   they are sent, a filter blanks the passwords and tokens it recognises before they leave the machine (and
   again in the panel). The filter is best effort: it cannot know every way a program takes a secret.
   Command lines are off only for installs made with this release or later; an existing agent keeps sending
-  them, filtered, until `fairy-agent config set processes.cmdline false` and a restart.
+  them, filtered, until `fairy-agent config set processes.cmdline false` and a restart. With them off, no
+  argument of any process is sent: a process's name is its program's file name and nothing after it (a
+  program that writes its whole command line into its title used to show up with its arguments in the name).
 * The BMC relay reaches private addresses only, passes the BMC password to ipmitool only through its
   environment, sends a Redfish login only to the certificate named in `tls_fingerprint`, and never logs
   passwords.

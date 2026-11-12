@@ -3,7 +3,9 @@
 package collect
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"math/rand"
 	"os"
@@ -245,5 +247,41 @@ func TestProcTop(t *testing.T) {
 	none.add(procRow{pid: 1})
 	if none.cut(); len(none.rows) != 0 {
 		t.Fatal("n = 0 keeps rows")
+	}
+}
+
+// TestProcessListNameHoldsNoArguments (audit 5, r2-a2-02): a listing made with command lines off sends no
+// argument of any process, also not in "name": a program with a name of 15 characters or more that wrote its
+// own title has its arguments in its first argument.
+func TestProcessListNameHoldsNoArguments(t *testing.T) {
+	const secret = "POC-NOT-A-REAL-SECRET"
+	l := fakeProc(t, map[int][]byte{
+		300: []byte("verylongprogramname --db-password=" + secret + " --user=admin"),
+		301: []byte("/opt/app/some-long-helper-name --type=renderer --secret=" + secret + "\x00"),
+		302: []byte("/usr/bin/nvidia-persistenced\x00--token\x00" + secret + "\x00"),
+	})
+	for pid, comm := range map[int]string{300: "verylongprogram", 301: "some-long-helpe", 302: "nvidia-persiste"} {
+		line := fmt.Sprintf("%d (%s) S 1 1 1 0 -1 4194560 100 0 0 0 250 50 0 0 20 0 4 0 9000 123456789 2048 18446744073709551615\n", pid, comm)
+		if err := os.WriteFile(filepath.Join(l.proc, strconv.Itoa(pid), "stat"), []byte(line), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	want := map[int]string{300: "verylongprogramname", 301: "some-long-helper-name", 302: "nvidia-persistenced"}
+	for _, withCmdline := range []bool{false, true} {
+		list, _, err := l.Processes(context.Background(), ProcOptions{Cmdline: withCmdline, MemTotal: 16 << 30, Interval: time.Millisecond})
+		if err != nil || len(list) != 3 {
+			t.Fatal(len(list), err)
+		}
+		for _, p := range list {
+			if p.Name == nil || *p.Name != want[p.PID] {
+				t.Errorf("cmdline %v: pid %d has the name %q, want %q", withCmdline, p.PID, *p.Name, want[p.PID])
+			}
+			if !withCmdline && p.Cmdline != nil {
+				t.Errorf("pid %d: a command line although they are off: %q", p.PID, *p.Cmdline)
+			}
+			if b, _ := json.Marshal(p); !withCmdline && bytes.Contains(b, []byte(secret)) {
+				t.Errorf("pid %d: the row holds an argument although command lines are off: %s", p.PID, b)
+			}
+		}
 	}
 }

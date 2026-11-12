@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 )
@@ -255,5 +256,52 @@ func TestWindowsHelpers(t *testing.T) {
 	}
 	if ProcCPUPercent(2e7, 2*time.Second) != 100 {
 		t.Fatal("one full CPU")
+	}
+}
+
+// TestProcNameHoldsNoArguments (audit 5, r2-a2-02): comm is cut at 15 characters, so a longer program name is
+// completed from the first argument. A program that wrote its own title has its whole command line in that
+// argument, and "name" carried it, secrets included, also with processes.cmdline off. The name is the file
+// name and nothing after it.
+func TestProcNameHoldsNoArguments(t *testing.T) {
+	for _, c := range []struct{ comm, cmdline, want string }{
+		// a title: everything in argv[0]
+		{"some-long-helpe", "/opt/app/some-long-helper-name --type=renderer --secret=x", "some-long-helper-name"},
+		{"some-long-helpe", "/opt/app/some-long-helper-name --type=renderer --secret=x\x00", "some-long-helper-name"},
+		{"verylongprogram", "verylongprogramname --db-password=POC-NOT-A-REAL-SECRET --user=admin\x00", "verylongprogramname"},
+		{"verylongprogram", "./verylongprogramname\t--token=abc", "verylongprogramname"},
+		{"verylongprogram", "verylongprogramname\n--token=abc", "verylongprogramname"},
+		{"some-long-helpe", "/opt/app/some-long-helper-name --config=/etc/some-long-helper-name/secret-pw.conf", "some-long-helper-name"},
+		{"some-long-helpe", "/opt/some-long-helper-name/bin/some-long-helper-name --pw=x", "some-long-helper-name"},
+		{"some-long-helpe", "/opt/some-long-helper-name.d/some-long-helper-name-2 --pw=x", "some-long-helper-name-2"},
+		{"chrome_crashpad", "/opt/google/chrome/chrome_crashpad_handler --monitor-self --database=/home/u/.config/google-chrome/Crash Reports --annotation=token=abc", "chrome_crashpad_handler"},
+		{"Isolated Web Co", "/usr/lib/firefox/Isolated Web Content -contentproc -childID 3 -prefsLen 30000", "Isolated Web Content"},
+		// the usual shape: arguments apart
+		{"nvidia-persiste", "/usr/bin/nvidia-persistenced\x00--user\x00nvpd\x00", "nvidia-persistenced"},
+		{"some-long-helpe", "some-long-helper-name\x00--secret=x\x00", "some-long-helper-name"},
+		{"systemd-journal", "/usr/lib/systemd/systemd-journald\x00", "systemd-journald"},
+		{"exactly15chars!", "/usr/bin/exactly15chars!\x00--pw=x\x00", "exactly15chars!"},
+		// a file name with a space after the fifteenth character: cut there, which is still only file name
+		{"my-long-program", "/opt/my-long-programs name with spaces --pw=x", "my-long-programs"},
+		// comm that is not the start of the file name (set by the program, an interpreter, a path the agent cannot split)
+		{"ThreadPoolForeg", "/opt/app/some-long-helper-name --secret=x", "ThreadPoolForeg"},
+		{"some-long-helpe", "/usr/bin/python3\x00/opt/app/some-long-helper-name\x00--secret=x\x00", "some-long-helpe"},
+		{"some-long-helpe", "/usr/bin/python3 /opt/app/some-long-helper-name --secret=x", "some-long-helper-name"},
+		{"some-long-name.", `C:\Program Files\App\some-long-name.exe --pw=x`, "some-long-name."},
+		{"some-long-helpe", "--secret=some-long-helper-name-is-not-a-path", "some-long-helpe"},
+		{"some-long-helpe", "x=some-long-helper-name --secret=x", "some-long-helpe"},
+		{"some-long-helpe", "", "some-long-helpe"},
+		{"some-long-helpe", "some-long-helpe" + strings.Repeat("r", 300), "some-long-helpe"},
+		// short names never look at the command line
+		{"llama-server", "/usr/bin/llama-server -m /models/x.gguf --api-key=k", "llama-server"},
+		{"sshd", "sshd: alice@pts/0", "sshd"},
+	} {
+		got := ProcName(c.comm, []byte(c.cmdline))
+		if got != c.want {
+			t.Errorf("ProcName(%q, %q) = %q, want %q", c.comm, c.cmdline, got, c.want)
+		}
+		if strings.ContainsAny(got, " \t\n=") && !strings.ContainsAny(c.comm, " =") {
+			t.Errorf("ProcName(%q, %q) = %q: more than a file name", c.comm, c.cmdline, got)
+		}
 	}
 }
