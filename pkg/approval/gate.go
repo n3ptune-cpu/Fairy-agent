@@ -88,8 +88,45 @@ type Gate struct {
 	loadedAt time.Time
 	loaded   bool
 	open     []challenge
-	fanAt    time.Time // when the fan window was opened (zero: closed)
+	fanAt    time.Time // when the approval that opened the fan window was accepted (zero: closed)
+	epoch    uint64    // counts the changes of the trust file's content: what was given under one does not count under the next
 	bootUsed bool      // the one shutdown after boot was accepted in this boot (by this process, or recorded)
+}
+
+// Pass is a request the gate let through (Admit). Whoever carries the request out tells the pass when it was
+// really applied: only then does an approved fan change open the fan window. A request that the machine then
+// refuses, or that changes nothing, opens nothing.
+type Pass struct {
+	g       *Gate
+	request string    // canonical
+	at      time.Time // the gate's clock when the approval was accepted
+	epoch   uint64    // Gate.epoch at that moment
+	applied bool
+}
+
+// Applied says that the request the pass was given for has been carried out and changed what it asked for
+// (the fan controller answered 200). If the pass is an accepted approval of a fan change, the fan window is
+// open from now on, counted from the moment that approval was accepted (so it never ends later than
+// fan_window_s after the passkey check was accepted, however long the change itself took). It does nothing for
+// a nil pass (a request that needed no approval: trust off, inside the window, the shutdown after boot), when
+// called a second time, and when the trust file changed in between.
+func (p *Pass) Applied() {
+	if p == nil {
+		return
+	}
+	g := p.g
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if p.applied || p.epoch != g.epoch || g.trust == nil {
+		return
+	}
+	p.applied = true
+	if g.fanAt.IsZero() || elapsed(g.fanAt, p.at) > 0 {
+		g.fanAt = p.at
+	}
+	if w := g.trust.FanWindow(); w > 0 {
+		g.o.Log.Info("approval: fan window open, the approved fan change was applied", "request", p.request, "window_s", w)
+	}
 }
 
 // NewGate returns the gate. The trust file is read at the first question.
@@ -135,6 +172,7 @@ func (g *Gate) reload(force bool) {
 			g.o.Log.Warn("approval: "+state, "enforced_by", g.o.EnforcedBy, "error", msg)
 		}
 		g.open, g.fanAt = nil, time.Time{}
+		g.epoch++
 	}
 	g.state, g.trust, g.loadErr, g.rawSum, g.loadedAt, g.loaded = state, t, msg, sum, now, true
 }
@@ -331,37 +369,41 @@ func (g *Gate) find(id []byte) int {
 	return at
 }
 
-// Check decides whether req may run now. ap is the approval the request carried (nil: none). It returns nil
-// when the request may run: trust is off; or the approval was accepted, in which case its challenge is used up
-// before Check returns, whatever the request then does; or the request needs none right now (fan window, the
-// one shutdown after boot). An approval that is sent is always checked in full. A nil Gate lets everything run.
-func (g *Gate) Check(req api.ApprovalRequest, ap *api.Approval) *Refusal {
+// Admit decides whether req may run now. ap is the approval the request carried (nil: none). The refusal is
+// nil when the request may run: trust is off; or the approval was accepted, in which case its challenge is used
+// up before Admit returns, whatever the request then does; or the request needs none right now (fan window,
+// the one shutdown after boot). An approval that is sent is always checked in full. A nil Gate lets everything
+// run.
+//
+// The pass is not nil when an approval of a fan change was accepted: the caller tells it when the change was
+// applied (Pass.Applied), and only that opens the fan window.
+func (g *Gate) Admit(req api.ApprovalRequest, ap *api.Approval) (*Pass, *Refusal) {
 	if g == nil {
-		return nil
+		return nil, nil
 	}
 	if req.Verb == api.ApproveTrustSet { // not a request that is carried out: Init checks its own approval
-		return &Refusal{Status: 400, Code: "bad_request", Msg: "the trust is set with POST " + api.PathApprovalTrust}
+		return nil, &Refusal{Status: 400, Code: "bad_request", Msg: "the trust is set with POST " + api.PathApprovalTrust}
 	}
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	g.reload(false)
 	switch g.state {
 	case api.ApprovalOff:
-		return nil
+		return nil, nil
 	case api.ApprovalRequired:
 	default:
 		g.o.Log.Warn("approval: refused", "result", "refused", "reason", "trust file unusable", "verb", req.Verb)
-		return unavailable(g.loadErr)
+		return nil, unavailable(g.loadErr)
 	}
 	canon, err := req.Canonical()
 	if err != nil { // nothing without a canonical form is ever run while trust is set
-		return &Refusal{Status: 400, Code: "bad_request", Msg: "not a request that can be approved: " + err.Error()}
+		return nil, &Refusal{Status: 400, Code: "bad_request", Msg: "not a request that can be approved: " + err.Error()}
 	}
 	now := g.o.Now()
 	if ap == nil {
 		if left := g.fanLeft(now); isFan(req) && left > 0 {
 			g.o.Log.Warn("approval: not needed, fan window", "result", "accepted", "request", canon, "left_s", int(left/time.Second))
-			return nil
+			return nil, nil
 		}
 		if isShutdown(req) {
 			if up, ok := g.bootWindow(req, now); ok {
@@ -371,28 +413,28 @@ func (g *Gate) Check(req api.ApprovalRequest, ap *api.Approval) *Refusal {
 					g.bootUsed = true
 					g.o.Log.Warn("approval: UNAPPROVED shutdown accepted shortly after boot (boot_shutdown_s in the trust file)",
 						"result", "accepted", "request", canon, "uptime_s", int(up/time.Second), "limit_s", g.trust.BootShutdownS)
-					return nil
+					return nil, nil
 				}
 				g.o.Log.Error("approval: the shutdown after boot was not accepted without approval: it could not be recorded",
 					"result", "refused", "request", canon, "error", firstLine(err.Error()))
 			}
 		}
 		g.o.Log.Warn("approval: required, none sent", "result", "refused", "request", canon)
-		return &Refusal{Status: 403, Code: api.CodeApprovalRequired,
+		return nil, &Refusal{Status: 403, Code: api.CodeApprovalRequired,
 			Msg: "this needs a passkey approval (Pocket ID) and the request carried none"}
 	}
 	c, cl, reason := g.verify(g.trust, canon, ap, now)
 	if reason != "" {
 		g.o.Log.Warn("approval: refused", "result", "refused", "reason", reason, "request", canon, "sub", cl.Sub, "kid", cl.Kid,
 			"challenge", c)
-		return refuse(reason, refusalText[reason])
-	}
-	if isFan(req) {
-		g.fanAt = now
+		return nil, refuse(reason, refusalText[reason])
 	}
 	g.o.Log.Warn("approval: accepted", "result", "accepted", "request", canon, "sub", cl.Sub, "name", cl.Name, "kid", cl.Kid,
 		"challenge", c)
-	return nil
+	if isFan(req) { // the fan window opens when the change was applied, not here (Pass.Applied)
+		return &Pass{g: g, request: canon, at: now, epoch: g.epoch}, nil
+	}
+	return nil, nil
 }
 
 // verify checks ap for the request canon against the trust t (the machine's own, or for the first-time set the

@@ -998,7 +998,8 @@ func (a *Agent) fanMode(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 400, map[string]any{"error": err.Error()})
 		return
 	}
-	if !a.approved(w, r, api.ApprovalRequest{Verb: api.ApproveFanMode, Mode: &b.Mode}, b.Approval) {
+	pass, ok := a.approved(w, r, api.ApprovalRequest{Verb: api.ApproveFanMode, Mode: &b.Mode}, b.Approval)
+	if !ok {
 		return
 	}
 	who := "panel " + clientIP(r)
@@ -1008,6 +1009,9 @@ func (a *Agent) fanMode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	st, body := a.d.Fan.SetMode(r.Context(), b.Mode, who)
+	if st == 200 { // only a change that was applied opens the fan window
+		pass.Applied()
+	}
 	writeJSON(w, st, body)
 }
 
@@ -1027,7 +1031,8 @@ func (a *Agent) fanDuty(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 400, map[string]any{"error": "zone and percent must be integers"})
 		return
 	}
-	if !a.approved(w, r, api.ApprovalRequest{Verb: api.ApproveFanSet, Zone: &zone, Percent: &pct}, b.Approval) {
+	pass, ok := a.approved(w, r, api.ApprovalRequest{Verb: api.ApproveFanSet, Zone: &zone, Percent: &pct}, b.Approval)
+	if !ok {
 		return
 	}
 	who := "panel " + clientIP(r)
@@ -1037,6 +1042,9 @@ func (a *Agent) fanDuty(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	st, body := a.d.Fan.SetDuty(r.Context(), zone, pct, who)
+	if st == 200 { // only a change that was applied opens the fan window
+		pass.Applied()
+	}
 	writeJSON(w, st, body)
 }
 
@@ -1065,7 +1073,7 @@ func (a *Agent) power(w http.ResponseWriter, r *http.Request) {
 		if req.DelayS != nil {
 			delay = *req.DelayS
 		}
-		if !a.approved(w, r, api.ApprovalRequest{Verb: api.ApprovePower, Action: &b.Action, DelayS: &delay}, b.Approval) {
+		if _, ok := a.approved(w, r, api.ApprovalRequest{Verb: api.ApprovePower, Action: &b.Action, DelayS: &delay}, b.Approval); !ok {
 			return
 		}
 	}
@@ -1104,7 +1112,7 @@ func (a *Agent) update(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	} else { // this agent starts the installer itself and checks itself, now; nothing further down looks at the approval
-		if !a.approved(w, r, api.ApprovalRequest{Verb: api.ApproveApplyUpdate}, b.Approval) {
+		if _, ok := a.approved(w, r, api.ApprovalRequest{Verb: api.ApproveApplyUpdate}, b.Approval); !ok {
 			return
 		}
 		b.Approval = nil

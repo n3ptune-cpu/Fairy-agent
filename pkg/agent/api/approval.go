@@ -266,7 +266,7 @@ type ChallengeResponse struct {
 	// Needed: the request needs an approval now. false: send it without one (Reason says why). For trust_set it
 	// is always true (or the request is refused: already_set).
 	Needed bool `json:"needed"`
-	// Reason when not needed: "off" (no trust set), "fan_window" (a fan change was approved a moment ago) or
+	// Reason when not needed: "off" (no trust set), "fan_window" (an approved fan change was applied a moment ago) or
 	// "boot_shutdown" (the machine's own setting allows one shutdown shortly after it started).
 	Reason string `json:"reason,omitempty"`
 	// Request is the canonical text the machine bound the challenge to. The panel compares it with its own.
@@ -381,7 +381,8 @@ type ApprovalStatus struct {
 	ClientID string        `json:"client_id,omitempty"`
 	Keys     []ApprovalKey `json:"keys,omitempty"`
 	Users    int           `json:"users,omitempty"` // how many users may approve
-	// FanWindowS: after an accepted approval of a fan change, further fan changes need none for this long (0: off).
+	// FanWindowS: after an approved fan change that was applied, further fan changes need none for this long,
+	// counted from the moment that approval was accepted (0: off).
 	FanWindowS *int `json:"fan_window_s,omitempty"`
 	// BootShutdownS: one shutdown without approval is accepted while the machine has been up for less than this
 	// (0: off, the default).

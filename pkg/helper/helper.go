@@ -258,19 +258,24 @@ func refusal(ref *approval.Refusal) proto.Response {
 
 // approve is the passkey check of a request that changes something: nil when r may run. While trust is set,
 // fan_set, fan_mode, power (other than cancel) and apply_update pass only with an approval this helper verified
-// itself (or inside the fan window, or as the one shutdown shortly after boot). fan_auto and power cancel are
+// itself (or inside the fan window, which an approved fan change opens once it was applied, or as the one
+// shutdown shortly after boot). fan_auto and power cancel are
 // never asked: they only make things safer, and the agent sends them with nobody present. The approval's
 // challenge is used up here, before anything of the request is carried out.
-func (s *Server) approve(r proto.Request) *proto.Response {
+//
+// The pass is for the fan verbs: they tell it when the change was applied (approval.Pass.Applied), which is what
+// opens the fan window.
+func (s *Server) approve(r proto.Request) (*approval.Pass, *proto.Response) {
 	ar, needs := proto.ApprovalRequestOf(r)
 	if !needs || r.Verb == proto.VerbChallenge || s.p.Approval == nil {
-		return nil
+		return nil, nil
 	}
-	if ref := s.p.Approval.Check(ar, r.Approval); ref != nil {
+	pass, ref := s.p.Approval.Admit(ar, r.Approval)
+	if ref != nil {
 		resp := refusal(ref)
-		return &resp
+		return nil, &resp
 	}
-	return nil
+	return pass, nil
 }
 
 // challenge answers the verb challenge: a challenge bound to the request it names (one of the four that need an
@@ -359,19 +364,27 @@ func (s *Server) dispatch(ctx context.Context, r proto.Request) proto.Response {
 		if s.p.Fan == nil {
 			return disabled("fan control")
 		}
-		if no := s.approve(r); no != nil {
+		pass, no := s.approve(r)
+		if no != nil {
 			return *no
 		}
 		st, body := s.p.Fan.SetDuty(ctx, *r.Zone, *r.Percent, s.who(r))
+		if st == 200 { // only a change that was applied opens the fan window
+			pass.Applied()
+		}
 		return proto.WithStatus(st, body)
 	case proto.VerbFanMode:
 		if s.p.Fan == nil {
 			return disabled("fan control")
 		}
-		if no := s.approve(r); no != nil {
+		pass, no := s.approve(r)
+		if no != nil {
 			return *no
 		}
 		st, body := s.p.Fan.SetMode(ctx, *r.Mode, s.who(r))
+		if st == 200 { // only a change that was applied opens the fan window
+			pass.Applied()
+		}
 		return proto.WithStatus(st, body)
 	case proto.VerbFanAuto:
 		if s.p.Fan == nil {
@@ -388,7 +401,7 @@ func (s *Server) dispatch(ctx context.Context, r proto.Request) proto.Response {
 		if s.p.Updater == nil {
 			return disabled("self-update")
 		}
-		if no := s.approve(r); no != nil {
+		if _, no := s.approve(r); no != nil {
 			return *no
 		}
 		if err := s.p.Updater(ctx); err != nil {
@@ -410,7 +423,7 @@ func (s *Server) power(r proto.Request) proto.Response {
 		}
 		return proto.OK(proto.PowerData{Action: "cancel"})
 	}
-	if no := s.approve(r); no != nil { // before anything else of a shutdown, reboot or sleep
+	if _, no := s.approve(r); no != nil { // before anything else of a shutdown, reboot or sleep
 		return *no
 	}
 	if min := s.minDelay(); *r.DelayS < min {

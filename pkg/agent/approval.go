@@ -171,26 +171,30 @@ func uncheckedText(seen bool, own string) string {
 // then the request is refused here and never reaches the helper.
 // What this process carries out itself is checked here, by the agent's own gate, and the approval's challenge
 // is used up before the request is carried out.
-func (a *Agent) approved(w http.ResponseWriter, r *http.Request, req api.ApprovalRequest, ap *api.Approval) bool {
+//
+// The pass is for the fan routes: they tell it when the change was applied (approval.Pass.Applied), which is
+// what opens the fan window. It is nil where the helper checks (the helper opens its own window).
+func (a *Agent) approved(w http.ResponseWriter, r *http.Request, req api.ApprovalRequest, ap *api.Approval) (*approval.Pass, bool) {
 	if a.helperRuns(req.Verb) {
 		if why := a.helperUnchecked(r.Context()); why != "" {
 			a.logOnce("unchecked-helper", "approval: request for the helper refused, the helper does not check approvals", "verb", req.Verb, "reason", why)
 			writeRefusal(w, &approval.Refusal{Status: 503, Code: api.CodeApprovalUnavailable, Msg: "not run: " + why})
-			return false
+			return nil, false
 		}
-		return true
+		return nil, true
 	}
+	var pass *approval.Pass
 	var ref *approval.Refusal
 	if a.ownGateMissing(r.Context()) {
 		ref = noOwnCheck()
 	} else {
-		ref = a.d.Approval.Check(req, ap)
+		pass, ref = a.d.Approval.Admit(req, ap)
 	}
 	if ref == nil || (ref.Code == api.CodeApprovalUnavailable && a.helperSaysOff(r.Context())) {
-		return true
+		return pass, true
 	}
 	writeRefusal(w, ref)
-	return false
+	return nil, false
 }
 
 // helperSaysOff reports whether the helper, asked at this moment, says that this machine has no trust file.

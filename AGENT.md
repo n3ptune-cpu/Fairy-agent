@@ -989,7 +989,7 @@ the agent's to check; the helper checks the rest). The panel does not have to kn
 
 | Request | Approval | |
 | --- | --- | --- |
-| `POST /fan/duty`, `POST /fan/mode` | yes | after one approved fan change, further fan changes need none for 30 s (the **fan window**; see settings) |
+| `POST /fan/duty`, `POST /fan/mode` | yes | after one approved fan change that the machine applied, further fan changes need none for 30 s (the **fan window**; see settings) |
 | `POST /power` with `shutdown`, `reboot`, `sleep` | yes, one each | never the fan window |
 | `POST /update` | yes, one each | Windows: see "Updates on Windows" below |
 | `POST /power` with `cancel` | no | it only stops something |
@@ -1082,9 +1082,12 @@ only root / Administrators (Linux: or the agent's own user) can remove it.
 
 ### Settings (in the trust file, changed only on the machine)
 
-* `fan_window_s` (default 30, 0 = off, at most 60): after one accepted approval of a fan change, the machine
-  accepts further fan changes without a new approval for this many seconds, by its own clock. Power and update
-  never use it.
+* `fan_window_s` (default 30, 0 = off, at most 60): after one approved fan change **that was applied**, the
+  machine accepts further fan changes without a new approval for this many seconds, by its own clock, counted
+  from the moment it accepted that approval. An approved fan request that the machine then refuses (a duty
+  below the minimum, a mode the board does not have) or that changes nothing (a duty while the mode is not
+  `full`, a duty below 100 % while the CPU is too hot) opens no window: the next fan request needs an approval
+  again. Fan requests inside the window do not make it longer. Power and update never use it.
 * `boot_shutdown_s` (default 0 = off, at most 900): the machine accepts **one** shutdown (not reboot, not
   sleep) without approval while it has been up for less than this many seconds. For machines that are switched
   on only to be updated and switched off again. Each use is written to the log as

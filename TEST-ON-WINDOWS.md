@@ -635,6 +635,13 @@ services), so do it before section A, or after "Going back to build 16".
   `approval:        required (checked by the helper)`. Step 13's shutdown -> `[403] approval_required`.
 * G1.9 Tidy up: `Remove-Item "C:\Program Files\Fairy\fairy-agent.exe.b16"`.
 
+**G2. The fan window opens only after a fan change that was applied.** Needs a PC with fan control through the
+helper (a Supermicro board; not the test VM) and a real approval, so the panel half: with the fan mode NOT
+`full`, approve "zone 0 to 100 %" from the panel -> the panel shows the BMC's refusal (`409`, `fan mode is ...;
+set mode 'full' first`). At once, without approval:
+`POST /fan/mode {"mode":"full"}` -> **`[403] approval_required`** (before this fix: `[200]` for 30 s).
+`helper.log` has no line `approval: fan window open` for the refused duty.
+
 ### What to send back
 
 The output of steps 5, 8, 9, 13, 15, 20, 26, 26b, 27, 28, N1, N2 (and 31, 32b if done), of G1.2, G1.4, G1.5,
