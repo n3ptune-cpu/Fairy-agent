@@ -845,7 +845,10 @@ to cancel: systemctl poweroff was already run`, not "cancelled".
   shows it, and Cancel still works, after the agent or the helper has restarted. Before 0.6.0 Cancel did
   nothing after an agent restart.
 * Cancel aborts that shutdown and nothing else. A shutdown that Fairy did not start (for example
-  `shutdown /s /t 600` typed by hand) is not shown as pending, and Cancel does not touch it.
+  `shutdown /s /t 600` typed by hand) is not shown as pending, and Cancel does not touch it. One exception,
+  which follows from the first limit below: while a Fairy shutdown that was aborted by hand is still on
+  record, Cancel asks Windows to abort, and Windows aborts whatever is pending then, also a shutdown typed
+  by hand in the meantime.
 * The record ends when the action's time has passed (plus one minute), on Cancel, and when Windows has been
   started again since.
 * While one action is pending, a second one is refused with HTTP 409 (`a shutdown is already pending; cancel it
@@ -866,7 +869,9 @@ to cancel: systemctl poweroff was already run`, not "cancelled".
   it starts, so after changing it run `Restart-Service fairy-agent-helper, fairy-agent`.
 
 **Sleep** (suspend to RAM, not hibernate) works the same way (delay, Cancel, one pending action at a time), but
-the agent itself waits on Windows too and then calls `SetSuspendState` (powrprof.dll). The agent reports in
+Windows does not count it down: on Windows the helper waits (the timer inside the helper named above; an
+agent that runs as LocalSystem without the helper waits itself) and then calls `SetSuspendState`
+(powrprof.dll). The agent reports in
 `/metrics` (`power_control.sleep`, and `sleep_note` with the reason when not) whether the machine can sleep, and
 refuses with 409 `sleep_unavailable` otherwise: on Windows it needs S1-S3 in `GetPwrCapabilities` (a laptop with
 only Modern Standby cannot be put to sleep by a service; `powercfg /a` shows what is available), on Linux
