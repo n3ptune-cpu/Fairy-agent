@@ -1183,7 +1183,7 @@ only root / Administrators (Linux: or the agent's own user) can remove it.
   for "switch off again now", not for a shutdown that happens a day later). "One" is one per boot: the use is
   recorded next to the trust file (`approval-boot-shutdown.json`), so restarting the helper / agent inside the
   window gives no second one. It is recorded when the shutdown is really scheduled: a request that the machine
-  refuses (a delay under `min_delay_s`, another action already pending) does not use it up. Linux tells boots apart by the kernel's boot id. Windows has none; there the
+  refuses (a delay under `min_delay_s`, another action already pending) does not use it up. Linux tells boots apart by the kernel's boot id. In an LXC container that id is the host's while the uptime is the container's, so there (read from the code, not run in a container) the one shutdown is one per boot of the HOST, not per start of the container: after the first, a restarted container gets none until the host reboots. It fails closed. Windows has none; there the
   record counts for the current boot unless it was made clearly before Windows started, by the clock (after a
   clock that jumped forward by more than the uptime, or sleep inside the window, one more could be accepted).
   If the record cannot be read or written, no shutdown is accepted without approval. Windows: "up" is the time
@@ -1216,7 +1216,11 @@ only root / Administrators (Linux: or the agent's own user) can remove it.
 3. The panel sends the request with the token attached. The machine first runs the request's own checks: is
    the delay allowed, is another action pending, can this machine sleep, are the fans in a mode that takes a
    duty, can an update be started. A request that fails one of them is refused for that reason and **costs
-   nothing**: the approval is not looked at and stays good for the rest of its 180 s. Then, immediately before
+   nothing**: the approval is not looked at and stays good for the rest of its 180 s. (For an update on
+   Linux, "can an update be started" is all that is known at that point: the approval is used up before the
+   agent has asked the release server, so an update that then ends with "already up to date", inside the
+   pause after the last one, or with a failed download has cost its approval. On Windows the helper uses it
+   up after the download.) Then, immediately before
    it acts, the machine checks: the token's signature with the pinned key (RS256), issuer, that it was issued
    for this client only, the user is one of the allowed ones, it is not expired, the passkey check
    (`auth_time`) is not older than the challenge, it was a passkey sign-in, the nonce fits (the machine makes
@@ -1553,7 +1557,7 @@ The file is `C:\ProgramData\fairy-agent\config.yaml` (Windows) or `/etc/fairy-ag
 | `only_from_panel` | false | `true`: connections are accepted only from the panel that added this machine (Add host) and from this machine itself. Your own `curl` from another machine then gets no answer, and a new panel address needs a new Add host / Re-pair. An agent with no panel on record (never added with Add host, or its last join code expired) then refuses every other machine, until the Add host / Re-pair command has run on it; the log says so once a minute |
 | `require_helper_pipe_owner` | false | Windows only. The agent knows its helper service by the helper's process id. It also looks at who owns the helper's pipe: a pipe the helper made belongs to Administrators or SYSTEM. In this release another owner is only reported, once, as a warning in `agent.log` (the pipe is still used); `true` makes the agent refuse such a pipe. Leave it off until the check in TEST-ON-WINDOWS.md (section 12, step 16) has shown `S-1-5-32-544` or `S-1-5-18` on your PCs: with a wrong owner and `true` the agent could not reach its helper (no fan control, Core Temp or power actions). Restart the agent after a change |
 | `token_file`, `control_token_file` | `token`, `control-token` next to config.yaml | the tokens (at least 24 characters, different from each other). `FAIRY_AGENT_TOKEN` / `FAIRY_AGENT_CONTROL_TOKEN` in the environment win. Never on the command line. |
-| `hide_host_details` | false | no hostname, no hardware model, just "Windows" / "Linux" |
+| `hide_host_details` | false | no hostname, no hardware model, just "Windows" / "Linux". It does not shorten the `approval` block of `/metrics`: whoever holds the read token still sees the Pocket ID address (`issuer`), the client id, this machine's `machine_id`, each key's id and thumbprint, how many users, `trust_hash`, `set_by` / `set_at`, `fan_window_s` and `boot_shutdown_s`, and for a broken trust file the reason with the file's path. The panel needs those to check whose trust a machine has; none of them is a secret, and none lets a request through |
 | `processes.enabled` / `cmdline` / `never_open` | true / true / none | the Processes tab. `cmdline` sends command lines (Linux) or program paths (Windows). A config file without the line means `true`. Since 0.6.0 a new Linux install writes `cmdline: false`; an existing `config.yaml` keeps what it says |
 | `gpu.nvidia_smi` | auto | `off` or a full local path (only administrators / root may be able to change the file and its folders) |
 | `gpu.amdgpu` | auto | Linux: AMD GPUs through the amdgpu driver's sysfs files; `off` to switch off |
@@ -1749,15 +1753,29 @@ on the first install and report anything odd:
 * CPU %, memory, disks, network counters, uptime, OS name and hardware strings (registry);
 * ACPI thermal-zone temperatures (PDH);
 * **the passkey approval** (TEST-ON-WINDOWS.md, section 13). Run on a Windows 11 test VM on 2026-11-11 with
-  the first version of this code, and found to work: the helper with the check, version 2 frames on the real
-  pipe, `helper-trust set / show / clear` as Administrator with keys fetched from a real Pocket ID, the trust
-  file's permissions, the file the helper wrote itself (hard link, inherited permissions) passing the helper's
-  own check, a damaged file refusing, `helper-status`. **Not yet run on Windows:** what changed after that
-  run: the first-time set that needs a proof (the refusal without one is step 26 of section 13; the accepted
-  path needs the panel), the agent's own check next to the helper (fans over `ipmitool`; the agent's account
-  reading and checking `helper\`), `POST /update` while the helper is stopped, the record of the shutdown
-  after boot. And still: a real Pocket ID token checked by a machine (its size and header, the clock
-  difference on real PCs), and whether GetTickCount64 behaves as described for `boot_shutdown_s`;
+  the first version of this code, and found to work then: the helper with the check, the pipe as it was then
+  (version 2 frames), `helper-trust set / show / clear` as Administrator with keys fetched from a real
+  Pocket ID, the trust file's permissions, the file the helper wrote itself (hard link, inherited
+  permissions) passing the helper's own check, a damaged file refusing, `helper-status`. **Not yet run on
+  Windows:** everything that changed after that run.
+  * From the first review: the first-time set that needs a proof (the refusal without one is step 26 of
+    section 13; the accepted path needs the panel), the agent's own check next to the helper (fans over
+    `ipmitool`; the agent's account reading and checking `helper\`), `POST /update` while the helper is
+    stopped, the record of the shutdown after boot.
+  * From the fifth audit (section 13, G): an agent of this version in front of a running helper from before
+    approvals (`503 approval_unavailable`, `helper-trust set` saying `NOT IN EFFECT IN THE HELPER YET`), the
+    fan window opening only after a change that was applied, an approval used up only when the request is
+    carried out, the three request budgets, the 17th open challenge, and the `trust hash` / `set by` lines.
+  * The machine id (section 13, H): **pipe protocol 3** on the real pipe (the version 2 that ran is refused
+    now, by both sides); the `machine_id` in the trust file, in `/metrics`, `helper-status` and
+    `helper-trust show`; the helper adding an id to a trust file from the run of 2026-11-11 (a temporary file
+    in `helper\`, then a rename over the trust file: whether the new file gets the same owner and access
+    list by inheritance, and whether the rename works while the agent has the file open);
+    `helper-trust set --new-machine-id`; one service of each build refusing to work together.
+  * From the second round of that audit: the agent's own look at an update's approval before it downloads
+    (it needs the agent's account to read `helper\approval-trust.json`; where it cannot, there is no look).
+  * And still: a real Pocket ID token checked by a machine (its size and header, the clock difference on
+    real PCs), and whether GetTickCount64 behaves as described for `boot_shutdown_s`;
 * **0.6.0's security fixes** (TEST-ON-WINDOWS.md, section 12, is the checklist; none of this has run on
   Windows): the trust check and repair of the data folder (owners and access lists read from the objects
   themselves, the rename to `*.untrusted-<time>`, folders created with their final permissions), the updater
