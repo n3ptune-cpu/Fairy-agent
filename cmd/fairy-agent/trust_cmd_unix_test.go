@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"github.com/n3ptune-cpu/Fairy-agent/internal/roottest"
 	"io"
 	"log/slog"
 	"os"
@@ -140,6 +141,7 @@ func newInstallRig(t *testing.T, dirOwner uint32) *installRig {
 	if os.Geteuid() != 0 {
 		t.Skip("needs root: it makes a folder that belongs to another user and runs the command as root and as two other users")
 	}
+	roottest.NeedOtherUsers(t)
 	r := &installRig{t: t, base: reachableDir(t), agentUID: 4242, someUID: 4343}
 	r.dir = filepath.Join(r.base, "fairy-agent")
 	r.path = filepath.Join(r.dir, approval.TrustFileName)

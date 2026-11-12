@@ -4,6 +4,7 @@ package main
 
 import (
 	"bytes"
+	"github.com/n3ptune-cpu/Fairy-agent/internal/roottest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -30,6 +31,7 @@ func fileOwner(t *testing.T, path string) (int, int) {
 func TestJoinStateNeverFollowsALink(t *testing.T) {
 	t.Setenv("FAIRY_AGENT_TOKEN", "")
 	t.Setenv("FAIRY_AGENT_CONTROL_TOKEN", "")
+	roottest.NeedOtherUsers(t)
 	uid, gid := os.Getuid(), os.Getgid()
 	if os.Geteuid() == 0 {
 		uid, gid = 65534, 65534

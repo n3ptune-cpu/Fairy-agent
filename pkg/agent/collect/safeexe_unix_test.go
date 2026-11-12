@@ -4,6 +4,7 @@ package collect
 
 import (
 	"fmt"
+	"github.com/n3ptune-cpu/Fairy-agent/internal/roottest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -72,6 +73,7 @@ func TestTrustedExecutableUnix(t *testing.T) {
 		t.Fatal("a folder accepted")
 	}
 	if os.Geteuid() == 0 {
+		roottest.NeedOtherUsers(t) // the checks above ran; what follows needs a file of another user
 		if err := os.Chown(bin, 1234, 0); err != nil {
 			t.Fatal(err)
 		}

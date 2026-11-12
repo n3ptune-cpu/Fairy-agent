@@ -3,6 +3,7 @@
 package enroll
 
 import (
+	"github.com/n3ptune-cpu/Fairy-agent/internal/roottest"
 	"os"
 	"path/filepath"
 	"syscall"
@@ -44,6 +45,7 @@ func testState() State {
 // M6: the state folder belongs to the agent's account, the writer may be root. Whatever that account puts
 // under the names in the folder, the writer changes the owner of the file it made itself and of nothing else.
 func TestWriteStateOwnedNeverFollowsALink(t *testing.T) {
+	roottest.NeedOtherUsers(t)
 	uid, gid, differs := otherIDs()
 	dir, outside := t.TempDir(), t.TempDir()
 	victim := filepath.Join(outside, "shadow")
