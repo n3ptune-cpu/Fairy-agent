@@ -699,13 +699,19 @@ mix: **install this build's program for both services** (the installer does both
 
 * H1 **A VM that still has the zip of 2026-11-11 and its trust file.** Before installing:
   `Get-Content "C:\ProgramData\fairy-agent\helper\approval-trust.json"` -> no `"machine_id"`. Note the
-  file's access list: `icacls "C:\ProgramData\fairy-agent\helper\approval-trust.json"`. Install this build
-  (section A). Then:
+  file's access list and its owner (icacls does not show the owner):
+  `icacls "C:\ProgramData\fairy-agent\helper\approval-trust.json"`
+  `(Get-Acl "C:\ProgramData\fairy-agent\helper\approval-trust.json").Owner`
+  Install this build (section A). Then:
   * H1.1 **[KEY]** `Get-Content "C:\ProgramData\fairy-agent\helper\approval-trust.json"` -> the second line
     is `"machine_id": "<22 characters>",` and every other line is as before.
-  * H1.2 **[KEY]** `icacls` on the file -> the same access list as before; `fsutil hardlink list` on it (step
-    N1) -> one line; `Get-ChildItem "C:\ProgramData\fairy-agent\helper" -Force` -> no file whose name starts
-    with `.approval-trust-`.
+  * H1.2 **[KEY]** `icacls` on the file -> the same access list as before;
+    `(Get-Acl "C:\ProgramData\fairy-agent\helper\approval-trust.json").Owner` -> the same owner as before
+    (`BUILTIN\Administrators` or `NT AUTHORITY\SYSTEM`; the file is a new one, made by the helper and renamed
+    over the old one, so this is what shows whether it came out as the old one was);
+    `fsutil hardlink list` on it (step N1) -> one line;
+    `Get-ChildItem "C:\ProgramData\fairy-agent\helper" -Force` -> no file whose name starts with
+    `.approval-trust-`.
   * H1.3 `Get-Content "C:\ProgramData\fairy-agent\helper\helper.log" -Tail 20` -> one line `approval: the
     trust file had no machine id ... one was added, nothing else in it changed` with `machine_id=<the same 22
     characters>`. `Restart-Service fairy-agent-helper`, look again: no second such line, the same id in the file.
@@ -718,8 +724,12 @@ mix: **install this build's program for both services** (the installer does both
 * H4 `helper-trust set --fan-window 20 --yes` -> `the machine id:   kept as it was`; `/metrics` shows the same
   id (wait 5 seconds). `helper-trust set --new-machine-id --yes` -> `the machine id:   NEW, it was <old>. The
   panel has the old one on record ...`; `/metrics` shows another id. Put the fan window back (`--fan-window 30`).
-* H5 A first-time set from the network cannot change it: step 26's POST with `"machine_id":"aaaaaaaaaaaaaaaaaaaaaaaa"`
-  added to the body -> `[409] already_set`, and `/metrics` still shows the id of H4.
+* H5 A first-time set from the network cannot change it. Step 25's file with one more member, sent as in
+  step 26:
+  `Get-Content "C:\fairy-selfbuilt\trust-init.json" -Raw | ConvertFrom-Json | Add-Member -NotePropertyName machine_id -NotePropertyValue "aaaaaaaaaaaaaaaaaaaaaaaa" -PassThru | ConvertTo-Json -Depth 5 | Set-Content -Path "C:\fairy-selfbuilt\trust-init-id.json" -Encoding ASCII`
+  `curl.exe -s -w " [%{http_code}]" -H "Authorization: Bearer $ctl" --data-binary "@C:\fairy-selfbuilt\trust-init-id.json" "$base/approval/trust"`
+  -> `{"code":"already_set","error":"this machine already has a trust file; ..."} [409]`, and `/metrics`
+  (step 16) still shows the id of H4.
 * H6 (only if the old zip is still around; otherwise skip) **One service of each build.** The agent of this
   build in front of the helper of 2026-11-11, with a trust file: `helper-status` -> `pipe protocol:   2 (the
   test build of 2026-11-11; this agent needs 3)`; step 13's shutdown -> `[503] approval_unavailable` with
