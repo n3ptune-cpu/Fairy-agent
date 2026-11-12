@@ -29,6 +29,32 @@ func idleConn(t *testing.T, src, addr string) net.Conn {
 	return c
 }
 
+// waitIdle waits until the server has marked n of the listener's connections idle. The server does that a
+// moment after the answer was sent, in its own time: a test that has read the answer cannot take the mark for
+// set, and one that depends on which connection became idle FIRST must wait for each mark before it opens the
+// next connection.
+func waitIdle(t *testing.T, ln *LimitListener, n int) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		ln.mu.Lock()
+		idle := 0
+		for c := range ln.conns {
+			if !c.idleSince.IsZero() {
+				idle++
+			}
+		}
+		ln.mu.Unlock()
+		if idle >= n {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out: %d of the listener's connections are marked idle, want %d", idle, n)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
 // Review N2. This machine has eight slots. A local user without any right took them with eight idle
 // connections (one complete request each, then nothing; they stay for 90 s and can be renewed). The update's
 // health check, which also comes from this machine, was then reset every time: every update was rolled back.
@@ -38,6 +64,12 @@ func TestLocalIdleConnsDoNotLockTheHealthCheckOut(t *testing.T) {
 	var held []net.Conn
 	for i := 0; i < MaxConnsPerSender; i++ {
 		held = append(held, idleConn(t, floodLocal, addr))
+		// The next one is opened only when the server has marked this one idle: the end of this test says which
+		// connection must have been closed, "the oldest idle one", and that is the one MARKED first, not the
+		// one opened first. Without this wait a later connection was now and then marked before held[0] (its
+		// answer is read here before the server gets to the mark), that one was closed, and the test failed
+		// with "the oldest idle connection is still open" (about 1 run in 20 on a busy machine).
+		waitIdle(t, ln, i+1)
 	}
 	waitStats(t, ln, func(s ConnStats) bool { return s.Trusted == MaxConnsPerSender })
 	time.Sleep(2500 * time.Millisecond) // longer than ReadHeaderTimeout: idle connections are not dropped after 2 s
