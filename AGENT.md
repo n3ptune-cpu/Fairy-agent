@@ -1278,6 +1278,15 @@ never sees. So while the helper's check is on, the agent refuses `POST /update` 
 and with one it lets the **helper** start the installer, which checks the approval then (after the download;
 that is why an update's challenge lives 900 s). A refusal at that point shows as a failed update
 (`starting the installer: helper: approval refused ...`), and what was downloaded for it is removed again.
+Before it downloads anything, the agent looks at the approval itself, with its own read-only look at the
+helper's trust file, and uses nothing up: the list of entries, an entry for the update, the token's
+signature against the pinned keys, issuer, client, user, passkey, the times, and the nonce with this
+machine's id. An approval that fails this is refused at once with `403 approval_refused` and the reason, as on
+Linux, and nothing is downloaded; so a request with a made-up `approval` no longer makes the machine fetch
+the release, and no longer stands in the way of yours (`409`) while it does. What the agent cannot see is the
+challenge (the helper gave it): an approval that was real and is used up or too old for its challenge passes
+the look, is downloaded for and is then refused by the helper as before. Where the agent's account cannot
+read the trust file, there is no look and everything is as before. The helper alone accepts an approval.
 The agent finds the state out when the request arrives: it asks the helper at that moment, and when the
 helper does not answer (stopped, starting, the PC has just booted) it looks at the trust file itself. Only
 "there is no trust file" lets an update through without approval. A helper that cannot be reached while a

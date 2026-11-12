@@ -369,10 +369,7 @@ func (g *Gate) Challenge(req api.ApprovalRequest) (api.ChallengeResponse, *Refus
 			return out, nil
 		}
 	}
-	c := challenge{request: canon, issued: now, ttl: ChallengeTTL}
-	if req.Verb == api.ApproveApplyUpdate {
-		c.ttl = UpdateChallengeTTL
-	}
+	c := challenge{request: canon, issued: now, ttl: challengeTTL(req)}
 	// The list is full (expired and used challenges are gone from it already). Whoever holds the control
 	// token can ask for challenges, so a rule that always drops the oldest lets him make every approval that
 	// is in flight worthless with sixteen requests, without anybody being told; and a rule that never drops
@@ -607,9 +604,7 @@ func (g *Gate) verify(t *Trust, machineID, canon string, ap *api.Approval, now t
 		return p, claims{}, ReasonExpired, false
 	}
 	other := ap.Entries[at].MachineID != machineID
-	own := append([]api.MachineEntry(nil), ap.Entries...)
-	own[at] = api.MachineEntry{MachineID: machineID, Challenge: ap.Entries[at].Challenge, Request: canon}
-	nonce, err := api.ApprovalNonce(own)
+	nonce, err := ownNonce(ap.Entries, at, machineID, canon)
 	if err != nil { // machineID is not one: cannot happen for a trust that was loaded or a proposal that was checked
 		return p, claims{}, ReasonEntries, other
 	}
@@ -619,6 +614,91 @@ func (g *Gate) verify(t *Trust, machineID, canon string, ap *api.Approval, now t
 	}
 	g.open = append(g.open[:mine], g.open[mine+1:]...) // used up, before anything runs
 	return p, cl, "", other
+}
+
+// challengeTTL is how long a challenge for req can be answered.
+func challengeTTL(req api.ApprovalRequest) time.Duration {
+	if req.Verb == api.ApproveApplyUpdate {
+		return UpdateChallengeTTL
+	}
+	return ChallengeTTL
+}
+
+// ownNonce is the nonce a token must carry for this machine to accept entries: the list as it was sent, with
+// this machine's id and the request it is about to carry out written into the entry at (its own).
+func ownNonce(entries []api.MachineEntry, at int, machineID, canon string) (string, error) {
+	own := append([]api.MachineEntry(nil), entries...)
+	own[at] = api.MachineEntry{MachineID: machineID, Challenge: entries[at].Challenge, Request: canon}
+	return api.ApprovalNonce(own)
+}
+
+// Preverify looks at an approval for req the way Admit does, as far as a gate can that did not give the
+// challenge, and uses nothing up. It is for the one place where the program that takes a request is not the
+// one that checks it: the Windows agent, which downloads a release before it hands the approval of an update
+// to the helper. There, any "approval" member made the agent download (audit 5, r2-a1-03). With this, an
+// approval that the helper is certain to refuse is refused before anything is downloaded. The helper stays the
+// only one that accepts an approval and uses it up.
+//
+// checked is false when this gate cannot say anything (no usable trust file as this process sees it): the
+// caller then goes on as without this look. Otherwise ref is nil, or the refusal Admit would give.
+//
+// What is checked, with the functions Admit's check is made of (api.ApprovalNonce, ownNonce, verifyToken), so
+// that the two cannot come apart: the list of entries is well-formed; one of its entries is for exactly this
+// request; the token carries the nonce of the list with THIS machine's id in that entry; it is signed with a
+// pinned key, from the issuer, for the client, by an allowed user, with a passkey, not expired, and no time in
+// it is in this machine's future. What cannot be checked here is the challenge: whether it is one the checker
+// gave, still open, and when it was given. So the two times that Admit compares with the challenge's (iat and
+// auth_time) are compared with the earliest moment a challenge that can still be answered was given (now
+// minus challengeTTL). Every approval Admit would accept at this moment or later therefore passes here; one
+// that passes here may still be refused by Admit (a challenge that is used up, expired or made up).
+func (g *Gate) Preverify(req api.ApprovalRequest, ap *api.Approval) (checked bool, ref *Refusal) {
+	if g == nil || ap == nil {
+		return false, nil
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.reload(true) // the file as it is now: the checker may have read it later than this gate's last look
+	if g.state != api.ApprovalRequired || g.trust == nil || g.trust.MachineID == "" {
+		return false, nil
+	}
+	canon, err := req.Canonical()
+	if err != nil {
+		return true, &Refusal{Status: 400, Code: "bad_request", Msg: "not a request that can be approved: " + err.Error()}
+	}
+	now := g.o.Now()
+	cl, reason := preverify(g.trust, canon, ap, now, now.Add(-challengeTTL(req)))
+	if reason != "" {
+		g.o.Log.Warn("approval: refused before it was handed on (nothing was used up)", "result", "refused", "reason", reason, "request", canon, "sub", cl.Sub, "kid", cl.Kid)
+		return true, refuse(reason, refusalText[reason])
+	}
+	return true, nil
+}
+
+// preverify is verify without the list of open challenges: every entry for canon is tried as this machine's
+// own. earliest stands in for the moment the challenge was given.
+func preverify(t *Trust, canon string, ap *api.Approval, now, earliest time.Time) (claims, string) {
+	if len(ap.Token) > api.MaxApprovalToken {
+		return claims{}, ReasonFormat
+	}
+	if _, err := api.ApprovalNonce(ap.Entries); err != nil {
+		return claims{}, ReasonEntries
+	}
+	reason := ReasonNoChallenge // no entry is for this request
+	for at, e := range ap.Entries {
+		if e.Request != canon {
+			continue
+		}
+		nonce, err := ownNonce(ap.Entries, at, t.MachineID, canon)
+		if err != nil {
+			return claims{}, ReasonEntries
+		}
+		cl, why := verifyToken(ap.Token, t, nonce, now, earliest)
+		if why != ReasonNonce { // accepted, or refused for something that is the same for every entry
+			return cl, why
+		}
+		reason = ReasonNonce
+	}
+	return claims{}, reason
 }
 
 // refusalText says each reason in a sentence (the answer's text; the reason word is in front of it).

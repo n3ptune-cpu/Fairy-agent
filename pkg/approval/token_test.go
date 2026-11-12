@@ -71,6 +71,7 @@ func TestTokenChecks(t *testing.T) {
 	sigPS, _ := rsa.SignPSS(rand.Reader, iss.Key, crypto.SHA256, sumPS[:], nil)
 	loginClient := *iss
 	loginClient.ClientID = "fairy-panel-login"
+	before := r.reader() // another process's gate on the same trust file (the Windows agent's)
 
 	for _, c := range []struct {
 		name, token, reason string
@@ -162,8 +163,24 @@ func TestTokenChecks(t *testing.T) {
 		{"amr a string", with("amr", "phr"), approval.ReasonAMR},
 		{"amr empty", with("amr", []string{}), approval.ReasonAMR},
 	} {
-		ref := r.g.Check(req, &api.Approval{Token: c.token, Entries: entries})
+		ap := &api.Approval{Token: c.token, Entries: entries}
+		// The look of a process that does not check (Preverify, on a gate that only reads the trust file and
+		// gave no challenge) says the same as the check, for every token but the two that are only too old
+		// for THIS challenge: when a challenge was given, only the one who gave it knows.
+		checked, pre := before.Preverify(req, ap)
+		switch {
+		case !checked:
+			t.Errorf("%s: the look before did not look", c.name)
+		case c.name == "issued before the challenge" || c.name == "authenticated before the challenge (no fresh passkey check)":
+			accepted(t, c.name+", the look before", pre)
+		default:
+			refused(t, c.name+", the look before", pre, api.CodeApprovalRefused, c.reason)
+		}
+		ref := r.g.Check(req, ap)
 		refused(t, c.name, ref, api.CodeApprovalRefused, c.reason)
+		if pre != nil && ref != nil && (pre.Status != ref.Status || pre.Msg != ref.Msg) {
+			t.Errorf("%s: the look before answers %d %q, the check %d %q", c.name, pre.Status, pre.Msg, ref.Status, ref.Msg)
+		}
 	}
 	// none of these used the challenge up, and tokens at the edge of each allowance are accepted
 	claim := func(k string, v any) func(string) string {
@@ -190,9 +207,17 @@ func TestTokenChecks(t *testing.T) {
 	} {
 		list := []api.MachineEntry{r.entry(req)}
 		n, _ := api.ApprovalNonce(list)
-		accepted(t, c.name, r.g.Check(req, &api.Approval{Token: c.token(n), Entries: list}))
+		ap := &api.Approval{Token: c.token(n), Entries: list}
+		// what the check accepts, the look before never refuses
+		if checked, pre := before.Preverify(req, ap); !checked || pre != nil {
+			t.Errorf("%s: the look before refused what the check accepts: %v %v", c.name, checked, pre)
+		}
+		accepted(t, c.name, r.g.Check(req, ap))
 	}
-	accepted(t, "the good token, after all the bad ones", r.g.Check(req, &api.Approval{Token: goodTok, Entries: entries}))
+	if checked, pre := before.Preverify(req, &api.Approval{Token: goodTok, Entries: entries}); !checked || pre != nil {
+		t.Errorf("the good token, the look before: %v %v", checked, pre)
+	}
+	accepted(t, "the good token, after all the bad ones and all the looks", r.g.Check(req, &api.Approval{Token: goodTok, Entries: entries}))
 }
 
 // TestOldTokenForNewChallenge: a token from an earlier, real approval cannot be attached to a later challenge,

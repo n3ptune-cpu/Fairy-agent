@@ -520,12 +520,14 @@ func TestUpdateRightAfterTrustWasSetOnTheMachine(t *testing.T) {
 func TestRefusedUpdateApprovalLeavesNoStage(t *testing.T) {
 	r := newMixedRig(t, mixedOpts{helper: api.HelperRunning, trust: true})
 	r.block(t, api.ApprovalRequired)
-	junk := &api.Approval{Token: "a.b.c", Entries: []api.MachineEntry{{MachineID: approvaltest.MachineID, Challenge: strings.Repeat("A", 43), Request: "apply_update"}}}
+	// an approval the agent's own look cannot refuse (really signed, for a challenge the helper never gave):
+	// the release is staged, and the helper refuses
+	junk := r.iss.Approve(time.Now(), api.MachineEntry{MachineID: approvaltest.MachineID, Challenge: strings.Repeat("A", 43), Request: "apply_update"})
 	if st, b := r.post(t, "/update", map[string]any{"approval": junk}); st != 202 {
-		t.Fatalf("update with a made-up approval: %d %v", st, b)
+		t.Fatalf("update with an approval for a challenge nobody gave: %d %v", st, b)
 	}
-	if st := r.waitUpdate(t); st.State != "failed" || !strings.Contains(st.Message, "approval refused") {
-		t.Fatalf("made-up approval: %+v", st)
+	if st := r.waitUpdate(t); st.State != "failed" || !strings.Contains(st.Message, "approval refused (no_challenge)") {
+		t.Fatalf("approval for a challenge nobody gave: %+v", st)
 	}
 	if ents, _ := os.ReadDir(r.stage); len(ents) != 0 {
 		var names []string

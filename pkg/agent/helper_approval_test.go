@@ -88,10 +88,10 @@ func newApprovalRig(t *testing.T) *aprig {
 	go b.Run(ctx)
 	fan := agent.NewFan(r.bmc, b, cfg.FanControl, nil)
 	log := slog.New(slog.NewTextHandler(r.audit, nil))
+	files := approval.Files{Path: filepath.Join(t.TempDir(), approval.TrustFileName)}
 	srv := helper.New(helper.Parts{Version: "test", BMC: b, Fan: fan, Power: r.power, Audit: log,
-		Updater: func(context.Context) error { r.helperStarts.Add(1); return nil },
-		Approval: approval.NewGate(approval.Options{EnforcedBy: api.EnforcedByHelper, Log: log,
-			Files: approval.Files{Path: filepath.Join(t.TempDir(), approval.TrustFileName)}})})
+		Updater:  func(context.Context) error { r.helperStarts.Add(1); return nil },
+		Approval: approval.NewGate(approval.Options{EnforcedBy: api.EnforcedByHelper, Log: log, Files: files})})
 	r.scm = &fakeSCM{state: api.HelperRunning, srv: srv}
 	dial := func(context.Context) (io.ReadWriteCloser, error) {
 		if st, _ := r.scm.State(); st != api.HelperRunning {
@@ -109,9 +109,11 @@ func newApprovalRig(t *testing.T) *aprig {
 		Asset: "fairy-agent-linux-amd64", ResultWait: 50 * time.Millisecond,
 		Apply:         func(context.Context) error { r.ownStarts.Add(1); return nil },
 		ApplyApproved: r.client.ApplyUpdateApproved})
+	// the agent's own gate, as Run builds it on Windows: it reads the helper's trust file and never writes it
 	d := agent.Deps{Collector: agenttest.NewCollector(), Version: "test", Helper: r.client,
 		Fan: r.client.Fan(cfg.FanControl), Power: agent.NewPower(r.client.Power(), cfg.PowerControl.MinDelayS), Updater: r.upd,
-		HelperSources: []string{api.FeatureFans, api.FeaturePower}}
+		HelperSources: []string{api.FeatureFans, api.FeaturePower},
+		Approval:      approval.NewGate(approval.Options{EnforcedBy: api.EnforcedByAgent, Files: files, ReadOnly: true, Log: slog.New(slog.NewTextHandler(io.Discard, nil))})}
 	r.srv = httptest.NewServer(agent.New(cfg, agent.Tokens{Read: readTok, Control: ctlTok}, d).Handler())
 	t.Cleanup(r.srv.Close)
 	r.base = r.srv.URL
@@ -329,16 +331,26 @@ func TestUpdateWithHelperApproval(t *testing.T) {
 	r.approvalBlock(t, api.ApprovalRequired)
 	st, b := r.post(t, "/update", map[string]any{"requested_by": "neptune"})
 	wantRefusal(t, "update without approval", st, b, 403, api.CodeApprovalRequired)
-	// a made-up approval: accepted for download (202), refused by the helper when the installer should start
+	// a made-up approval: refused by the agent's own look at it, at once; nothing is downloaded for it
+	// (TestMadeUpUpdateApprovalDownloadsNothing has every kind)
 	junk := &api.Approval{Token: "a.b.c", Entries: []api.MachineEntry{{MachineID: approvaltest.MachineID, Challenge: strings.Repeat("A", 43), Request: "apply_update"}}}
-	if st, b := r.post(t, "/update", map[string]any{"approval": junk}); st != 202 {
-		t.Fatalf("update with a made-up approval: %d %v", st, b)
+	downloads := r.gh.Downloads("fairy-agent-linux-amd64")
+	st, b = r.post(t, "/update", map[string]any{"approval": junk})
+	wantRefusal(t, "update with a made-up approval", st, b, 403, api.CodeApprovalRefused)
+	if n := r.gh.Downloads("fairy-agent-linux-amd64"); n != downloads {
+		t.Fatalf("made-up approval: %d downloads", n-downloads)
 	}
-	if st := wait(); st.State != "failed" || !strings.Contains(st.Message, "approval refused") {
-		t.Fatalf("made-up approval: %+v", st)
+	// one the agent cannot tell from a good one (really signed, for a challenge the helper never gave):
+	// accepted for download (202), refused by the helper when the installer should start
+	unasked := r.iss.Approve(time.Now(), junk.Entries...)
+	if st, b := r.post(t, "/update", map[string]any{"approval": unasked}); st != 202 {
+		t.Fatalf("update with an approval for a challenge nobody gave: %d %v", st, b)
+	}
+	if st := wait(); st.State != "failed" || !strings.Contains(st.Message, "approval refused (no_challenge)") {
+		t.Fatalf("approval for a challenge nobody gave: %+v", st)
 	}
 	if r.ownStarts.Load() != 1 || r.helperStarts.Load() != 0 {
-		t.Fatalf("made-up approval: own %d, helper %d", r.ownStarts.Load(), r.helperStarts.Load())
+		t.Fatalf("made-up approvals: own %d, helper %d", r.ownStarts.Load(), r.helperStarts.Load())
 	}
 	// a real one: the helper starts the installer, the agent's own right is not used
 	ok := r.approve(t, map[string]any{"verb": "apply_update"})
@@ -350,7 +362,7 @@ func TestUpdateWithHelperApproval(t *testing.T) {
 		t.Fatalf("approved update: own %d, helper %d", r.ownStarts.Load(), r.helperStarts.Load())
 	}
 	// the helper stopped: nothing can check an approval, so the update is refused; the agent does not fall back
-	// to its own right (this rig's agent has no look of its own at the trust file: the state is not known)
+	// to its own right (its own look at the trust file says there is one)
 	if st, b := r.post(t, api.PathHelperStop, map[string]any{}); st != 200 {
 		t.Fatalf("helper stop with trust set (fans to automatic needs no approval): %d %v", st, b)
 	}

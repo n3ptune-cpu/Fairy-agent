@@ -509,6 +509,19 @@ func (a *Agent) updateApproval(w http.ResponseWriter, r *http.Request, b *Update
 				"error": "this needs a passkey approval (Pocket ID) and the request carried none"})
 			return false
 		}
+		// Before anything is downloaded, this agent looks at the approval itself, with its own (read-only) look
+		// at the helper's trust file, and uses nothing up (approval.Gate.Preverify): an approval the helper is
+		// certain to refuse is refused here, at the point and with the answer of an agent that checks itself
+		// (Updater.Start asks b.Gate after its own checks). Without this, any "approval" member made the agent
+		// download the release, and the owner's update was answered 409 meanwhile (audit 5, r2-a1-03). The
+		// helper still checks the approval in full and is the only one that uses it up; where this agent
+		// cannot read the trust file, everything is as before.
+		if ap, gate := b.Approval, a.d.Approval; gate != nil {
+			b.Gate = func() (*approval.Pass, *approval.Refusal) {
+				_, ref := gate.Preverify(api.ApprovalRequest{Verb: api.ApproveApplyUpdate}, ap)
+				return nil, ref
+			}
+		}
 		return true
 	}
 	if why == "" {

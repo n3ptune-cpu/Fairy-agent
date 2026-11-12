@@ -68,9 +68,11 @@ type UpdateRequest struct {
 	RequestedBy any  `json:"requested_by"`
 	// Approval is the passkey approval the request carried (nil: none). The updater does not look inside.
 	Approval *api.Approval `json:"approval,omitempty"`
-	// Gate is the passkey check of an update this agent starts itself (nil: none, or the helper checks when it
-	// is asked to start the installer). Start asks it when the request has passed its own checks (a release
-	// key, no update in progress, the installer can be started), immediately before the run begins.
+	// Gate is the passkey check of an update this agent starts itself (nil: none). Where the helper checks,
+	// when it is asked to start the installer, Gate is this agent's look at the approval beforehand, which
+	// uses nothing up (approval.Gate.Preverify), and Approval stays set for the helper. Start asks Gate when
+	// the request has passed its own checks (a release key, no update in progress, the installer can be
+	// started), immediately before the run begins.
 	Gate Gated `json:"-"`
 }
 
