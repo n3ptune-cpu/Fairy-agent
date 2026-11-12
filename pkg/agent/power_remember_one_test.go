@@ -1,46 +1,84 @@
 package agent
 
 // Audit 6, r4-a1-02: the helper's power part keeps to "one action at a time" itself. "Windows" is a stand-in
-// that keeps to what power_windows.go does (read, not run here): a shutdown is counted down by Windows and a
-// second one is refused; a sleep is a timer of the helper's own; Cancel stops the sleep timer when there is
-// one and returns, and aborts the shutdown only otherwise.
+// that keeps to what power_windows.go does (read, not run here), step for step: a shutdown is counted down by
+// Windows and a second one is refused; a sleep is a timer of the helper's own, kept in the product's
+// pendingSleep as power_windows.go keeps it; a sleep that still waits is dropped when a shutdown is taken;
+// Cancel stops the sleep that is still to come and returns, and aborts the shutdown only otherwise. The three
+// Windows calls are counters.
 
 import (
 	"errors"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
 
 type winOS struct {
-	shutdown   string // "": Windows counts nothing down
-	sleepTimer bool
-	aborts     int
+	// sleep is the product's own piece (power.go), used as power_windows.go uses it.
+	sleep pendingSleep
+	// fast, when set, makes a sleep's timer run after this long instead of after its delay.
+	fast time.Duration
+
+	mu        sync.Mutex
+	shutdown  string // what Windows counts down ("": nothing): InitiateSystemShutdownEx
+	suspended int    // SetSuspendState was called
+	aborts    int    // AbortSystemShutdown was called
 }
 
-func (w *winOS) Schedule(action string, _ time.Duration, _ string) error {
+func (w *winOS) Schedule(action string, delay time.Duration, _ string) error {
 	if action == "sleep" {
-		w.sleepTimer = true
+		if w.fast > 0 {
+			delay = w.fast
+		}
+		w.sleep.set(delay, func() {
+			w.mu.Lock()
+			w.suspended++
+			w.mu.Unlock()
+		})
 		return nil
 	}
+	w.mu.Lock()
 	if w.shutdown != "" {
+		w.mu.Unlock()
 		return errors.New("A system shutdown has already been scheduled.")
 	}
 	w.shutdown = action
+	w.mu.Unlock()
+	w.sleep.stop() // a sleep that still waits is dropped when a shutdown is taken
 	return nil
 }
 
 func (w *winOS) Cancel() error {
-	if w.sleepTimer {
-		w.sleepTimer = false
+	if w.sleep.stop() {
 		return nil
 	}
+	w.mu.Lock()
 	w.aborts++
 	w.shutdown = ""
+	w.mu.Unlock()
 	return nil
 }
 func (w *winOS) CanSleep() (bool, string) { return true, "" }
+
+// sleepWaiting reports whether a sleep is still to come.
+func (w *winOS) sleepWaiting() bool {
+	w.sleep.mu.Lock()
+	defer w.sleep.mu.Unlock()
+	return w.sleep.timer != nil
+}
+
+// Snap is what "Windows" was asked so far (for tests outside this package).
+func (w *winOS) Snap() (suspended, aborts int, counting string) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.suspended, w.aborts, w.shutdown
+}
+
+// WindowsStandIn is winOS for the tests outside this package.
+type WindowsStandIn = winOS
 
 // statusClient stands in for the agent's client of the helper: requests go to the helper at once, what is
 // pending is the helper's status as the agent last read it (refresh: its next status answer).
@@ -85,7 +123,7 @@ func TestRememberedPowerTakesOneActionAtATime(t *testing.T) {
 				if rec, ok := start(win, store, c).PendingAction(); !ok || rec.Action != first {
 					t.Fatalf("%s over %s: after a restart %+v (%v)", second, first, rec, ok)
 				}
-				if win.sleepTimer {
+				if win.sleepWaiting() {
 					t.Fatalf("%s over %s: a sleep timer runs next to the %s", second, first, first)
 				}
 			}
@@ -101,6 +139,7 @@ func TestRememberedPowerTakesOneActionAtATime(t *testing.T) {
 			if err := r.ScheduleBy(first, time.Minute, "carol"); err != nil {
 				t.Fatalf("%s after the %s's time: %v", first, second, err)
 			}
+			win.sleep.stop() // no timer of this round is left behind
 		}
 	}
 }
@@ -133,7 +172,7 @@ func TestASleepInTheClockGapDoesNotHideTheShutdown(t *testing.T) {
 	if st == 200 || !strings.Contains(text, "a shutdown is already pending; cancel it first") {
 		t.Fatalf("a sleep in the gap: %d %v; want a refusal that names the pending shutdown", st, b)
 	}
-	if win.sleepTimer {
+	if win.sleepWaiting() {
 		t.Fatal("a sleep timer runs in the helper")
 	}
 	cl.refresh() // the helper's next status answer

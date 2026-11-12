@@ -5,7 +5,6 @@ package agent
 import (
 	"log/slog"
 	"path/filepath"
-	"sync"
 	"time"
 	"unsafe"
 
@@ -20,8 +19,7 @@ import (
 // waits and then calls SetSuspendState (sleep, not hibernate). All need SeShutdownPrivilege, which LocalService
 // and LocalSystem have.
 type systemPower struct {
-	mu    sync.Mutex
-	sleep *time.Timer
+	sleep pendingSleep // the sleep that is still to come (power.go)
 }
 
 // SystemPower returns the Windows implementation, remembering a pending shutdown in the helper's folder of
@@ -83,12 +81,7 @@ func (s *systemPower) Schedule(action string, delay time.Duration, message strin
 		if err := procSetSuspendState.Find(); err != nil {
 			return err
 		}
-		s.mu.Lock()
-		defer s.mu.Unlock()
-		if s.sleep != nil {
-			s.sleep.Stop()
-		}
-		s.sleep = time.AfterFunc(delay, func() {
+		s.sleep.set(delay, func() {
 			slog.Warn("power: going to sleep (SetSuspendState)")
 			if err := enableShutdownPrivilege(); err != nil {
 				slog.Error("power: sleep failed", "error", err.Error())
@@ -103,18 +96,24 @@ func (s *systemPower) Schedule(action string, delay time.Duration, message strin
 	}
 	msg, _ := windows.UTF16PtrFromString(message)
 	reason := uint32(windows.SHTDN_REASON_MAJOR_OTHER | windows.SHTDN_REASON_MINOR_OTHER | windows.SHTDN_REASON_FLAG_PLANNED)
-	return windows.InitiateSystemShutdownEx(nil, msg, uint32(delay/time.Second), true, action == "reboot", reason)
+	if err := windows.InitiateSystemShutdownEx(nil, msg, uint32(delay/time.Second), true, action == "reboot", reason); err != nil {
+		return err
+	}
+	// Windows counts this shutdown down now, and Cancel must abort it. A sleep that still waits here is a
+	// leftover (whoever remembers the action takes one at a time: its record of that sleep has ended): with it
+	// in place Cancel would stop the sleep and leave the shutdown.
+	if s.sleep.stop() {
+		slog.Warn("power: a sleep that was still waiting is dropped: a " + action + " was scheduled")
+	}
+	return nil
 }
 
+// Cancel stops the sleep that is still to come, or else asks Windows to abort its shutdown. A sleep that was
+// carried out (or failed, or was cancelled) is not "a sleep" here any more: see pendingSleep.
 func (s *systemPower) Cancel() error {
-	s.mu.Lock()
-	if s.sleep != nil {
-		s.sleep.Stop()
-		s.sleep = nil
-		s.mu.Unlock()
+	if s.sleep.stop() {
 		return nil
 	}
-	s.mu.Unlock()
 	if err := enableShutdownPrivilege(); err != nil {
 		return err
 	}

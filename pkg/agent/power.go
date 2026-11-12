@@ -323,6 +323,54 @@ func (p *Power) Handle(req PowerRequest) (int, map[string]any) {
 	return 200, map[string]any{"action": req.Action, "pending": *p.pending}
 }
 
+// pendingSleep is the one sleep the Windows power part waits for: a timer in the process, because Windows
+// counts no sleep down (power_windows.go). It lives here, with the other pieces of that file that need no
+// Windows call, so that its tests run everywhere.
+//
+// It knows of a sleep only while the sleep is still to come. The timer used to stay on record after it had
+// run (review of fix7, RF7-01): the next Cancel, of a shutdown asked for any time later, found "a sleep",
+// stopped the timer that had long run, answered ok, and never asked Windows to abort. The helper forgot its
+// record, the agent answered "cancelled", and Windows went on counting the shutdown down.
+type pendingSleep struct {
+	mu    sync.Mutex
+	timer *time.Timer // nil: no sleep is waiting
+}
+
+// set arranges for run to be called after delay, in the place of a sleep that was waiting. Either stop took
+// the sleep away or run is called, never both; and from the moment run is called no sleep is waiting, whatever
+// becomes of it (the sleep was carried out, or it failed).
+func (s *pendingSleep) set(delay time.Duration, run func()) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.timer != nil {
+		s.timer.Stop()
+	}
+	var t *time.Timer
+	t = time.AfterFunc(delay, func() {
+		s.mu.Lock()
+		if s.timer != t { // stopped, or replaced by a later sleep, in the moment it fired
+			s.mu.Unlock()
+			return
+		}
+		s.timer = nil
+		s.mu.Unlock()
+		run()
+	})
+	s.timer = t
+}
+
+// stop takes a waiting sleep away and reports whether there was one.
+func (s *pendingSleep) stop() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.timer == nil {
+		return false
+	}
+	s.timer.Stop()
+	s.timer = nil
+	return true
+}
+
 // errNoShutdownInProgress is Windows' ERROR_NO_SHUTDOWN_IN_PROGRESS: AbortSystemShutdown found nothing to abort.
 const errNoShutdownInProgress = 1116
 
