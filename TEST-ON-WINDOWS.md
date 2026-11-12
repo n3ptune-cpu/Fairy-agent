@@ -628,9 +628,11 @@ services), so do it before section A, or after "Going back to build 16".
   -> **no** line `pipe protocol:   3`; instead `approval:        this helper is from before passkey approvals`.
 * G1.3 No trust file yet: a shutdown far away is accepted as before (step 13's request, `delay_s` 86400)
   -> `[200]`; cancel it (step 14). `/metrics` (step 16) has **no** `approval` block.
-  (If this answers `[503] approval_unavailable` with `this agent cannot tell whether this machine has an
-  approval trust file`: the agent's account could not check the helper's folder. That is the open question of
-  step N2; please send the answer. It fails closed: nothing runs, and G1.8's restart of the helper ends it.)
+  (If this answers `[503] approval_unavailable` with a text that ends `..., and this machine's approval trust
+  file cannot be used (restart the helper: ...`, although there is no trust file: the agent's account could
+  not check the helper's folder, and a folder it cannot check counts as a trust file that cannot be used.
+  That is the open question of step N2; please send the answer. It fails closed: nothing runs, and G1.8's
+  restart of the helper ends it.)
 * G1.4 **[KEY]** Set the trust (step 7's command, with `--yes`).
   -> `written.`, then **`NOT IN EFFECT IN THE HELPER YET: the fairy-agent-helper that is running is from before
   passkey approvals`** and `Restart it now: Restart-Service fairy-agent-helper`. It must NOT say `In effect
