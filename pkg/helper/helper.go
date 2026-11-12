@@ -499,8 +499,7 @@ func (s *Server) power(r proto.Request) proto.Response {
 	}); ok && r.By != nil { // remembers who asked with the action (agent.RememberedPower); the same message
 		err = by.ScheduleBy(action, delay, *r.By)
 	} else {
-		msg := fmt.Sprintf("Fairy: %s requested by %s in %d seconds.", action, deref(r.By), *r.DelayS)
-		err = s.p.Power.Schedule(action, delay, msg)
+		err = s.p.Power.Schedule(action, delay, agent.PowerMessage(action, deref(r.By), delay))
 	}
 	if err != nil {
 		return proto.Fail(proto.CodeFailed, action+": "+short(err))

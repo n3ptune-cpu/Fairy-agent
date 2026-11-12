@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 )
@@ -300,9 +301,19 @@ func (r *RememberedPower) PendingAction() (Pending, bool) {
 	return Pending{Action: rec.Action, At: rec.at(r.clocks()), DelayS: rec.DelayS, RequestedBy: rec.By}, true
 }
 
-// powerMessage is the text Windows shows to whoever is signed in.
-func powerMessage(action, who string, delay time.Duration) string {
-	return fmt.Sprintf("Fairy: %s requested by %s in %d seconds.", action, who, int(delay/time.Second))
+// PowerMessage is the text handed to the operating system with a shutdown or reboot; Windows shows it to
+// whoever is signed in (InitiateSystemShutdownExW takes it as UTF-16). It is for display only, and the one
+// place where it is made.
+//
+// No word of it begins with "-": every hyphen of the requester's name is written as U+2011, the non-breaking
+// hyphen, which looks the same. On a real PC the notice for "test-admin" read "Fairy: shutdown requested by
+// test" and nothing more; whatever in Windows cuts it there, a name is free to hold " -x", and no part of
+// this text may look like a switch to a program it is handed to. The rest of the sentence has no "-" and no
+// "/" (the action is one of three words, the delay is never negative, a cleaned name has no "/"). The name
+// itself is not changed anywhere else: the record, requested_by in every answer, the log and the helper's
+// audit keep it as it was sent.
+func PowerMessage(action, who string, delay time.Duration) string {
+	return fmt.Sprintf("Fairy: %s requested by %s in %d seconds.", action, strings.ReplaceAll(who, "-", "\u2011"), int(delay/time.Second))
 }
 
 // Schedule schedules action and remembers it. The requester is not known here (see ScheduleBy).
@@ -313,7 +324,7 @@ func (r *RememberedPower) Schedule(action string, delay time.Duration, message s
 // ScheduleBy is Schedule with the requester, who is remembered with the action; the message is built here.
 func (r *RememberedPower) ScheduleBy(action string, delay time.Duration, who string) error {
 	who = cleanWho(who)
-	return r.schedule(action, delay, powerMessage(action, who, delay), who)
+	return r.schedule(action, delay, PowerMessage(action, who, delay), who)
 }
 
 func (r *RememberedPower) schedule(action string, delay time.Duration, message, who string) error {

@@ -265,7 +265,7 @@ func (p *Power) Handle(req PowerRequest) (int, map[string]any) {
 			return ref.Status, refusalBody(ref)
 		}
 	}
-	msg := fmt.Sprintf("Fairy: %s requested by %s in %d seconds.", req.Action, who, delay)
+	msg := PowerMessage(req.Action, who, time.Duration(delay)*time.Second)
 	var err error
 	if ap, ok := p.exec.(powerApproved); ok && req.Approval != nil {
 		err = ap.ScheduleApproved(req.Action, time.Duration(delay)*time.Second, who, req.Approval)
