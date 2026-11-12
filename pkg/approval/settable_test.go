@@ -82,7 +82,13 @@ func TestSetWithoutAStateFolder(t *testing.T) {
 		t.Fatalf("state: %+v", st)
 	}
 	st, ref := r.firstSet(g, r.iss, r.iss.Init())
-	if ref == nil || ref.Status != 500 || ref.Code != "failed" || !strings.Contains(ref.Msg, "the trust file could not be written: the folder of the trust file does not exist: "+filepath.Dir(r.files.Path)) {
+	// the reason is held to 200 characters, and the folder's path in it is as long as TMPDIR makes it (audit 6,
+	// r4-a1-06: with a TMPDIR of 150 characters the path's end was cut off, and the test looked for all of it)
+	why := "the folder of the trust file does not exist: " + filepath.Dir(r.files.Path)
+	if len(why) > 200 {
+		why = why[:200]
+	}
+	if ref == nil || ref.Status != 500 || ref.Code != "failed" || !strings.Contains(ref.Msg, "the trust file could not be written: "+why) {
 		t.Fatalf("a set without the folder: %+v", ref)
 	}
 	if st.State != api.ApprovalOff {

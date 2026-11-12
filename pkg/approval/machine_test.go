@@ -410,8 +410,19 @@ func TestGateThatOnlyReadsAddsNoMachineID(t *testing.T) {
 	must(t, os.WriteFile(r.files.Path, old, 0o600))
 	reader := approval.NewGate(approval.Options{Files: r.files, EnforcedBy: api.EnforcedByAgent, Now: r.Now, ReadOnly: true})
 	st := reader.Status()
-	if st.State != api.ApprovalBroken || st.MachineID != "" || st.Issuer != "" || !strings.Contains(st.Error, "has no machine_id") || !strings.Contains(st.Error, "this version of fairy-agent-helper on Windows") {
-		t.Fatalf("the reading gate: %+v", st)
+	// The text begins with the file's path and is held to 300 characters, and the path is as long as TMPDIR
+	// makes it: it is held against the whole sentence cut there, not against words near its end (audit 6,
+	// r4-a1-06: this test failed with a TMPDIR of 100 characters).
+	said := approval.ErrNoMachineID.Msg
+	want := r.files.Path + ": " + said
+	if len(want) > 300 {
+		want = want[:300]
+	}
+	if !strings.Contains(said, "has no machine_id") || !strings.Contains(said, "this version of fairy-agent-helper on Windows") {
+		t.Fatalf("the sentence for a file without machine id: %q", said)
+	}
+	if st.State != api.ApprovalBroken || st.MachineID != "" || st.Issuer != "" || st.Error != want {
+		t.Fatalf("the reading gate: %+v\nwant the error %q", st, want)
 	}
 	if now, _ := os.ReadFile(r.files.Path); !bytes.Equal(now, old) || len(tempFiles(t, filepath.Dir(r.files.Path))) != 0 {
 		t.Fatal("the reading gate wrote")
@@ -459,9 +470,13 @@ func TestMachineIDThatCannotBeAddedFailsClosed(t *testing.T) {
 	}
 	g := approval.NewGate(approval.Options{Files: files, EnforcedBy: api.EnforcedByAgent, Now: r.Now})
 	st := g.Status()
-	if st.State != api.ApprovalBroken || st.MachineID != "" || !strings.Contains(st.Error, "has no machine_id, and adding one failed: the file belongs to root and cannot be given back to root") ||
-		!strings.Contains(st.Error, "fairy-agent helper-trust set") {
+	if st.State != api.ApprovalBroken || st.MachineID != "" {
 		t.Fatalf("state: %+v", st)
+	}
+	// the reason is whole where the folder's path leaves room and cut where it does not (the path is as long as
+	// TMPDIR makes it; audit 6, r4-a1-06)
+	if problem := approvaltest.NoIDTextProblem(st.Error, r.files.Path, "the file belongs to root and cannot be given back to root"); problem != "" {
+		t.Fatalf("the reason: %s\nstate: %+v", problem, st)
 	}
 	if now, _ := os.ReadFile(r.files.Path); !bytes.Equal(now, old) {
 		t.Fatal("the file changed although the id could not be added")
@@ -560,7 +575,7 @@ func TestBrokenTrustFileGetsNoMachineID(t *testing.T) {
 // asked. The name is out of the text: one line, and a reason that reads the same every time.
 func TestFailingMachineIDIsLoggedOnce(t *testing.T) {
 	r := newRig(t, false)
-	dir, err := os.MkdirTemp("", "tn") // a short path: the whole reason fits into the answer's 300 characters
+	dir, err := os.MkdirTemp("", "tn") // a short path: more of the reason fits into the answer's 300 characters
 	must(t, err)
 	t.Cleanup(func() { os.RemoveAll(dir) })
 	r.files.Path = filepath.Join(dir, approval.TrustFileName)
@@ -575,8 +590,15 @@ func TestFailingMachineIDIsLoggedOnce(t *testing.T) {
 	var first string
 	for look := 0; look < 5; look++ {
 		st := g.Status()
-		if st.State != api.ApprovalBroken || !strings.Contains(st.Error, "adding one failed: lchown ") || !strings.Contains(st.Error, "/.approval-trust-*.tmp: invalid argument") {
+		if st.State != api.ApprovalBroken {
 			t.Fatalf("look %d: %+v", look+1, st)
+		}
+		// The reason with the pattern in the place of the made-up name: whole where the path leaves room, cut
+		// where it does not. The path lies under TMPDIR (audit 6, r4-a1-06: with a long one the reason is cut
+		// before the name, and the test looked for the words after it).
+		why := "lchown " + filepath.Join(dir, ".approval-trust-*.tmp") + ": invalid argument"
+		if problem := approvaltest.NoIDTextProblem(st.Error, r.files.Path, why); problem != "" {
+			t.Fatalf("look %d: %s\n%+v", look+1, problem, st)
 		}
 		if look == 0 {
 			first = st.Error
