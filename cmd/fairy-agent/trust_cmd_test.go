@@ -545,3 +545,146 @@ func writeJWKS(t *testing.T, keys []api.TrustKey) string {
 	}
 	return name
 }
+
+// The tests do not wait between writing the trust file and looking at it again (writeTrustChecked). This is
+// also true for the parts of this test program that the install tests start as other users.
+func init() { trustSettle = func() {} }
+
+// legacyTrust is a good trust file from before machine ids, and the trust `helper-trust set` would write in its
+// place (one user removed, an id of the command's own).
+func legacyTrust(t *testing.T) (raw []byte, old, admins *approval.Trust) {
+	t.Helper()
+	old, err := approval.FromInit(approvaltest.New().Init("user-a", "user-b"), approvalTestTime, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	old.MachineID = ""
+	raw = old.Marshal()
+	admins, err = approval.NewTrust(approval.Trust{MachineID: "admin-made-id-0000000000", Issuer: old.Issuer, ClientID: old.ClientID, Keys: old.Keys,
+		Users: old.Users[:1], FanWindowS: old.FanWindowS, SetBy: "admin"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return raw, old, admins
+}
+
+// TestSetIsNotLostToTheServicesMachineID (second review of 8119ea0..ae9384f, N2): the service adds a machine
+// id to a trust file from before machine ids by renaming a file of its own over it. When that rename lands
+// right after `helper-trust set` has written, the file on disk is the OLD trust with the service's id, and the
+// command used to say "written" all the same (it looked at the state only, and the state was "required").
+// The command now reads back what it wrote, at once and after a pause, and writes again when something else
+// is there.
+func TestSetIsNotLostToTheServicesMachineID(t *testing.T) {
+	raw, _, admins := legacyTrust(t)
+	files := approval.Files{Path: filepath.Join(t.TempDir(), approval.TrustFileName)}
+	onDisk := func() *approval.Trust {
+		t.Helper()
+		_, tr, _, err := files.Load()
+		if err != nil {
+			t.Fatal(err)
+		}
+		return tr
+	}
+	// the service's late rename, played at the worst moment: after the command's write and its first look
+	withID := bytes.Replace(raw, []byte("{\n"), []byte("{\n  \"machine_id\": \"the-services-id-0000000\",\n"), 1)
+	if tr, err := approval.ParseTrust(withID); err != nil || len(tr.Users) != 2 {
+		t.Fatalf("the service's file: %+v %v", tr, err)
+	}
+	late := 0
+	serviceRenames := func(times int) func() {
+		late = 0
+		return func() {
+			if late++; late <= times {
+				if err := os.WriteFile(files.Path, withID, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+		}
+	}
+	if err := os.WriteFile(files.Path, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	tries, err := writeTrustChecked(files, admins, serviceRenames(1))
+	if err != nil || tries != 2 {
+		t.Fatalf("one late rename: %d tries, %v", tries, err)
+	}
+	if tr := onDisk(); tr.MachineID != admins.MachineID || len(tr.Users) != 1 {
+		t.Fatalf("the command said written, and on disk is %+v", tr)
+	}
+	// nothing in the way: one write, two looks
+	if tries, err := writeTrustChecked(files, admins, serviceRenames(0)); err != nil || tries != 1 || late != 1 {
+		t.Fatalf("nothing in the way: %d tries, %d looks after the pause, %v", tries, late, err)
+	}
+	// something that replaces the file every time: the command gives up and says that it did not write it
+	tries, err = writeTrustChecked(files, admins, serviceRenames(99))
+	if err == nil || tries != trustWriteTries || !strings.Contains(err.Error(), "NOT what this command was asked to write") {
+		t.Fatalf("a file that is replaced every time: %d tries, %v", tries, err)
+	}
+	if tr := onDisk(); tr.MachineID == admins.MachineID {
+		t.Fatal("the test did not replace the file")
+	}
+	// a file that cannot be used after the write is said as before
+	if err := os.WriteFile(files.Path, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	broken := files
+	broken.CheckFile = func(string) error { return errors.New("the file belongs to somebody else") }
+	if _, err := writeTrustChecked(broken, admins, func() {}); err == nil || !strings.Contains(err.Error(), "was written but cannot be used") {
+		t.Fatalf("a file that cannot be used: %v", err)
+	}
+}
+
+// TestSetRacesTheServicesMachineID is the reviewer's race (TestReviewMigrationRacesAdminSet) in a short form,
+// with the command's write in place of a bare Replace: the service adds the id while the command sets the
+// trust. Whichever comes first, when the command says "written" the file on disk is the command's. (The pause
+// before the command's second look is, here, the end of the service's attempt.)
+func TestSetRacesTheServicesMachineID(t *testing.T) {
+	if testing.Short() {
+		t.Skip("4000 rounds of two writers")
+	}
+	raw, _, admins := legacyTrust(t)
+	dir := t.TempDir()
+	files := approval.Files{Path: filepath.Join(dir, approval.TrustFileName)}
+	var rewritten, serviceFirst int
+	for i := 0; i < 4000; i++ {
+		if err := os.WriteFile(files.Path, raw, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		start, added := make(chan struct{}), make(chan error, 1)
+		go func() {
+			<-start
+			_, err := files.AddMachineID(nil)
+			added <- err
+		}()
+		close(start)
+		for k := 0; k < i%400; k++ { // another delay every round
+			_ = k * k
+		}
+		var addErr error
+		waited := false
+		wait := func() { // the service's attempt is over (asked at every pause; it ends once)
+			if !waited {
+				waited, addErr = true, <-added
+			}
+		}
+		tries, err := writeTrustChecked(files, admins, wait)
+		wait() // also when the command never came to its pause
+		if err != nil {
+			t.Fatalf("round %d: %v", i, err)
+		}
+		if tries > 1 {
+			rewritten++
+		}
+		if addErr == nil {
+			serviceFirst++
+		}
+		_, tr, got, lerr := files.Load()
+		if lerr != nil || !bytes.Equal(got, admins.Marshal()) {
+			t.Fatalf("round %d: the command said written after %d tries, and on disk is %+v (%v)", i, tries, tr, lerr)
+		}
+		if ents, _ := os.ReadDir(dir); len(ents) != 1 {
+			t.Fatalf("round %d: left behind: %v", i, ents)
+		}
+	}
+	t.Logf("4000 rounds: the service's id went in %d times (and the command replaced that file), the command had to write a second time %d times", serviceFirst, rewritten)
+}

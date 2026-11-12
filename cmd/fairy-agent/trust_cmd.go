@@ -7,6 +7,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -306,11 +307,12 @@ func helperTrustCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) in
 		fmt.Fprintln(stdout, "nothing changed")
 		return 1
 	}
-	if err := files.Replace(nt); err != nil {
+	tries, err := writeTrustChecked(files, nt, trustSettle)
+	if err != nil {
 		return fail(err)
 	}
-	if st, _, _, err := files.Load(); st != api.ApprovalRequired {
-		return fail(fmt.Errorf("the file was written but cannot be used, so everything that needs an approval is refused until this is repaired: %v", err))
+	if tries > 1 {
+		fmt.Fprintln(stdout, "note: another program replaced the file while it was being written (the service, adding a machine id to the old file); it was written again and is now as shown above")
 	}
 	fmt.Fprintln(stdout, "written. From now on only this command changes it (the panel cannot).")
 	for _, l := range trustEffect(trustHelper()) {
@@ -322,6 +324,48 @@ func helperTrustCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) in
 	fmt.Fprintln(stdout, "  \"approval refused\". Approve one action from the panel now, while you are at this machine.")
 	fmt.Fprintln(stdout, "  To undo: fairy-agent helper-trust clear")
 	return 0
+}
+
+// trustSettle is the pause between writing the trust file and looking at it once more (writeTrustChecked).
+var trustSettle = func() { time.Sleep(200 * time.Millisecond) }
+
+// trustWriteTries is how often helper-trust set writes the file before it gives up.
+const trustWriteTries = 3
+
+// writeTrustChecked writes nt as the trust file and makes sure that this is what is on disk afterwards: it
+// reads the file back, at once and again after settle, and compares it with what it wrote, byte for byte. If
+// something else is there, it writes again, at most trustWriteTries times, and then fails. tries is how many
+// writes it took.
+//
+// Why: the service that owns the file adds a machine id to a trust file from before machine ids
+// (approval.Files.AddMachineID). It reads the file, checks once more that it is unchanged, and renames its own
+// file over it. A set that lands between that last check and the rename was overwritten a moment later by the
+// OLD trust with the service's id, and this command, which looked only at the state, said "written" (second
+// review of 8119ea0..ae9384f, N2: 15 of 60000 rounds). The service adds an id once, to a file that has none;
+// the file this command writes has one, so a second write is not overwritten that way.
+func writeTrustChecked(files approval.Files, nt *approval.Trust, settle func()) (tries int, err error) {
+	want := nt.Marshal()
+	for tries = 1; tries <= trustWriteTries; tries++ {
+		if err := files.Replace(nt); err != nil {
+			return tries, err
+		}
+		ours := true
+		for look := 0; look < 2 && ours; look++ {
+			if look == 1 {
+				settle()
+			}
+			st, _, raw, err := files.Load()
+			if st != api.ApprovalRequired {
+				return tries, fmt.Errorf("the file was written but cannot be used, so everything that needs an approval is refused until this is repaired: %v", err)
+			}
+			ours = bytes.Equal(raw, want)
+		}
+		if ours {
+			return tries, nil
+		}
+	}
+	return trustWriteTries, fmt.Errorf("the trust file was written %d times, and every time another program put a different file in its place. What is on disk now is NOT what this command was asked to write: look at it (fairy-agent helper-trust show), find out what else writes %s (a second helper-trust set?), and run this command again",
+		trustWriteTries, files.Path)
 }
 
 // Helper states for trustEffect, beyond the api.Helper... ones.
