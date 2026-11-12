@@ -260,7 +260,7 @@ func (s *Server) off(verb string) *proto.Response {
 }
 
 func refusal(ref *approval.Refusal) proto.Response {
-	return proto.Response{Status: ref.Status, Code: ref.Code, Error: ref.Msg}
+	return proto.Response{Status: ref.Status, Code: ref.Code, Error: ref.Msg, RetryAfterS: ref.RetryAfterS}
 }
 
 // The passkey check of a request that changes something. While trust is set, fan_set, fan_mode, power (other

@@ -68,8 +68,9 @@ const (
 	CodeTrustProofRefused   = "proof_refused"        // 403: the approval sent with a first-time set does not verify against the proposed trust; nothing was written
 	CodeHelperTooOld        = "helper_too_old"       // 409: the Windows helper is older than this protocol
 	// CodeTooManyChallenges: 429 from POST /approval/challenge. The machine holds its sixteen open challenges
-	// and none of them is old enough (90 s) to be dropped for a new one. The text says in how many seconds to
-	// ask again. A panel that asks for one challenge per machine and action and uses it never sees this.
+	// and none of them is old enough (90 s) to be dropped for a new one. In how many seconds to ask again (1 to
+	// 90) is in the Retry-After header, in the member "retry_after_s" of the answer, and in its text. A panel
+	// that asks for one challenge per machine and action and uses it never sees this.
 	CodeTooManyChallenges = "too_many_challenges"
 )
 

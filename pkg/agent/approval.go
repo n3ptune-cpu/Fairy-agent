@@ -31,6 +31,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"strconv"
 
 	"github.com/n3ptune-cpu/Fairy-agent/pkg/agent/api"
 	"github.com/n3ptune-cpu/Fairy-agent/pkg/approval"
@@ -173,13 +174,30 @@ func uncheckedText(seen bool, own string) string {
 // call and not before, so a request that fails a check of its own costs neither.
 type Gated func() (*approval.Pass, *approval.Refusal)
 
+// retryAfterMember is the member of a refusal's body that says in how many seconds to ask again. It is always
+// sent together with the Retry-After header of the same value (retryAfter).
+const retryAfterMember = "retry_after_s"
+
 // refusalBody is the JSON body of a refusal.
 func refusalBody(ref *approval.Refusal) map[string]any {
 	body := map[string]any{"error": ref.Msg}
 	if ref.Code != "bad_request" {
 		body["code"] = ref.Code
 	}
+	if ref.RetryAfterS > 0 {
+		body[retryAfterMember] = ref.RetryAfterS
+	}
 	return body
+}
+
+// retryAfter sets the Retry-After header of an answer whose body says when to ask again (retryAfterMember):
+// the refusal of the agent's own gate, and the helper's, which reaches the agent as such a body.
+func retryAfter(w http.ResponseWriter, body any) {
+	if m, ok := body.(map[string]any); ok {
+		if n, ok := m[retryAfterMember].(int); ok && n > 0 {
+			w.Header().Set("Retry-After", strconv.Itoa(n))
+		}
+	}
 }
 
 // approved is the passkey check of a request that changes something, in two steps.
@@ -246,7 +264,9 @@ func (a *Agent) helperSaysOff(ctx context.Context) bool {
 }
 
 func writeRefusal(w http.ResponseWriter, ref *approval.Refusal) {
-	writeJSON(w, ref.Status, refusalBody(ref))
+	body := refusalBody(ref)
+	retryAfter(w, body)
+	writeJSON(w, ref.Status, body)
 }
 
 // approvalStatus is the "approval" block of GET /metrics. Where the helper checks, it is the helper's, with
@@ -366,6 +386,7 @@ func (a *Agent) approvalChallenge(w http.ResponseWriter, r *http.Request) {
 	}
 	if viaHelper {
 		st, body := h.Challenge(r.Context(), req)
+		retryAfter(w, body)
 		writeJSON(w, st, body)
 		return
 	}

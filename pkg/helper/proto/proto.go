@@ -397,6 +397,9 @@ type Response struct {
 	Code   string          `json:"code,omitempty"`
 	Error  string          `json:"error,omitempty"`
 	Data   json.RawMessage `json:"data,omitempty"`
+	// RetryAfterS: with a refusal that says when to ask again (too_many_challenges), in how many seconds. The
+	// agent passes it on as the Retry-After header of its HTTP answer.
+	RetryAfterS int `json:"retry_after_s,omitempty"`
 }
 
 // OK is a 200 response with data.

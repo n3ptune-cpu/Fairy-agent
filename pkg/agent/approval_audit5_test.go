@@ -5,8 +5,11 @@ package agent_test
 // of the real helper code (newApprovalRig).
 
 import (
+	"encoding/json"
+	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -433,4 +436,46 @@ func provenTrustOrPlain(t *testing.T, r *lrig, in api.TrustInit) api.TrustInit {
 		return in
 	}
 	return r.iss.Prove(time.Now(), in, api.MachineEntry{MachineID: in.MachineID, Challenge: c["challenge"].(string), Request: c["request"].(string)})
+}
+
+// TestTooManyChallengesSaysWhenToAskAgain (review of the audit 5 fixes): the 429 too_many_challenges answer
+// carried the seconds to wait only inside its English sentence. It now has them in the Retry-After header and
+// in "retry_after_s" as well, the same number in all three, from the agent's own gate and, on Windows, from
+// the helper's through the pipe. Other refusals of the approval routes carry neither.
+func TestTooManyChallengesSaysWhenToAskAgain(t *testing.T) {
+	linux := newLinuxRig(t, true).trusted(t)
+	win := newApprovalRig(t).trusted(t)
+	for name, base := range map[string]string{"the agent's own list": linux.base, "the helper's list": win.base} {
+		ask := func(body string) (*http.Response, map[string]any) {
+			t.Helper()
+			req, _ := http.NewRequest("POST", base+api.PathApprovalChallenge, strings.NewReader(body))
+			req.Header.Set("Authorization", "Bearer "+ctlTok)
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer resp.Body.Close()
+			out := map[string]any{}
+			_ = json.NewDecoder(resp.Body).Decode(&out)
+			return resp, out
+		}
+		for i := 0; i < approval.MaxChallenges; i++ {
+			if resp, out := ask(`{"verb":"apply_update"}`); resp.StatusCode != 200 || resp.Header.Get("Retry-After") != "" || out["retry_after_s"] != nil {
+				t.Fatalf("%s: challenge %d: %d %v, Retry-After %q", name, i+1, resp.StatusCode, out, resp.Header.Get("Retry-After"))
+			}
+		}
+		resp, out := ask(`{"verb":"apply_update"}`)
+		n, err := strconv.Atoi(resp.Header.Get("Retry-After"))
+		msg, _ := out["error"].(string)
+		if resp.StatusCode != 429 || out["code"] != api.CodeTooManyChallenges || err != nil || n < 1 || n > 90 {
+			t.Fatalf("%s: the 17th: %d %v, Retry-After %q", name, resp.StatusCode, out, resp.Header.Get("Retry-After"))
+		}
+		if out["retry_after_s"] != float64(n) || !strings.HasSuffix(msg, "Try again in "+strconv.Itoa(n)+" s") {
+			t.Errorf("%s: the header says %d, the body %v", name, n, out)
+		}
+		// another refusal of the same route: no such header, no such member
+		if resp, out := ask(`{"verb":"power","action":"cancel"}`); resp.StatusCode != 400 || resp.Header.Get("Retry-After") != "" || out["retry_after_s"] != nil {
+			t.Errorf("%s: a refused challenge request of another kind: %d %v, Retry-After %q", name, resp.StatusCode, out, resp.Header.Get("Retry-After"))
+		}
+	}
 }

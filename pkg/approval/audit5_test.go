@@ -5,6 +5,7 @@ package approval_test
 import (
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -198,6 +199,10 @@ func tooMany(t *testing.T, what string, g *approval.Gate, req api.ApprovalReques
 	}
 	if !strings.Contains(ref.Msg, "Try again in "+retry+" s") {
 		t.Errorf("%s: the answer does not say when to ask again (%s s): %q", what, retry, ref.Msg)
+	}
+	// the same number for a program: what the answer's Retry-After header is made of
+	if strconv.Itoa(ref.RetryAfterS) != retry {
+		t.Errorf("%s: RetryAfterS is %d, the text says %s", what, ref.RetryAfterS, retry)
 	}
 }
 

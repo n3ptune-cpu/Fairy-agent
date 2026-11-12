@@ -1188,7 +1188,8 @@ only root / Administrators (Linux: or the agent's own user) can remove it.
    the helper's check, and everywhere a panel that updates several machines with one confirmation needs the
    time), at most 16 open at a time. When 16 are open and one more is asked for: if
    the oldest is at least 90 s old it is dropped for the new one (the log names it); if not, the new request
-   is refused (`429 too_many_challenges`, the text says in how many seconds to ask again). So a challenge
+   is refused (`429 too_many_challenges`; the `Retry-After` header, `"retry_after_s"` and the text say in how
+   many seconds to ask again). So a challenge
    that somebody is confirming at Pocket ID cannot be pushed out for its first 90 s by a burst of requests
    for others, and one burst cannot keep the list shut for longer than 90 s. A panel asks for
    one challenge per machine and action and uses it within seconds; it does not meet this. (What whoever

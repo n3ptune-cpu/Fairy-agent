@@ -68,6 +68,9 @@ type Refusal struct {
 	Status int
 	Code   string
 	Msg    string
+	// RetryAfterS, when not 0, is in how many seconds the same request can be sent again with a chance of
+	// another answer (too_many_challenges): the answer's Retry-After header and its "retry_after_s".
+	RetryAfterS int
 }
 
 func (r *Refusal) Error() string { return r.Code + ": " + r.Msg }
@@ -383,7 +386,7 @@ func (g *Gate) Challenge(req api.ApprovalRequest) (api.ChallengeResponse, *Refus
 		if age := elapsed(oldest.issued, now); age < ChallengeProtect {
 			wait := max(1, int((ChallengeProtect-age+time.Second-1)/time.Second))
 			g.o.Log.Warn("approval: no challenge given, too many are open", "result", "refused", "request", canon, "open", len(g.open), "retry_s", wait)
-			return out, &Refusal{Status: 429, Code: api.CodeTooManyChallenges, Msg: "this machine holds " + strconv.Itoa(len(g.open)) +
+			return out, &Refusal{Status: 429, Code: api.CodeTooManyChallenges, RetryAfterS: wait, Msg: "this machine holds " + strconv.Itoa(len(g.open)) +
 				" open challenges, and none of them is dropped for a new one before it is " + strconv.Itoa(int(ChallengeProtect/time.Second)) +
 				" s old (somebody may be confirming it right now). Try again in " + strconv.Itoa(wait) + " s"}
 		}

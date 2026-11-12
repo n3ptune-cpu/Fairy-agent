@@ -701,6 +701,9 @@ func (c *HelperClient) approvalCall(ctx context.Context, req proto.Request) (int
 	if r.Code != "" {
 		body["code"] = r.Code
 	}
+	if r.RetryAfterS > 0 { // too_many_challenges: when to ask again (retryAfter makes the header of it)
+		body[retryAfterMember] = r.RetryAfterS
+	}
 	return r.Status, body
 }
 
