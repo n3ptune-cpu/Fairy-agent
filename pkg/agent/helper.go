@@ -213,7 +213,7 @@ func (c *HelperClient) data(ctx context.Context, verb string, v any) (proto.Resp
 	return r, nil
 }
 
-// Run refreshes the status every Every until ctx ends (so /metrics never waits for the helper).
+// Run refreshes the status every Every until ctx ends (so /metrics does not wait for the helper: see Status).
 func (c *HelperClient) Run(ctx context.Context) {
 	for ctx.Err() == nil {
 		c.refresh(ctx)
@@ -225,15 +225,32 @@ func (c *HelperClient) Run(ctx context.Context) {
 }
 
 // Status is the latest helper state (refreshed by Run; computed now if it is older than two refreshes).
+//
+// It is not computed now while another call has the one connection: then the last copy is the answer, old as
+// it is. The copy gets old exactly then, when one call takes long (a fan change may take 25 s) and Run's
+// refresh waits behind it; asking now would wait behind it too, and with it every GET /metrics (audit 6,
+// r4-a1-04). Run's refresh brings the new state as soon as the connection is free. A copy that was thrown
+// away on purpose (invalidate: the helper was stopped or started, the trust was set, a request got no answer)
+// is always asked for again, however long that takes.
 func (c *HelperClient) Status(ctx context.Context) api.HelperStatus {
 	c.stMu.Lock()
-	fresh := !c.stAt.IsZero() && c.now().Sub(c.stAt) < 2*c.Every+c.Timeout
+	known := !c.stAt.IsZero()
+	fresh := known && c.now().Sub(c.stAt) < 2*c.Every+c.Timeout
 	st := c.st
 	c.stMu.Unlock()
-	if fresh {
+	if fresh || (known && c.busy()) {
 		return st
 	}
 	return c.refresh(ctx)
+}
+
+// busy reports whether a call has the connection at this moment.
+func (c *HelperClient) busy() bool {
+	if c.callMu.TryLock() {
+		c.callMu.Unlock()
+		return false
+	}
+	return true
 }
 
 func (c *HelperClient) refresh(ctx context.Context) api.HelperStatus {
