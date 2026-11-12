@@ -115,7 +115,7 @@ func (c *chowns) lchown(path string, uid, gid int) error {
 // that call ends the process (SIGSYS) at every start. It must say "broken" with the reason, write nothing (no
 // temporary file is ever made: the folder is not touched) and leave the file as it was.
 func TestMachineIDOfRootsFileIsNotAddedByAnotherUser(t *testing.T) {
-	dir, err := os.MkdirTemp("", "ta") // a short path: the whole reason fits into the 300 characters of the answer
+	dir, err := os.MkdirTemp("", "ta") // a short name; how long the whole path is, the temporary folder decides
 	must(t, err)
 	t.Cleanup(func() { os.RemoveAll(dir) })
 	must(t, os.Chmod(dir, 0o700))
@@ -134,11 +134,16 @@ func TestMachineIDOfRootsFileIsNotAddedByAnotherUser(t *testing.T) {
 	g := approval.NewGate(approval.Options{Files: approval.UnixFiles(path), EnforcedBy: api.EnforcedByAgent,
 		Now: func() time.Time { return nowForTests }, Log: slog.New(slog.NewTextHandler(log, nil))})
 	st := g.Status()
-	const hint = " (the file is as it was; repair on the machine: fairy-agent helper-trust set)"
+	const hint = approvaltest.NoIDHint
 	why := fmt.Sprintf("the trust file belongs to user %d, group %d, but this service is user %d, group %d: only root can keep the owner", os.Geteuid(), os.Getegid(), me, mine)
-	want := path + ": the trust file has no machine_id, and adding one failed: " + why + hint
-	if st.State != api.ApprovalBroken || st.MachineID != "" || st.Error != want {
-		t.Fatalf("state: %+v\nwant the error: %s", st, want)
+	if st.State != api.ApprovalBroken || st.MachineID != "" {
+		t.Fatalf("state: %+v", st)
+	}
+	// the text carries the file's path, and the path of a test's folder is as long as TMPDIR makes it: the
+	// reason is whole where it fits and cut where it does not (the second review's runs with a TMPDIR of 16
+	// characters or more failed on a comparison with the whole text)
+	if problem := approvaltest.NoIDTextProblem(st.Error, path, why); problem != "" {
+		t.Fatalf("%s\nthe error: %s", problem, st.Error)
 	}
 	if calls.n != 0 {
 		t.Fatalf("%d changes of owner were asked for (the last: %s); under the unit's filter the first one kills the agent", calls.n, calls.last)
@@ -178,14 +183,36 @@ func TestMachineIDOfRootsFileIsNotAddedByAnotherUser(t *testing.T) {
 	if len(std) > 300 {
 		t.Errorf("on a standard install the reason is %d characters long, the answer holds 300", len(std))
 	}
-	// and where it does not (a long path), the reason gives way, not what to do
-	deep := filepath.Join(dir, strings.Repeat("d", 60))
-	must(t, os.Mkdir(deep, 0o700))
-	far := approval.UnixFiles(filepath.Join(deep, approval.TrustFileName))
-	must(t, os.WriteFile(far.Path, old, 0o640))
-	st = approval.NewGate(approval.Options{Files: far, EnforcedBy: api.EnforcedByAgent, Log: slog.New(slog.NewTextHandler(log, nil))}).Status()
-	if st.State != api.ApprovalBroken || len(st.Error) > 300 || !strings.HasSuffix(st.Error, "..."+hint) || !strings.Contains(st.Error, "adding one failed: the trust file belongs to user ") {
-		t.Errorf("a long path: %d characters: %s", len(st.Error), st.Error)
+	// and where it does not (a long path), the reason gives way, not what to do. Each folder's name is as long
+	// as it takes for a trust file path of that many characters, whatever the temporary folder's own path is:
+	// 150 (the reason is cut), 160 (the longest path that still leaves room for a reason) and 200 (no room).
+	cut := 0
+	for _, n := range []int{150, 160, 200} {
+		pad := n - len(filepath.Join(dir, "d", approval.TrustFileName)) + 1
+		if pad < 1 {
+			t.Logf("a trust file path of %d characters: not possible under %s (%d characters)", n, dir, len(dir))
+			continue
+		}
+		deep := filepath.Join(dir, strings.Repeat("d", pad))
+		must(t, os.Mkdir(deep, 0o700))
+		far := approval.UnixFiles(filepath.Join(deep, approval.TrustFileName))
+		must(t, os.WriteFile(far.Path, old, 0o640))
+		st = approval.NewGate(approval.Options{Files: far, EnforcedBy: api.EnforcedByAgent, Log: slog.New(slog.NewTextHandler(log, nil))}).Status()
+		if st.State != api.ApprovalBroken || len(far.Path) != n {
+			t.Fatalf("a path of %d characters (%d): %+v", n, len(far.Path), st)
+		}
+		if problem := approvaltest.NoIDTextProblem(st.Error, far.Path, why); problem != "" {
+			t.Errorf("a path of %d characters: %s\nthe error (%d characters): %s", n, problem, len(st.Error), st.Error)
+		}
+		if n <= 160 {
+			cut++
+			if len(st.Error) != 300 || !strings.HasSuffix(st.Error, "..."+hint) || !strings.Contains(st.Error, "adding one failed: t") {
+				t.Errorf("a path of %d characters: %d characters, want 300 with a cut reason and the hint: %s", n, len(st.Error), st.Error)
+			}
+		}
+	}
+	if cut == 0 && len(dir) < 100 {
+		t.Errorf("no long path was tried under %s", dir)
 	}
 	if calls.n != 0 {
 		t.Errorf("a long path: %d changes of owner asked for", calls.n)
