@@ -419,7 +419,13 @@ starts with Windows again after a reboot.
 * `POST /helper/stop` and `POST /helper/start` (control token, body `{}`, rate limited and logged like the
   other control actions): 200 with the helper block afterwards, 409 `{"error": "not_installed"}` without a
   helper. Stop hands the fans to the BMC first. The agent's account may query, start and stop the helper
-  service and nothing else (it cannot change or delete it).
+  service and nothing else (it cannot change or delete it). **While the helper is stopped, `POST /power`
+  with `cancel` answers `503 helper_stopped`** on a PC where the helper carries out power requests: a
+  shutdown or reboot that was scheduled before keeps counting down in Windows (a pending sleep is a timer
+  inside the helper and ends with it), and it cannot be cancelled from the panel until `POST /helper/start`
+  has brought the helper back. Stopping the helper needs the control token and no passkey approval, so
+  whoever holds that token can keep a cancel out in this way (he cannot start a shutdown with it while
+  approvals are on). On the PC itself `shutdown /a` cancels a pending shutdown in any case.
 
 **Fewer process details.** As a virtual account the agent opens other programs with the weakest access
 there is (as always), and Windows refuses that for programs of other accounts and for elevated ones: those
@@ -843,7 +849,9 @@ rule above); if the agent is restarted in the meantime, the pending action is dr
 * While one action is pending, a second one is refused with HTTP 409 (`a shutdown is already pending; cancel it
   first`).
 * While the helper is stopped, Cancel answers 503 `helper_stopped` instead of "ok": the agent cannot tell
-  whether a shutdown is pending. Start the helper, then cancel.
+  whether a shutdown is pending. Start the helper, then cancel. This is the one way a request with the
+  control token alone can keep a cancel out: `POST /helper/stop` needs no passkey approval. Windows goes on
+  counting the shutdown down meanwhile; `shutdown /a` typed on the PC cancels it in any case.
 * Two limits. A Fairy shutdown that you abort by hand (`shutdown /a`) stays shown in the panel until its time
   or until you press Cancel, because Windows offers no way to ask. A pending **sleep** is a timer inside the
   helper: it is lost when the helper restarts.
@@ -1033,9 +1041,9 @@ says the same next to the id. The panel then has to be told the new id (it still
 | `POST /fan/duty`, `POST /fan/mode` | yes | after one approved fan change that the machine applied, further fan changes need none for 30 s (the **fan window**; see settings) |
 | `POST /power` with `shutdown`, `reboot`, `sleep` | yes, one each | never the fan window |
 | `POST /update` | yes, one each | Windows: see "Updates on Windows" below |
-| `POST /power` with `cancel` | no | it only stops something |
+| `POST /power` with `cancel` | no | it only stops something. Windows: answered `503 helper_stopped` while the helper is stopped (see the next row but one) |
 | `POST /wol`, `POST /bmc/power` (`on`, `status`) | no | they wake machines; the relay has no "off" |
-| `POST /helper/stop`, `/helper/start` | no | the service manager does this, not the helper; stop hands the fans back to the BMC |
+| `POST /helper/stop`, `/helper/start` | no | the service manager does this, not the helper; stop hands the fans back to the BMC. While the helper is stopped nothing that goes through it runs, and that includes the cancel of a shutdown (`503 helper_stopped`) until `/helper/start` |
 | what the agent does by itself (fan watchdog, fans to automatic when it or the helper stops) | no | nobody is there to confirm |
 
 **No trust set = exactly as before.** Without a trust file nothing is checked and every request works as it
@@ -1070,10 +1078,15 @@ when it proposes none, or the trust is set on the machine, the machine makes one
   limit, not "never worse than off", which an earlier version of this guide said.
 
   The repair, as root / Administrator on the machine, in one sitting:
-  `fairy-agent helper-trust set --issuer <yours> --client-id <yours> --user <your id> --fetch-keys`
+  `fairy-agent helper-trust set --issuer <yours> --client-id <yours> --user <your id> --fetch-keys --new-machine-id`
   (it replaces the foreign file with your values and the machine is locked to them; `helper-trust clear`
-  alone would only open the race again). Then replace the control token, because it was stolen: **Re-pair**
-  in the panel.
+  alone would only open the race again). **`--new-machine-id` belongs to the repair.** Whoever did the
+  first-time set also chose the machine id in that file, and `set` keeps the id it finds. He may have chosen
+  the id of another machine of yours, and two machines with one id accept each other's approvals ("Which
+  machine" above). With a new id that is over. (`helper-trust clear` followed at once by the full `set`
+  line gives a new id too.) Your panel still has the old id on record: it must be told to accept the new
+  one, and until it has, approvals it builds for this machine are refused here (`403 approval_refused`,
+  `nonce`). Then replace the control token, because it was stolen: **Re-pair** in the panel.
 
   How to notice. `GET /metrics` shows, in the `approval` block, what the machine trusts: `issuer`,
   `client_id`, each key's `thumbprint`, `users` (how many), `trust_hash` (one hash over issuer, client id,
@@ -1574,7 +1587,7 @@ The file is `C:\ProgramData\fairy-agent\config.yaml` (Windows) or `/etc/fairy-ag
 | `listen` | the Tailscale address, port 9101 | where the panel connects; `0.0.0.0` is refused unless `allow_all_interfaces: true` |
 | `only_from_panel` | false | `true`: connections are accepted only from the panel that added this machine (Add host) and from this machine itself. Your own `curl` from another machine then gets no answer, and a new panel address needs a new Add host / Re-pair. An agent with no panel on record (never added with Add host, or its last join code expired) then refuses every other machine, until the Add host / Re-pair command has run on it; the log says so once a minute |
 | `require_helper_pipe_owner` | false | Windows only. The agent knows its helper service by the helper's process id. It also looks at who owns the helper's pipe: a pipe the helper made belongs to Administrators or SYSTEM. In this release another owner is only reported, once, as a warning in `agent.log` (the pipe is still used); `true` makes the agent refuse such a pipe. Leave it off until the check in TEST-ON-WINDOWS.md (section 12, step 16) has shown `S-1-5-32-544` or `S-1-5-18` on your PCs: with a wrong owner and `true` the agent could not reach its helper (no fan control, Core Temp or power actions). Restart the agent after a change |
-| `token_file`, `control_token_file` | `token`, `control-token` next to config.yaml | the tokens (at least 24 characters, different from each other). `FAIRY_AGENT_TOKEN` / `FAIRY_AGENT_CONTROL_TOKEN` in the environment win. Never on the command line. |
+| `token_file`, `control_token_file` | `token`, `control-token` next to config.yaml | the tokens (at least 24 characters, different from each other). A token you write yourself must be **long and random**: `fairy-agent gen-token` prints one (32 random bytes). The agent checks only the length, so it also takes 24 times the letter `a`; and nothing slows down somebody who tries tokens (a wrong one is refused at once and the right one is served, from any address, however many wrong ones came before), so a token that can be guessed will be. At its start the agent writes one warning into its log when a token has fewer than 10 different characters. `FAIRY_AGENT_TOKEN` / `FAIRY_AGENT_CONTROL_TOKEN` in the environment win. Never on the command line. |
 | `hide_host_details` | false | no hostname, no hardware model, just "Windows" / "Linux". It does not shorten the `approval` block of `/metrics`: whoever holds the read token still sees the Pocket ID address (`issuer`), the client id, this machine's `machine_id`, each key's id and thumbprint, how many users, `trust_hash`, `set_by` / `set_at`, `fan_window_s` and `boot_shutdown_s`, and for a broken trust file the reason with the file's path. The panel needs those to check whose trust a machine has; none of them is a secret, and none lets a request through |
 | `processes.enabled` / `cmdline` / `never_open` | true / true / none | the Processes tab. `cmdline` sends command lines (Linux) or program paths (Windows). A config file without the line means `true`. Since 0.6.0 a new Linux install writes `cmdline: false`; an existing `config.yaml` keeps what it says |
 | `gpu.nvidia_smi` | auto | `off` or a full local path (only administrators / root may be able to change the file and its folders) |
@@ -1585,7 +1598,7 @@ The file is `C:\ProgramData\fairy-agent\config.yaml` (Windows) or `/etc/fairy-ag
 | `ipmi`, `fan_control`, `power_control`, `wol`, `bmc_relay` | off | see [Optional features](#optional-features) |
 | `env_file` | none | `KEY=value` secrets (device and BMC passwords); `fairy-agent secret set NAME` writes it |
 | `self_update.enabled`, `self_update.repo` | off, `n3ptune-cpu/Fairy-agent` | see [Updates](#updates-the-panels-update-button) |
-| `control_rate_per_min` | 12 | requests a minute, for everybody together, in each of three budgets that cannot use each other up: **control requests** (fan, power other than cancel, Wake-on-LAN, BMC relay, update, helper stop / start, the first-time set of the approval trust), all together; **approval challenges** (`POST /approval/challenge`), so an approved action costs one control request and one challenge, not two control requests; and **`POST /power` with `cancel`**, so that neither a burst of challenges nor a row of refused requests can keep a cancel out (only other cancels with the control token can; requests with a wrong token or none count against nobody but themselves, see [Security in short](#security-in-short)). One more is answered `429` (`Retry-After: 60`); the text says which budget |
+| `control_rate_per_min` | 12 | requests a minute, for everybody together, in each of three budgets that cannot use each other up: **control requests** (fan, power other than cancel, Wake-on-LAN, BMC relay, update, helper stop / start, the first-time set of the approval trust), all together; **approval challenges** (`POST /approval/challenge`), so an approved action costs one control request and one challenge, not two control requests; and **`POST /power` with `cancel`**, so that neither a burst of challenges nor a row of refused requests can keep a cancel out (only other cancels with the control token can, and on Windows a `POST /helper/stop`, which also needs the control token: a cancel is answered `503 helper_stopped` until the helper is started again; requests with a wrong token or none count against nobody but themselves, see [Security in short](#security-in-short)). One more is answered `429` (`Retry-After: 60`); the text says which budget |
 | `log_file` | Windows: `C:\ProgramData\fairy-agent\logs\agent.log` (5 MB, one old copy); Linux: the journal | |
 
 Unknown settings are an error (so a typo does not silently do nothing). `fairy-agent check-config` checks the
@@ -1687,6 +1700,22 @@ are lists of devices: edit those in the file.
   is slow down guessing: a wrong token is told from a right one at any rate. What keeps a token from being
   guessed is its length alone. The tokens the agent makes (`fairy-agent join`, the installers) are 32 random bytes (43 characters,
   256 bits); one you set by hand must have at least 24 characters, and must be as random as those.
+* **A limit: a program on the machine can take the agent's port while the agent is not running, and is then
+  sent the tokens.** The agent listens on an ordinary port (9101) that any local user may open. While the
+  agent is down (a restart, the moment an update swaps the program, a crash, the time at boot before it is
+  up) another program on the same machine can listen on that address and port. The panel cannot tell who
+  answers: its next poll carries the read token and its next control request the control token, in the
+  `Authorization` header, to that program. And while that program holds the port the agent cannot start
+  (`another program is listening on the agent's port`, see [Updates](#updates-the-panels-update-button)).
+  Nothing in this version prevents it; only the update's own health check was made safe against it (it sends
+  no token). So a user account on a machine with an agent is, for this purpose, somebody who can get that
+  machine's tokens. With the control token he can send every control request to a machine that has no
+  approval trust (shut it down, set its fans, start an update). With a trust set he can send what needs no
+  approval: cancel, Wake-on-LAN, the BMC relay's power-on, stopping and starting the helper, fan changes
+  while a fan window is open, and the first-time set of the trust after a `helper-trust clear`. If the agent's log shows that line, or a machine is "offline" in
+  the panel while it is up, look at what holds the port (`ss -ltnp`, on Windows `netstat -abno`), and
+  replace both tokens (**Re-pair**) after such a program was found. Windows opens the port for exclusive
+  use, which helps only while the agent runs.
 * Read-only unless you switch features on; each control action is rate limited and logged with who asked.
 * With an approval trust set, fan changes, shutdown / reboot / sleep and updates run only with a fresh passkey
   confirmation at Pocket ID that the machine verifies itself, offline (Windows: the helper; Linux: the agent).
@@ -1746,7 +1775,10 @@ are lists of devices: edit those in the file.
   addresses are enough) can keep it out for as long as they do so. An agent added through Add host has the
   panel's address on record and is not affected. The process list is read at most once
   a second however many ask. When more than 16 requests are waiting for it the agent answers `503` with code
-  `busy` and `Retry-After: 1`. A request's header must arrive within 2 seconds and fit in 4096 bytes. With
+  `busy` and `Retry-After: 1`. A request's header must arrive within 2 seconds and may have about 8 KiB at
+  most: the limit the agent sets is 4096 bytes, and the HTTP server it is built on allows 4096 more for its
+  own reading (measured: a request whose header has 8192 bytes in all is answered, one with 8200 gets
+  `431`). The panel's is a few hundred bytes. With
   `only_from_panel: true` nobody but the panel and this machine gets a connection at all.
 * A response header from a device, a BMC, an agent or the release server may be at most 64 KiB.
 * Time limits on every connection; requests are small and bounded. What a UPS server (NUT) sends is bounded too
@@ -1757,7 +1789,7 @@ are lists of devices: edit those in the file.
   written at most 30 times a minute (the rest are counted: `suppressed=N` on the next one).
 * Windows: the agent runs as its own virtual account with a single privilege; what needs more goes through the
   helper service, which has no network, admits only the agent's account on its local pipe (checked twice), and
-  answers ten fixed requests with strict limits. Settings folder readable only by administrators, SYSTEM and the service; the program lives in
+  answers twelve fixed requests with strict limits. Settings folder readable only by administrators, SYSTEM and the service; the program lives in
   `C:\Program Files` and only administrators / SYSTEM can change it (self-update goes through the separate
   LocalSystem updater service, which checks the signature itself). The install scripts check the program's
   SHA-256 against the signed SHA256SUMS before running it as Administrator. Helper programs (ipmitool,

@@ -497,7 +497,10 @@ func (a *Agent) Handler() http.Handler {
 //     can keep it out: not challenges, and not twelve refused requests of somebody who has the control token
 //     and no approval. Requests with a wrong token or none cannot either (they are counted per address, and
 //     only they are refused for it: Handler). What can: control_rate_per_min other cancels in the same minute,
-//     which need the control token. (The caps on open connections are another matter: listen.go, LimitConns.)
+//     which need the control token; and, on a Windows PC whose helper carries out power requests, a
+//     POST /helper/stop (control token, no approval): a cancel is then answered 503 helper_stopped until the
+//     helper is started again (audit 5, r3-a1-04; AGENT.md says so where it describes helper stop and cancel).
+//     (The caps on open connections are another matter: listen.go, LimitConns.)
 const (
 	budgetControl   = "control"
 	budgetChallenge = "challenge"
@@ -1073,7 +1076,11 @@ func (a *Agent) fanStatus(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, a.d.Fan.Status(r.Context()))
 }
 
-// intField accepts a JSON integer (50, not 50.5 or "50").
+// intField accepts a JSON integer: 50, and also the same number in quotes ("50"), because json.Number takes a
+// string that holds a number. Not 50.5, not "50.5", not "fifty". (The comment here said that "50" is not
+// accepted; it always was, on /power's delay_s and on /fan/duty's zone and percent: audit 5, r3-a1-09. With a
+// trust set the value that runs is the one the approval names, whichever way it was written; the helper's
+// pipe takes plain numbers only.)
 func intField(v json.RawMessage) (int, bool) {
 	var n json.Number
 	if len(v) == 0 || json.Unmarshal(v, &n) != nil {
@@ -1257,8 +1264,9 @@ func (a *Agent) update(w http.ResponseWriter, r *http.Request) {
 type connKey struct{}
 
 // Server wraps the handler with the timeouts every connection gets. A request's header must arrive within two
-// seconds and fit in 4 KiB (the panel's is a few hundred bytes): an unfinished request holds little memory and
-// not for long. How many connections may be open at all is LimitConns' part.
+// seconds and may have about 8 KiB (MaxHeaderBytes is 4096, and net/http allows 4096 more for its own reading:
+// 8192 bytes in all are answered, 8200 get 431; the panel's is a few hundred bytes): an unfinished request
+// holds little memory and not for long. How many connections may be open at all is LimitConns' part.
 func (a *Agent) Server() *http.Server {
 	return &http.Server{Handler: a.Handler(), ReadHeaderTimeout: 2 * time.Second, ReadTimeout: 10 * time.Second,
 		WriteTimeout: 45 * time.Second, IdleTimeout: 90 * time.Second, MaxHeaderBytes: 4096,

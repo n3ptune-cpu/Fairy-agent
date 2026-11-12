@@ -759,6 +759,10 @@ running. `Test-FairyApproval-3.ps1` does them as its steps I1 to I3.
   If it still answers `[202]`: the agent could not read the helper's trust file itself (the open question of
   step N2) and went on as before; nothing is installed (the helper refuses). Please send the answer, and
   `"agent_error"` of the `approval` block in `/metrics`.
+  If it answers `{"code":"self_update_unavailable","error":"..."} [503]`: the step says nothing here. The
+  updater's own checks come before the look at the approval, and this program was built without the release
+  key, or the updater is not set up on this VM (`fairy-agent setup-self-update`); the `error` text says
+  which. Nothing was downloaded. The script reports this as INFO, not as FAIL.
 * I2 **A request in which a member is there twice is refused.**
   `Set-Content -Path "C:\fairy-selfbuilt\twice.json" -Value '{"action":"shutdown","delay_s":600,"action":"cancel"}' -Encoding ASCII`
   `curl.exe -s -w " [%{http_code}]" -H "Authorization: Bearer $ctl" --data-binary "@C:\fairy-selfbuilt\twice.json" "$base/power"`

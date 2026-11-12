@@ -126,6 +126,12 @@ func Run(ctx context.Context, cfg *Config, b Build) error {
 	if err != nil {
 		return err
 	}
+	for _, t := range []struct{ name, token string }{{"read", tokens.Read}, {"control", tokens.Control}} {
+		if t.token != "" && FewDifferentChars(t.token) { // the token itself is never logged
+			slog.Warn("a token has fewer than 10 different characters: it looks typed by hand, and a token that can be guessed will be (nothing slows guessing down). Replace it with a random one: fairy-agent gen-token, or Re-pair in the panel",
+				"token", t.name)
+		}
+	}
 	relay, err := NewRelay(cfg.PowerSources, cfg.UPS)
 	if err != nil {
 		return err

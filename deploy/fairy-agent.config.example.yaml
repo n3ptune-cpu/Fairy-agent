@@ -19,6 +19,8 @@
 
 # The panel's token for this machine (its token_env value), one line, at least 24 characters. Default: the file
 # "token" next to this config. FAIRY_AGENT_TOKEN in the environment wins over the file.
+# A token you write yourself must be long and RANDOM (`fairy-agent gen-token` prints one). The agent checks only
+# the length, and nothing slows down somebody who tries tokens: one that can be guessed will be.
 # token_file: /etc/fairy-agent/token
 # A second, different token, only needed when fan_control, power_control, wol or self_update is enabled (the panel's
 # control_token_env value). Default: the file "control-token" next to this config.

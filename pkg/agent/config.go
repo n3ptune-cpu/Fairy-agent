@@ -517,6 +517,19 @@ func (c *Config) LoadTokens() (Tokens, error) {
 	return t, nil
 }
 
+// FewDifferentChars reports whether a token has fewer than 10 different characters. A token the agent or the
+// panel made is 32 random bytes in base64url, 43 characters with some thirty different ones; fewer than 10
+// only happens to a token somebody typed ("aaaa...", a word, a date). The length check alone takes those, and
+// nothing slows guessing down (Handler), so the agent says so once when it starts. It is a hint, not a
+// measure: a token of ten different characters can be just as easy to guess.
+func FewDifferentChars(token string) bool {
+	seen := map[rune]bool{}
+	for _, r := range token {
+		seen[r] = true
+	}
+	return len(seen) < 10
+}
+
 // LoadEnvFile sets KEY=value lines from the env file (variables already set win) and returns their names.
 func LoadEnvFile(path string) ([]string, error) { return loadEnvFile(path, nil) }
 
