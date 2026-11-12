@@ -86,6 +86,7 @@ func newApprovalRig(t *testing.T) *aprig {
 	t.Cleanup(cancel)
 	b := agent.NewBMC(r.bmc, 20*time.Millisecond)
 	go b.Run(ctx)
+	waitFirstReading(t, b)
 	fan := agent.NewFan(r.bmc, b, cfg.FanControl, nil)
 	log := slog.New(slog.NewTextHandler(r.audit, nil))
 	files := approval.Files{Path: filepath.Join(t.TempDir(), approval.TrustFileName)}

@@ -88,6 +88,7 @@ func newHelperRig(t *testing.T, state string) *hrig {
 	t.Cleanup(cancel)
 	b := agent.NewBMC(h.bmc, 20*time.Millisecond)
 	go b.Run(ctx)
+	waitFirstReading(t, b)
 	fan := agent.NewFan(h.bmc, b, cfg.FanControl, nil)
 	srv := helper.New(helper.Parts{Version: "0.5.0", BMC: b, Fan: fan, Power: h.power,
 		Audit: slog.New(slog.NewTextHandler(io.Discard, nil))})

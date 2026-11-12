@@ -154,6 +154,7 @@ func newOldHelperRig(t *testing.T, blind bool) *oldHelperRig {
 	bmc := fakebmc.X11SCAF()
 	b := agent.NewBMC(bmc, 20*time.Millisecond)
 	go b.Run(ctx)
+	waitFirstReading(t, b)
 	hlog := slog.New(slog.NewTextHandler(io.Discard, nil))
 	newer := helper.New(helper.Parts{Version: "test", Power: r.helperPower, Audit: hlog, BMC: b,
 		Fan:      agent.NewFan(bmc, b, cfg.FanControl, nil),

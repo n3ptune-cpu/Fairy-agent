@@ -70,6 +70,7 @@ func newLinuxRigWith(t *testing.T, o lrigOpts) *lrig {
 	t.Cleanup(cancel)
 	b := agent.NewBMC(r.bmc, 20*time.Millisecond)
 	go b.Run(ctx)
+	waitFirstReading(t, b)
 	dir := t.TempDir()
 	uo := agent.UpdaterOptions{Version: "41-aaaaaaa", Key: r.gh.Pub, Client: r.gh.Client(),
 		StageDir: filepath.Join(dir, "state", "update"), ResultPath: filepath.Join(dir, "result", "result.json"),
@@ -94,6 +95,21 @@ func newLinuxRigWith(t *testing.T, o lrigOpts) *lrig {
 	t.Cleanup(srv.Close)
 	r.base = srv.URL
 	return r
+}
+
+// waitFirstReading returns when the BMC reader has its first reading. A fan duty below 100 % is accepted only
+// with a temperature, and a rig that was built a moment ago has none until the reader's first round is done:
+// a test whose first requests are "mode full, duty 50 %" met 409 fan_no_temperature once in a few hundred runs
+// (second review of 8119ea0..ae9384f, N4: TestOldPanelWithoutTrustBehavesAsBefore).
+func waitFirstReading(t *testing.T, b *agent.BMC) {
+	t.Helper()
+	for i := 0; i < 2000; i++ {
+		if len(b.WatchdogReadings()) > 0 {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatal("the made-up BMC gave no reading within 2 s")
 }
 
 func (r *lrig) post(t *testing.T, path string, body any) (int, map[string]any) {
