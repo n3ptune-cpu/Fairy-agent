@@ -5,6 +5,7 @@ package agent
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"os"
 	"strings"
@@ -21,6 +22,11 @@ import (
 type systemPower struct {
 	mu    sync.Mutex
 	timer *time.Timer
+	// ran is the systemctl verb the timer has run since the last Schedule ("": none). From then on there is
+	// nothing left to stop, and Cancel says so (errTooLate).
+	ran string
+	// run runs `systemctl <verb>`; nil: the real one. Tests put their own in.
+	run func(path, verb string)
 }
 
 // SystemPower returns the Linux implementation.
@@ -41,6 +47,12 @@ func firstExisting(name string, paths ...string) (string, error) {
 
 var linuxVerb = map[string]string{"shutdown": "poweroff", "reboot": "reboot", "sleep": "suspend"}
 
+func runPowerVerb(path, verb string) {
+	if out, err := collect.Command(context.Background(), path, verb).CombinedOutput(); err != nil {
+		slog.Error("power: systemctl failed (polkit rule missing?)", "verb", verb, "error", err.Error(), "output", string(out))
+	}
+}
+
 func (s *systemPower) Schedule(action string, delay time.Duration, _ string) error {
 	path, err := systemctl()
 	if err != nil {
@@ -55,18 +67,38 @@ func (s *systemPower) Schedule(action string, delay time.Duration, _ string) err
 	if s.timer != nil {
 		s.timer.Stop()
 	}
-	s.timer = time.AfterFunc(delay, func() {
-		slog.Warn("power: running systemctl " + verb)
-		if out, err := collect.Command(context.Background(), path, verb).CombinedOutput(); err != nil {
-			slog.Error("power: systemctl failed (polkit rule missing?)", "verb", verb, "error", err.Error(), "output", string(out))
+	s.ran = ""
+	var t *time.Timer
+	t = time.AfterFunc(delay, func() {
+		// Either Cancel stopped this timer or it runs systemctl, never both: a Cancel that came in the moment
+		// the timer fired (Stop is too late then) has taken the timer away, and nothing is run; otherwise it is
+		// written down that the action was carried out, before it is, so no later Cancel says "cancelled".
+		s.mu.Lock()
+		if s.timer != t {
+			s.mu.Unlock()
+			return
 		}
+		s.ran = verb
+		run := s.run
+		s.mu.Unlock()
+		slog.Warn("power: running systemctl " + verb)
+		if run == nil {
+			run = runPowerVerb
+		}
+		run(path, verb)
 	})
+	s.timer = t
 	return nil
 }
 
+// Cancel stops the timer. Once the timer has run systemctl there is nothing to stop: errTooLate (audit 6,
+// r4-a1-03: such a cancel answered "cancelled" while the machine was already being switched off).
 func (s *systemPower) Cancel() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.ran != "" {
+		return fmt.Errorf("%w: systemctl %s was already run", errTooLate, s.ran)
+	}
 	if s.timer != nil {
 		s.timer.Stop()
 		s.timer = nil

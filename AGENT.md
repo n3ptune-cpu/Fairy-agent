@@ -834,7 +834,9 @@ actual shutdown, reboot or sleep (the agent's own account may not), so power con
 machine's name and sends a delay (default 60 s). On Windows, Windows itself shows its usual "you're about to be
 signed out" warning and counts down (like `shutdown /s /t 60`; open programs are closed at the end); Cancel in
 the panel aborts it. On Linux the agent waits and then runs `systemctl poweroff` / `reboot` (needs the polkit
-rule above); if the agent is restarted in the meantime, the pending action is dropped.
+rule above); if the agent is restarted in the meantime, the pending action is dropped. A Cancel that arrives
+after the agent has run `systemctl` (the action stays shown for a minute after its time) answers 409 `too late
+to cancel: systemctl poweroff was already run`, not "cancelled".
 
 **Cancel on Windows cancels only Fairy's own shutdown (0.6.0).**
 

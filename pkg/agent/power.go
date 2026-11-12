@@ -24,6 +24,10 @@ type PowerExec interface {
 	CanSleep() (ok bool, why string)
 }
 
+// errTooLate is a PowerExec's answer to a Cancel that came after it carried the action out (Linux: after the
+// agent's timer ran `systemctl poweroff`): nothing is left that could be stopped.
+var errTooLate = errors.New("too late to cancel")
+
 // powerBy is a PowerExec that wants the (cleaned) requester instead of a ready message: the Windows helper,
 // which takes no free text.
 type powerBy interface {
@@ -227,7 +231,19 @@ func (p *Power) Handle(req PowerRequest) (int, map[string]any) {
 				return 200, map[string]any{"action": "cancel", "pending": nil}
 			}
 		}
-		if err := p.exec.Cancel(); errors.Is(err, api.ErrHelperStopped) {
+		err := p.exec.Cancel()
+		if errors.Is(err, errTooLate) {
+			// The exec has carried the action out: there is nothing it could still stop, now or later.
+			p.unstopped = false
+			if c != nil {
+				// Still on record (the minute after its time): not "cancelled". 409, the agent's own "no" for
+				// a request the state does not allow; the record stays for its minute, as without a cancel.
+				slog.Warn("power: cancel came too late", "action", c.Action, "error", err.Error(), "requested_by", who)
+				return 409, map[string]any{"error": safeErr(err) + ": the " + c.Action + " is being carried out"}
+			}
+			err = nil // nothing on record, nothing left to stop: a cancel with nothing pending
+		}
+		if errors.Is(err, api.ErrHelperStopped) {
 			return 503, map[string]any{"error": "helper stopped: cannot cancel", "code": api.ReasonHelperStopped}
 		} else if unanswered(err) {
 			// The helper has the cancel and did not answer: the action may be stopped or not. Not "could not

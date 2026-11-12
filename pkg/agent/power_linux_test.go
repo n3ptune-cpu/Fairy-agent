@@ -3,8 +3,11 @@
 package agent
 
 import (
+	"errors"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 )
 
 func TestLinuxSleepAnswers(t *testing.T) {
@@ -31,4 +34,107 @@ func TestLinuxSleepAnswers(t *testing.T) {
 	if linuxVerb["sleep"] != "suspend" || linuxVerb["shutdown"] != "poweroff" {
 		t.Fatal(linuxVerb)
 	}
+}
+
+// ranLog is what a test's stand-in for `systemctl <verb>` was asked to run. Nothing is run.
+type ranLog struct {
+	mu   sync.Mutex
+	runs []string
+}
+
+func (r *ranLog) run(_, verb string) {
+	r.mu.Lock()
+	r.runs = append(r.runs, verb)
+	r.mu.Unlock()
+}
+
+func (r *ranLog) count() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return len(r.runs)
+}
+
+// linuxPower is the Linux power part with a stand-in in the place of `systemctl <verb>`: its timer, its lock
+// and its Cancel are the product's, and no program is started. (It still looks for systemctl's path, as the
+// product does before it takes a request; without one there is nothing to test.)
+func linuxPower(t *testing.T) (*systemPower, *ranLog) {
+	t.Helper()
+	if _, err := systemctl(); err != nil {
+		t.Skip("no systemctl on this machine: ", err)
+	}
+	log := &ranLog{}
+	return &systemPower{run: log.run}, log
+}
+
+// Audit 6, r4-a1-03: once the timer has run systemctl, Cancel says so instead of "cancelled"; the next
+// Schedule starts afresh.
+func TestLinuxCancelAfterTheTimerRanIsTooLate(t *testing.T) {
+	s, log := linuxPower(t)
+	if err := s.Schedule("shutdown", 20*time.Millisecond, ""); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 500 && log.count() == 0; i++ {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if log.count() != 1 || log.runs[0] != "poweroff" {
+		t.Fatalf("the timer ran %v", log.runs)
+	}
+	for i := 0; i < 2; i++ {
+		err := s.Cancel()
+		if !errors.Is(err, errTooLate) || err.Error() != "too late to cancel: systemctl poweroff was already run" {
+			t.Fatalf("Cancel after the timer ran: %v", err)
+		}
+	}
+	// a new request, cancelled in time: a plain cancel again, and nothing runs
+	if err := s.Schedule("reboot", time.Hour, ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Cancel(); err != nil {
+		t.Fatalf("Cancel in time: %v", err)
+	}
+	if err := s.Cancel(); err != nil {
+		t.Fatalf("a second Cancel with nothing scheduled: %v", err)
+	}
+	time.Sleep(50 * time.Millisecond)
+	if log.count() != 1 {
+		t.Fatalf("something ran after a cancel in time: %v", log.runs)
+	}
+}
+
+// A Cancel in the moment the timer fires: either it stopped the action (nil, and nothing is ever run) or the
+// action was carried out (errTooLate, and it ran once). Never "cancelled" for an action that ran, which the
+// timer's own Stop could not promise.
+func TestLinuxCancelAndTheTimerNeverBothWin(t *testing.T) {
+	s, log := linuxPower(t)
+	cancelled, late := 0, 0
+	for i := 0; i < 400; i++ {
+		before := log.count()
+		delay := time.Duration(i%8) * 50 * time.Microsecond
+		if err := s.Schedule("shutdown", delay, ""); err != nil {
+			t.Fatal(err)
+		}
+		time.Sleep(delay)
+		err := s.Cancel()
+		time.Sleep(time.Millisecond) // a timer that was let through has run its stand-in by now
+		ran := log.count() - before
+		switch {
+		case err == nil && ran == 0:
+			cancelled++
+		case errors.Is(err, errTooLate):
+			for j := 0; j < 200 && log.count() == before; j++ { // "written down before it is run": give it its moment
+				time.Sleep(time.Millisecond)
+			}
+			if log.count()-before != 1 {
+				t.Fatalf("round %d: Cancel said too late and systemctl ran %d time(s)", i, log.count()-before)
+			}
+			late++
+		default:
+			t.Fatalf("round %d: Cancel answered %v and systemctl ran %d time(s)", i, err, ran)
+		}
+	}
+	time.Sleep(20 * time.Millisecond)
+	if log.count() != late {
+		t.Fatalf("systemctl ran %d time(s) in all, and %d cancels were told it had", log.count(), late)
+	}
+	t.Logf("400 rounds: cancelled in time %d, too late %d", cancelled, late)
 }
