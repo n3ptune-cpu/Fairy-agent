@@ -373,3 +373,64 @@ func TestChallengeFloodDoesNotKillAnApprovalInFlightThroughTheHelper(t *testing.
 	r := newApprovalRig(t).trusted(t)
 	challengeFlood(t, r.post, r.approve)
 }
+
+// TestMetricsShowWhoseTrustAMachineHas (r1-a2-05). The first-time set needs only the control token and a proof
+// against the PROPOSED values, so whoever holds a stolen control token can set a trust of his own on a machine
+// that has none, and the owner's approvals are refused there until somebody repairs it on the machine. That is
+// an accepted limit of the design. What must hold is that the owner's panel can see it: /metrics shows the
+// issuer, the client id, the key thumbprints, a hash over all of it and the user ids, and how the file came to
+// be.
+func TestMetricsShowWhoseTrustAMachineHas(t *testing.T) {
+	r := newLinuxRig(t, true)
+	mine := r.iss.Init() // what the owner's panel would set
+
+	// the thief is first. Case 1 of two: the owner's own Pocket ID, client and keys, and the thief's user id
+	// (he has an account there): issuer, client id and thumbprints look right, the count of users is 1
+	thief := *r.iss
+	thief.Sub = "thief-user-id"
+	in := thief.Init(thief.Sub)
+	if st, b := r.post(t, api.PathApprovalTrust, provenTrust(t, r.base, &thief, in)); st != 200 {
+		t.Fatalf("the thief's first-time set: %d %v", st, b)
+	}
+	// the owner is locked out, as the guide says
+	st, b := r.post(t, api.PathApprovalTrust, provenTrustOrPlain(t, r, mine))
+	wantRefusal(t, "the owner's set afterwards", st, b, 409, api.CodeTrustAlreadySet)
+	ok := r.approve(t, map[string]any{"verb": "power", "action": "shutdown", "delay_s": 60})
+	st, b = r.post(t, "/power", map[string]any{"action": "shutdown", "delay_s": 60, "approval": ok})
+	wantRefusal(t, "the owner's approval", st, b, 403, api.CodeApprovalRefused)
+
+	// ... and the owner's panel can tell from /metrics alone
+	ap := r.approval(t)
+	if ap["issuer"] != mine.Issuer || ap["client_id"] != mine.ClientID || ap["users"] != float64(1) {
+		t.Fatalf("approval block: %v", ap)
+	}
+	if ap["trust_hash"] == api.TrustHash(mine) || ap["trust_hash"] != api.TrustHash(api.TrustInit{Issuer: in.Issuer, ClientID: in.ClientID, Keys: in.Keys, Users: in.Users}) {
+		t.Fatalf("trust_hash %v does not tell the thief's trust (%s) from the owner's (%s)", ap["trust_hash"], api.TrustHash(in), api.TrustHash(mine))
+	}
+	if ap["set_by"] != "panel" || ap["set_at"] == nil {
+		t.Fatalf("approval block does not say how the trust was set: %v", ap)
+	}
+	for k, v := range ap {
+		if s, _ := v.(string); strings.Contains(s, "thief-user-id") {
+			t.Fatalf("the block sends a user id (%s)", k)
+		}
+	}
+
+	// the repair on the machine (helper-trust set with the owner's values): the hash is the panel's again
+	r.setTrustOnTheMachine(t, nil)
+	time.Sleep(5200 * time.Millisecond) // the gate looks at the file again within 5 s
+	ap = r.approval(t)
+	if ap["trust_hash"] != api.TrustHash(mine) || ap["set_by"] != "admin" {
+		t.Fatalf("approval block after the repair: %v", ap)
+	}
+}
+
+// provenTrustOrPlain is in with a proof when the machine still gives a challenge for it, else in as it is.
+func provenTrustOrPlain(t *testing.T, r *lrig, in api.TrustInit) api.TrustInit {
+	t.Helper()
+	st, c := r.post(t, api.PathApprovalChallenge, map[string]any{"verb": api.ApproveTrustSet, "trust_hash": api.TrustHash(in)})
+	if st != 200 {
+		return in
+	}
+	return r.iss.Prove(time.Now(), in, api.ApprovalEntry{Challenge: c["challenge"].(string), Request: c["request"].(string)})
+}

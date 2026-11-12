@@ -388,6 +388,15 @@ type ApprovalStatus struct {
 	ClientID string        `json:"client_id,omitempty"`
 	Keys     []ApprovalKey `json:"keys,omitempty"`
 	Users    int           `json:"users,omitempty"` // how many users may approve
+	// TrustHash is TrustHash of what this machine trusts: issuer, client id, keys and users, in the file's
+	// order. The user ids themselves are not sent; with the hash a panel can still tell whether the machine
+	// trusts exactly what the panel would set (the hash it computed for its own first-time set), users
+	// included. A machine whose hash is another one was set by somebody else, or changed on the machine.
+	TrustHash string `json:"trust_hash,omitempty"`
+	// SetBy says how the trust file came to be: "panel" (a first-time set over the network, by whoever held
+	// the control token at that moment) or "admin" (helper-trust set on the machine). SetAt: when (RFC 3339).
+	SetBy string `json:"set_by,omitempty"`
+	SetAt string `json:"set_at,omitempty"`
 	// FanWindowS: after an approved fan change that was applied, further fan changes need none for this long,
 	// counted from the moment that approval was accepted (0: off).
 	FanWindowS *int `json:"fan_window_s,omitempty"`

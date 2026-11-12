@@ -673,10 +673,16 @@ the trust set. 17 times in a row: `POST /approval/challenge` with
 `approval: no challenge given, too many are open`. After 90 seconds the same request -> `[200]`, and
 `helper.log` has `the oldest open challenge was dropped for a new one`.
 
+**G6. Whose trust a machine has.** With the trust set (step 8): `helper-status` and `helper-trust show` now
+also print `trust hash:      <43 characters> ...` and `set by:          admin, <time> (on this machine:
+helper-trust set)`. `/metrics` (step 16) has `"trust_hash":"<the same 43 characters>"`, `"set_by":"admin"`
+and `"set_at":"..."` in the `approval` block. `helper-trust clear` (step 23) prints, under `removed. Approval
+is off ...`, two lines that start with `That first-time set is open to whoever holds the control token`.
+
 ### What to send back
 
 The output of steps 5, 8, 9, 13, 15, 20, 26, 26b, 27, 28, N1, N2 (and 31, 32b if done), of G1.2, G1.4, G1.5,
-G1.7 and G1.8, and:
+G1.7, G1.8, G4, G5 and G6, and:
 `Get-Content "C:\ProgramData\fairy-agent\helper\helper.log" -Tail 60`. If the helper did not start after
 step 3: Event Viewer > Windows Logs > Application, source `fairy-agent-helper`.
 

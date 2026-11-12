@@ -252,7 +252,8 @@ func (t *Trust) Marshal() []byte {
 // Status is the trust as the "approval" block shows it (state required).
 func (t *Trust) Status() api.ApprovalStatus {
 	st := api.ApprovalStatus{State: api.ApprovalRequired, Proto: api.ApprovalProto, Issuer: t.Issuer, ClientID: t.ClientID,
-		Users: len(t.Users)}
+		Users: len(t.Users), SetBy: t.SetBy, SetAt: t.SetAt,
+		TrustHash: api.TrustHash(api.TrustInit{Issuer: t.Issuer, ClientID: t.ClientID, Keys: t.Keys, Users: t.Users})}
 	for _, k := range t.Keys {
 		st.Keys = append(st.Keys, api.ApprovalKey{Kid: k.Kid, Alg: k.Alg, Thumbprint: Thumbprint(k)})
 	}

@@ -1017,10 +1017,33 @@ actions", Pocket ID's signing key(s), and the users who may approve (their id in
   an old key, or a machine whose clock is off, is found out **before** the machine locks: the set is refused
   (`403 proof_refused`, the text says which check failed; without any approval `403 proof_required`), nothing
   is written, and the panel can try again. One confirmation can switch on many machines at once.
-  Why letting the panel do this is safe enough: without trust a panel can already do everything, so letting
-  it set the trust once is never worse than "off". What the proof does not do: stop a panel that is already
-  taken over at that moment. It would propose its own Pocket ID and prove against that. Look at the issuer
-  and the key thumbprint in `helper-status` / `helper-trust show` after the first set.
+  **What this costs: whoever holds the control token first can lock you out.** Without trust, somebody with
+  the control token can already send every control request, so the first-time set gives a thief no action
+  he did not have. It does give him one thing "off" did not: a stolen control token (or a panel that is
+  already taken over) can do the first-time set itself, on a machine that has no trust yet, with an issuer,
+  a key or a user of its own. The proof does not stop that: it is checked against the proposed values, and
+  the thief proves against his own. From then on **your** approvals are refused on that machine (`403
+  approval_refused`) for fan, power and update, and his are accepted, until somebody repairs it **at the
+  machine**. Changing the control token does not undo it. The same holds again after every `helper-trust
+  clear`, for as long as the machine is left at "off". This was accepted (the owner's decision); it is a
+  limit, not "never worse than off", which an earlier version of this guide said.
+
+  The repair, as root / Administrator on the machine, in one sitting:
+  `fairy-agent helper-trust set --issuer <yours> --client-id <yours> --user <your id> --fetch-keys`
+  (it replaces the foreign file with your values and the machine is locked to them; `helper-trust clear`
+  alone would only open the race again). Then replace the control token, because it was stolen: **Re-pair**
+  in the panel.
+
+  How to notice. `GET /metrics` shows, in the `approval` block, what the machine trusts: `issuer`,
+  `client_id`, each key's `thumbprint`, `users` (how many), `trust_hash` (one hash over issuer, client id,
+  keys and the user ids themselves: it equals the hash your panel computes for the values it would set, and
+  differs if anything differs, also if only the user list does), `set_by` (`panel`: over the network;
+  `admin`: on the machine) and `set_at`. A panel compares these with its own. On the machine:
+  `helper-status` / `helper-trust show` print the same and the user ids. Look at them after the first set.
+
+  How to avoid the window altogether: set the trust on the machine yourself right after installing (the last
+  line of the block below), before the panel's first contact, and never leave a machine at "off" after a
+  `clear`.
 * **After that, only on the machine.** Once a trust file exists (usable or damaged), every attempt to set,
   change or remove it from the network is refused (`409 already_set`), always, also with a valid approval.
   Another signing key after a key rotation at Pocket ID, other users, the two settings below, switching the
@@ -1165,8 +1188,11 @@ the user (`sub`), the key id and the first 8 characters of the challenge. Never 
 
 **What the panel sees.** `GET /metrics` has `"approval": {"state": "off" | "required" | "broken" | "unknown",
 "enforced_by": "helper" | "agent", "proto": 1, "issuer": ..., "client_id": ..., "keys": [{"kid", "alg",
-"thumbprint"}], "users": <how many>, "fan_window_s": ..., "boot_shutdown_s": ..., "error": ...}`. No user ids
-and no keys, only how many users and each key's thumbprint. `unknown`: the Windows helper is not answering, or
+"thumbprint"}], "users": <how many>, "trust_hash": ..., "set_by": "panel" | "admin", "set_at": ...,
+"fan_window_s": ..., "boot_shutdown_s": ..., "error": ...}`. No user ids
+and no keys, only how many users, each key's thumbprint, and `trust_hash`: the hash of issuer, client id, keys
+and users that the panel computes for a first-time set (`pkg/agent/api`: `TrustHash`), so a panel can tell
+whether a machine trusts exactly what it would set, without the user ids being sent. `unknown`: the Windows helper is not answering, or
 the helper that is running is from before passkey approvals while this machine has a trust file ("Mixed
 versions" below); either way nothing that would go through the helper and need an approval runs.
 `"agent_checks": [...]` (Windows): the requests the agent carries out and checks itself; `"agent_error"`: why

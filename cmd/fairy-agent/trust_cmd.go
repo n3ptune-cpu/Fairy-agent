@@ -52,7 +52,8 @@ set (root / Administrator) writes the trust file. What is not given stays as it 
   --from FILE           start from a complete trust file instead of the existing one
   --yes                 do not ask before writing
 show prints the trust file and whether it can be used. clear removes it: nothing needs an approval any more,
-and the panel can set the trust again (once).
+and the panel can set the trust again (once). Whoever holds the control token can do that first-time set,
+with an issuer and users of his own: do not leave a machine at "off" longer than needed.
 
 The panel's first-time set is accepted only with a passkey approval that proves the values work. set, typed
 here, proves nothing: it writes what it is given. A wrong issuer spelling, client id or user id, or a clock
@@ -166,6 +167,8 @@ func helperTrustCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) in
 			return fail(err)
 		}
 		fmt.Fprintln(stdout, "removed. Approval is off (in effect within 5 seconds); the panel can now set trust again (once).")
+		fmt.Fprintln(stdout, "  That first-time set is open to whoever holds the control token, with values of his own. Do not leave")
+		fmt.Fprintln(stdout, "  this machine at \"off\" longer than needed: let your panel set the trust now, or: fairy-agent helper-trust set ...")
 		return 0
 	}
 
@@ -379,9 +382,6 @@ func printTrust(w io.Writer, state string, t *approval.Trust, loadErr error) {
 	for _, u := range t.Users {
 		fmt.Fprintln(w, "  may approve:   ", u)
 	}
-	if t.SetBy != "" {
-		fmt.Fprintln(w, "set by:          "+t.SetBy+", "+t.SetAt)
-	}
 }
 
 // approvalLines is the approval block as lines for people (helper-status, helper-trust). No secrets: the
@@ -407,6 +407,13 @@ func approvalLines(st api.ApprovalStatus) []string {
 		lines = append(lines, "pinned key:      kid "+k.Kid+", "+k.Alg+", thumbprint "+k.Thumbprint)
 	}
 	lines = append(lines, "allowed users:   "+strconv.Itoa(st.Users))
+	if st.TrustHash != "" {
+		lines = append(lines, "trust hash:      "+st.TrustHash+" (of issuer, client id, keys and users; the panel shows the hash of what it would set)")
+	}
+	if st.SetBy != "" {
+		how := map[string]string{"panel": " (over the network: a first-time set, by whoever held the control token)", "admin": " (on this machine: helper-trust set)"}[st.SetBy]
+		lines = append(lines, "set by:          "+st.SetBy+", "+st.SetAt+how)
+	}
 	fan, boot := "off", "off (every shutdown needs an approval)"
 	if st.FanWindowS != nil && *st.FanWindowS > 0 {
 		fan = strconv.Itoa(*st.FanWindowS) + " s after an approved fan change, further fan changes need none"

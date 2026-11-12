@@ -364,3 +364,33 @@ func TestHelperTrustSetSaysWhatIsInEffect(t *testing.T) {
 		})
 	}
 }
+
+// TestHelperTrustShowsWhoseTrustItIs (audit 5, r1-a2-05): show prints the hash a panel compares with its own
+// (issuer, client id, keys, users) and how the file came to be; clear says that the first-time set it opens
+// again is open to whoever holds the control token.
+func TestHelperTrustShowsWhoseTrustItIs(t *testing.T) {
+	r := newTrustRig(t)
+	if code, out, errs := r.run("", "set", "--yes", "--issuer", r.issuer.URL, "--client-id", "c", "--user", "user-a", "--user", "user-b"); code != 0 {
+		t.Fatalf("set: %d\n%s\n%s", code, out, errs)
+	}
+	tr := r.trust()
+	want := api.TrustHash(api.TrustInit{Issuer: tr.Issuer, ClientID: tr.ClientID, Keys: tr.Keys, Users: tr.Users})
+	code, out, _ := r.run("", "show")
+	if code != 0 || !strings.Contains(out, "trust hash:      "+want) || !strings.Contains(out, "set by:          admin, ") || !strings.Contains(out, "on this machine") {
+		t.Fatalf("show: %d\n%s", code, out)
+	}
+	if st := tr.Status(); st.TrustHash != want || st.SetBy != "admin" || st.SetAt == "" {
+		t.Fatalf("status: %+v", st)
+	}
+	// another user list, the same count: another hash
+	if code, out, errs := r.run("", "set", "--yes", "--user", "user-a", "--user", "user-c"); code != 0 {
+		t.Fatalf("set: %d\n%s\n%s", code, out, errs)
+	}
+	if got := r.trust().Status(); got.TrustHash == want || got.Users != 2 {
+		t.Fatalf("status after the user list changed: %+v", got)
+	}
+	code, out, _ = r.run("", "clear", "--yes")
+	if code != 0 || !strings.Contains(out, "removed. Approval is off") || !strings.Contains(out, "whoever holds the control token") {
+		t.Fatalf("clear: %d\n%s", code, out)
+	}
+}
