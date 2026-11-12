@@ -189,3 +189,39 @@ func TestLimiter(t *testing.T) {
 		t.Fatal("window did not slide")
 	}
 }
+
+// TestLimiterClasses (audit 5, r1-a2-03): challenges, and the two requests that only make things safer (power
+// cancel, fan_auto), are counted apart from the changes and from each other.
+func TestLimiterClasses(t *testing.T) {
+	now := time.Unix(1000, 0)
+	l := NewLimiter(3, 2, time.Minute)
+	l.Now = func() time.Time { return now }
+	cancel, shutdown := "cancel", "shutdown"
+	for i := 0; i < ChallengesPerMinute; i++ {
+		if !l.AllowRequest(Request{Verb: VerbChallenge}) {
+			t.Fatal("challenge", i)
+		}
+	}
+	if l.AllowRequest(Request{Verb: VerbChallenge}) {
+		t.Fatal("one challenge too many was allowed")
+	}
+	if !l.AllowRequest(Request{Verb: VerbPower, Action: &shutdown}) || !l.AllowRequest(Request{Verb: VerbFanSet}) ||
+		l.AllowRequest(Request{Verb: VerbTrustInit}) || l.AllowRequest(Request{Verb: VerbApplyUpdate}) {
+		t.Fatal("change budget")
+	}
+	for i := 0; i < SafePerMinute; i++ {
+		req := Request{Verb: VerbPower, Action: &cancel}
+		if i%2 == 1 {
+			req = Request{Verb: VerbFanAuto}
+		}
+		if !l.AllowRequest(req) {
+			t.Fatal("cancel / fan_auto", i)
+		}
+	}
+	if l.AllowRequest(Request{Verb: VerbPower, Action: &cancel}) || l.AllowRequest(Request{Verb: VerbFanAuto}) {
+		t.Fatal("one safe request too many was allowed")
+	}
+	if !l.AllowRequest(Request{Verb: VerbStatus}) {
+		t.Fatal("a read was kept out by the others")
+	}
+}

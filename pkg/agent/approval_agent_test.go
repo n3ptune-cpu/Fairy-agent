@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -48,13 +49,17 @@ type lrigOpts struct {
 	// uptime: how long the system has been up, for the gate's shutdown-after-boot setting (nil: not known)
 	uptime func() time.Duration
 	noKey  bool // a build without a release key: self-update answers "unavailable"
+	rate   int  // control_rate_per_min (0: 60, so that a test is not held up by it)
 }
 
 func newLinuxRigWith(t *testing.T, o lrigOpts) *lrig {
 	t.Helper()
 	withGate := o.gate
+	if o.rate == 0 {
+		o.rate = 60
+	}
 	cfg, err := agent.Parse([]byte("ipmi: {enabled: true}\nfan_control: {enabled: true}\npower_control: {enabled: true}\nself_update: {enabled: true}\n"+
-		"wol: {enabled: true}\ncontrol_rate_per_min: 60\n"), filepath.Join(t.TempDir(), "config.yaml"))
+		"wol: {enabled: true}\ncontrol_rate_per_min: "+strconv.Itoa(o.rate)+"\n"), filepath.Join(t.TempDir(), "config.yaml"))
 	if err != nil {
 		t.Fatal(err)
 	}

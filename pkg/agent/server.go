@@ -358,6 +358,10 @@ type route struct {
 	// maxBody is the largest body of a control request (0: 4096 bytes). The routes that take a passkey approval
 	// (an ID token and the list it was given for) get approvalBody.
 	maxBody int64
+	// budget is the request budget a control route counts in (control_rate_per_min a minute each, see
+	// controlBudget). "": the route counts itself once it has read the request (POST /power, whose cancel has
+	// a budget of its own).
+	budget  string
 	feature func() bool // POST: is the feature on? (off = 404, nothing happens)
 	code    string      // the 404 code when the feature is off
 	h       func(w http.ResponseWriter, r *http.Request)
@@ -369,17 +373,17 @@ func (a *Agent) Handler() http.Handler {
 		"/metrics":          {method: http.MethodGet, h: a.metrics},
 		"/processes":        {method: http.MethodGet, busy: a.procWaiters, h: a.processes},
 		"/fan/status":       {method: http.MethodGet, busy: a.fanStatuses, h: a.fanStatus},
-		"/fan/mode":         {method: http.MethodPost, control: true, maxBody: approvalBody, feature: func() bool { return a.d.Fan != nil }, code: "fan_control_disabled", h: a.fanMode},
-		"/fan/duty":         {method: http.MethodPost, control: true, maxBody: approvalBody, feature: func() bool { return a.d.Fan != nil }, code: "fan_control_disabled", h: a.fanDuty},
+		"/fan/mode":         {method: http.MethodPost, control: true, budget: budgetControl, maxBody: approvalBody, feature: func() bool { return a.d.Fan != nil }, code: "fan_control_disabled", h: a.fanMode},
+		"/fan/duty":         {method: http.MethodPost, control: true, budget: budgetControl, maxBody: approvalBody, feature: func() bool { return a.d.Fan != nil }, code: "fan_control_disabled", h: a.fanDuty},
 		"/power":            {method: http.MethodPost, control: true, maxBody: approvalBody, feature: func() bool { return a.d.Power != nil }, code: "power_control_disabled", h: a.power},
-		"/wol":              {method: http.MethodPost, control: true, feature: func() bool { return a.d.WOL != nil }, code: "wol_disabled", h: a.wol},
-		"/update":           {method: http.MethodPost, control: true, maxBody: approvalBody, feature: func() bool { return a.d.Updater != nil }, code: "self_update_disabled", h: a.update},
-		"/bmc/power":        {method: http.MethodPost, control: true, feature: func() bool { return a.d.BMCRelay != nil }, code: "bmc_relay_disabled", h: a.bmcPower},
-		api.PathHelperStop:  {method: http.MethodPost, control: true, feature: a.hasHelper, h: a.helperStop},
-		api.PathHelperStart: {method: http.MethodPost, control: true, feature: a.hasHelper, h: a.helperStart},
+		"/wol":              {method: http.MethodPost, control: true, budget: budgetControl, feature: func() bool { return a.d.WOL != nil }, code: "wol_disabled", h: a.wol},
+		"/update":           {method: http.MethodPost, control: true, budget: budgetControl, maxBody: approvalBody, feature: func() bool { return a.d.Updater != nil }, code: "self_update_disabled", h: a.update},
+		"/bmc/power":        {method: http.MethodPost, control: true, budget: budgetControl, feature: func() bool { return a.d.BMCRelay != nil }, code: "bmc_relay_disabled", h: a.bmcPower},
+		api.PathHelperStop:  {method: http.MethodPost, control: true, budget: budgetControl, feature: a.hasHelper, h: a.helperStop},
+		api.PathHelperStart: {method: http.MethodPost, control: true, budget: budgetControl, feature: a.hasHelper, h: a.helperStart},
 		// the passkey approval of the routes above (approval.go)
-		api.PathApprovalChallenge: {method: http.MethodPost, control: true, maxBody: approvalBody, feature: a.hasApproval, code: api.CodeApprovalDisabled, h: a.approvalChallenge},
-		api.PathApprovalTrust:     {method: http.MethodPost, control: true, maxBody: approvalBody, feature: a.hasApproval, code: api.CodeApprovalDisabled, h: a.approvalTrust},
+		api.PathApprovalChallenge: {method: http.MethodPost, control: true, budget: budgetChallenge, maxBody: approvalBody, feature: a.hasApproval, code: api.CodeApprovalDisabled, h: a.approvalChallenge},
+		api.PathApprovalTrust:     {method: http.MethodPost, control: true, budget: budgetControl, maxBody: approvalBody, feature: a.hasApproval, code: api.CodeApprovalDisabled, h: a.approvalTrust},
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ip := clientIP(r)
@@ -433,9 +437,7 @@ func (a *Agent) Handler() http.Handler {
 			c.Vouch()
 		}
 		if rt.control {
-			if !a.control.allow("control") {
-				a.logOnce("rate", "control request rate limited", "remote", ip, "path", r.URL.Path)
-				writeJSON(w, 429, map[string]any{"error": "too many control requests; try again in a minute"})
+			if rt.budget != "" && !a.controlBudget(w, r, rt.budget) {
 				return
 			}
 			r.Body = http.MaxBytesReader(w, r.Body, max(rt.maxBody, 4096))
@@ -452,6 +454,41 @@ func (a *Agent) Handler() http.Handler {
 		}
 		rt.h(w, r)
 	})
+}
+
+// The request budgets of the control routes. Each allows control_rate_per_min requests a minute, for
+// everybody together, and none can use up another's:
+//
+//   - budgetControl: everything that changes something or sends something out (fan, power other than cancel,
+//     Wake-on-LAN, the BMC relay, update, helper stop / start, the first-time set of the trust);
+//   - budgetChallenge: POST /approval/challenge. A challenge changes nothing on the machine, and every approved
+//     action needs one first. In the one budget of before, an approved action cost two requests, and twelve
+//     challenges (the default limit) left none for anything else, POST /power cancel included (audit 5,
+//     r1-a2-03);
+//   - budgetCancel: POST /power with the action cancel, the request that stops a shutdown. Nothing but other
+//     cancels can keep it out: not challenges, and not twelve refused requests of somebody who has the control
+//     token and no approval.
+const (
+	budgetControl   = "control"
+	budgetChallenge = "challenge"
+	budgetCancel    = "cancel"
+)
+
+var budgetText = map[string]string{
+	budgetControl:   "too many control requests; try again in a minute",
+	budgetChallenge: "too many approval challenge requests; try again in a minute (they have a budget of their own: control requests and cancel are not affected)",
+	budgetCancel:    "too many cancel requests; try again in a minute",
+}
+
+// controlBudget counts one request in budget; false: the budget is used up and the request was answered 429.
+func (a *Agent) controlBudget(w http.ResponseWriter, r *http.Request, budget string) bool {
+	if a.control.allow(budget) {
+		return true
+	}
+	a.logOnce("rate:"+budget, budget+" request rate limited", "remote", clientIP(r), "path", r.URL.Path)
+	w.Header().Set("Retry-After", "60")
+	writeJSON(w, 429, map[string]any{"error": budgetText[budget]})
+	return false
 }
 
 // allowPeek reports whether key is below its limit without counting a hit.
@@ -1079,7 +1116,17 @@ func (a *Agent) power(w http.ResponseWriter, r *http.Request) {
 		RequestedBy any             `json:"requested_by"`
 		Approval    *api.Approval   `json:"approval"`
 	}
-	if err := decodeBody(r, &b); err != nil {
+	err := decodeBody(r, &b)
+	// This route counts its requests itself: cancel has a budget of its own, everything else (a body that
+	// cannot be read too) counts as a control request.
+	budget := budgetControl
+	if err == nil && b.Action == "cancel" {
+		budget = budgetCancel
+	}
+	if !a.controlBudget(w, r, budget) {
+		return
+	}
+	if err != nil {
 		writeJSON(w, 400, map[string]any{"error": err.Error()})
 		return
 	}

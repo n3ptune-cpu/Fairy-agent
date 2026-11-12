@@ -522,31 +522,65 @@ func ReadFrame(r io.Reader, limit int) ([]byte, error) {
 	return b, nil
 }
 
-// Limiter allows n events per window (sliding), per class of verb.
+// Limiter allows n events per window (sliding), per class of request. No class can use up another's budget.
 type Limiter struct {
 	mu     sync.Mutex
-	n      map[bool]int
+	n      map[string]int
 	window time.Duration
-	hits   map[bool][]time.Time
+	hits   map[string][]time.Time
 	Now    func() time.Time
 }
 
-// Default rate limits of the helper: reads (the agent polls Core Temp every 2 s and the BMC every 10 s, the
-// panel asks for the fan status) and changes (the agent itself allows 12 control requests a minute).
+// Default rate limits of the helper, a minute: reads (the agent polls Core Temp every 2 s and the BMC every
+// 10 s, the panel asks for the fan status), changes (the agent itself allows 12 control requests a minute by
+// default), challenges (the agent passes on at most control_rate_per_min a minute, 60 at most) and the two
+// requests that only make things safer.
 const (
-	ReadsPerMinute   = 300
-	ChangesPerMinute = 30
+	ReadsPerMinute      = 300
+	ChangesPerMinute    = 30
+	ChallengesPerMinute = 60
+	SafePerMinute       = 30
 )
 
-// NewLimiter returns a limiter with reads and changes per window.
+// The classes of request a Limiter counts separately.
+const (
+	classRead   = "read"
+	classChange = "change" // fan_set, fan_mode, power (not cancel), apply_update, trust_init
+	// classChallenge: the verb challenge. It changes nothing but the helper's list of open challenges, and it
+	// must not be able to use up the budget of the requests it is asked for, nor that of a cancel.
+	classChallenge = "challenge"
+	// classSafe: power cancel and fan_auto, the two requests that only make things safer (and that the agent
+	// sends with nobody present). Nothing but themselves can keep them out.
+	classSafe = "safe"
+)
+
+// NewLimiter returns a limiter with reads and changes per window; challenges and the safe requests each get a
+// budget of their own (ChallengesPerMinute and SafePerMinute, or changes if that is more).
 func NewLimiter(reads, changes int, window time.Duration) *Limiter {
-	return &Limiter{n: map[bool]int{false: reads, true: changes}, window: window,
-		hits: map[bool][]time.Time{}, Now: time.Now}
+	return &Limiter{n: map[string]int{classRead: reads, classChange: changes, classChallenge: max(changes, ChallengesPerMinute),
+		classSafe: max(changes, SafePerMinute)}, window: window, hits: map[string][]time.Time{}, Now: time.Now}
 }
 
-// Allow counts one request of verb and reports whether it is within the limit.
-func (l *Limiter) Allow(verb string) bool {
-	c := Control(verb)
+// classOf is the class a request counts in.
+func classOf(r Request) string {
+	switch {
+	case !Control(r.Verb):
+		return classRead
+	case r.Verb == VerbChallenge:
+		return classChallenge
+	case r.Verb == VerbFanAuto, r.Verb == VerbPower && r.Action != nil && *r.Action == "cancel":
+		return classSafe
+	}
+	return classChange
+}
+
+// Allow counts one request of verb and reports whether it is within the limit. It knows only the verb, so a
+// power request counts as a change whatever its action; AllowRequest tells a cancel apart.
+func (l *Limiter) Allow(verb string) bool { return l.AllowRequest(Request{Verb: verb}) }
+
+// AllowRequest counts one request in its class and reports whether it is within that class's limit.
+func (l *Limiter) AllowRequest(r Request) bool {
+	c := classOf(r)
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	now := l.Now()

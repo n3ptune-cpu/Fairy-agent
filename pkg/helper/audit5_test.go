@@ -79,3 +79,42 @@ func TestHelperRefusedSleepCostsNoApproval(t *testing.T) {
 		t.Fatalf("the approval of a request the helper refused was used up:\n%s", log)
 	}
 }
+
+// TestHelperChallengesCannotStarveCancel (r1-a2-03), on the pipe: the helper counted the verb challenge among
+// its changes (30 a minute), with power cancel and fan_auto. An agent that passes on a full minute of challenge
+// requests (control_rate_per_min can be 60) would have left the helper refusing a cancel. Challenges, and the
+// two requests that only make things safer, now each have a budget of their own.
+func TestHelperChallengesCannotStarveCancel(t *testing.T) {
+	now := time.Unix(5000, 0)
+	a := newApprovalRig(t)
+	a.trust(t)
+	a.srv.limit = proto.NewLimiter(proto.ReadsPerMinute, proto.ChangesPerMinute, time.Minute) // the helper's own limits
+	a.srv.limit.Now = func() time.Time { return now }
+	challenge := func() proto.Response {
+		return a.v2(t, proto.Request{Verb: proto.VerbChallenge, For: ptr(proto.VerbApplyUpdate)})
+	}
+	for i := 0; i < proto.ChallengesPerMinute; i++ {
+		if resp := challenge(); resp.Status == 429 && resp.Code == proto.CodeRateLimited {
+			t.Fatalf("challenge %d was rate limited", i+1)
+		}
+	}
+	wantCode(t, "one challenge too many", challenge(), 429, proto.CodeRateLimited)
+	// the changes have their whole budget left, and use it up
+	for i := 0; i < proto.ChangesPerMinute; i++ {
+		wantCode(t, "fan_mode without approval", a.call(t, `{"v":1,"verb":"fan_mode","mode":"full","by":"test"}`), 403, api.CodeApprovalRequired)
+	}
+	wantCode(t, "one change too many", a.call(t, `{"v":1,"verb":"power","action":"shutdown","delay_s":60,"by":"test"}`), 429, proto.CodeRateLimited)
+	// cancel and fan_auto are kept out by neither
+	for i := 0; i < proto.SafePerMinute/2; i++ {
+		if resp := a.call(t, `{"v":1,"verb":"power","action":"cancel","by":"agent"}`); resp.Status != 200 {
+			t.Fatalf("cancel %d with the challenge and the change budget used up: %+v", i+1, resp)
+		}
+		if resp := a.call(t, `{"v":1,"verb":"fan_auto","by":"helper stop"}`); resp.Status != 200 {
+			t.Fatalf("fan_auto %d with the challenge and the change budget used up: %+v", i+1, resp)
+		}
+	}
+	wantCode(t, "one cancel too many", a.call(t, `{"v":1,"verb":"power","action":"cancel","by":"agent"}`), 429, proto.CodeRateLimited)
+	if resp := a.call(t, `{"v":1,"verb":"status"}`); resp.Status != 200 {
+		t.Fatalf("a read: %+v", resp)
+	}
+}

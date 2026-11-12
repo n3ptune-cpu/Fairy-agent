@@ -188,7 +188,7 @@ func (s *Server) handle(ctx context.Context, client string, frame []byte, versio
 		s.p.Audit.Warn("refused request", "client", client, "reason", err.Error())
 		return proto.FromError(err)
 	}
-	if !s.limit.Allow(req.Verb) {
+	if !s.limit.AllowRequest(req) {
 		s.p.Audit.Warn("rate limited", "client", client, "verb", req.Verb)
 		return proto.Fail(proto.CodeRateLimited, "too many requests")
 	}

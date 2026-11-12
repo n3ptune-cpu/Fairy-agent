@@ -282,3 +282,54 @@ func TestARefusedShutdownDoesNotSpendTheOneAfterBoot(t *testing.T) {
 		t.Error("the accepted shutdown is not in the log")
 	}
 }
+
+// TestChallengesAndCancelHaveBudgetsOfTheirOwn (r1-a2-03). All control routes shared one budget (default 12 a
+// minute), POST /approval/challenge among them: twelve challenges, and POST /power cancel, the request that
+// stops a shutdown, was answered 429 (the auditor's run). Challenges and cancel now each have a budget of
+// their own, of the same size, and none can use up another's.
+func TestChallengesAndCancelHaveBudgetsOfTheirOwn(t *testing.T) {
+	const rate = 12 // the default
+	r := newLinuxRigWith(t, lrigOpts{gate: true, rate: rate})
+	r.setTrustOnTheMachine(t, nil)
+	challenge := func() (int, map[string]any) {
+		return r.post(t, api.PathApprovalChallenge, map[string]any{"verb": "apply_update"})
+	}
+	cancel := func() (int, map[string]any) { return r.post(t, "/power", map[string]any{"action": "cancel"}) }
+	tooMany := func(what string, st int, b map[string]any, text string) {
+		t.Helper()
+		if msg, _ := b["error"].(string); st != 429 || !strings.Contains(msg, text) {
+			t.Fatalf("%s: %d %v, want 429 %q", what, st, b, text)
+		}
+	}
+
+	// the auditor's run: twelve challenges, then cancel
+	for i := 0; i < rate; i++ {
+		if st, b := challenge(); st != 200 {
+			t.Fatalf("challenge %d: %d %v", i+1, st, b)
+		}
+	}
+	st, b := challenge()
+	tooMany("the 13th challenge", st, b, "too many approval challenge requests")
+	if st, b := cancel(); st != 200 {
+		t.Fatalf("POST /power cancel after twelve challenges: %d %v (challenges used its budget up)", st, b)
+	}
+	// ... and every other control request still has its whole budget
+	for i := 0; i < rate; i++ {
+		st, b := r.post(t, "/power", map[string]any{"action": "shutdown", "delay_s": 60})
+		wantRefusal(t, "shutdown without approval", st, b, 403, api.CodeApprovalRequired)
+	}
+	st, b = r.post(t, "/fan/mode", map[string]any{"mode": "full"})
+	tooMany("the 13th control request", st, b, "too many control requests")
+	// a /power body that cannot be read is a control request, not a free one
+	st, b = do(t, r.base, "POST", "/power", ctlTok, "not an object")
+	tooMany("a /power body that is not an object", st, b, "too many control requests")
+
+	// neither twelve challenges nor twelve refused control requests keep a cancel out
+	for i := 1; i < rate; i++ {
+		if st, b := cancel(); st != 200 {
+			t.Fatalf("cancel %d, with the challenge budget and the control budget used up: %d %v", i+1, st, b)
+		}
+	}
+	st, b = cancel()
+	tooMany("the 13th cancel", st, b, "too many cancel requests")
+}

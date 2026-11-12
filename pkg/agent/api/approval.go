@@ -19,7 +19,10 @@ import (
 	"strconv"
 )
 
-// Approval routes (POST, control token, counted in the control rate limit like every control action).
+// Approval routes (POST, control token). PathApprovalChallenge has a request budget of its own
+// (control_rate_per_min a minute, like the control requests' budget and separate from it): asking for a
+// challenge does not use up what the action itself, or POST /power cancel, needs. PathApprovalTrust counts as
+// a control request.
 const (
 	// PathApprovalChallenge: body ApprovalRequest; 200 ChallengeResponse.
 	PathApprovalChallenge = "/approval/challenge"

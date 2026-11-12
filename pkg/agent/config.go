@@ -70,7 +70,10 @@ type Config struct {
 	SelfUpdate   SelfUpdateConfig   `yaml:"self_update"`
 	BMCRelay     BMCRelayConfig     `yaml:"bmc_relay"`
 
-	// ControlRatePerMin limits POST requests (fan, power, Wake-on-LAN, self-update) for the whole agent.
+	// ControlRatePerMin limits POST requests for the whole agent, a minute: control requests (fan, power,
+	// Wake-on-LAN, BMC relay, self-update, helper stop / start, the first-time set of the approval trust) all
+	// together; and, each with a budget of its own of the same size, approval challenges (POST
+	// /approval/challenge) and POST /power cancel (server.go: budgetControl, budgetChallenge, budgetCancel).
 	ControlRatePerMin int `yaml:"control_rate_per_min"`
 
 	// PowerSources / UPS: devices on this machine's LAN that the agent reads and relays to the panel (same

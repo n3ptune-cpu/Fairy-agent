@@ -375,7 +375,9 @@ With a trust file in its folder the helper runs `fan_set`, `fan_mode`, `power` (
 path, a command or free text; anything else is refused, as are requests over 512 bytes (the two new requests
 and a request with an approval: 32 KiB, in a frame marked as such), unknown fields and
 values out of range. Each request is checked against what `config.yaml` switches on (with Core Temp off,
-`coretemp_read` is refused too). Reads are limited to 300 a minute, changes to 30 a minute. Every change and
+`coretemp_read` is refused too). Reads are limited to 300 a minute, changes to 30 a minute; requests for a
+challenge (60 a minute) and the two requests that only make things safer (`power` cancel and `fan_auto`, 30 a
+minute) are counted separately, so neither can be kept out by the others. Every change and
 every refused request is written to `helper.log` with who asked.
 
 **Who may talk to it.** The pipe's access list lets in only the agent's account, SYSTEM and Administrators,
@@ -726,7 +728,8 @@ token travels in the `Authorization: Bearer` header.
 ## Optional features
 
 Everything below is **off** until you switch it on in the agent's `config.yaml` **and** in the panel's
-`agents:` entry. Each one uses the separate control token, is limited to 12 requests a minute, and is written
+`agents:` entry. Each one uses the separate control token, is limited to 12 requests a minute for all of them
+together (`control_rate_per_min`; what counts in which budget is in the settings table below), and is written
 to the agent's log. Restart the agent after changing `config.yaml`. (Self-update has its own section:
 [Updates](#updates-the-panels-update-button).)
 
@@ -1417,7 +1420,7 @@ The file is `C:\ProgramData\fairy-agent\config.yaml` (Windows) or `/etc/fairy-ag
 | `ipmi`, `fan_control`, `power_control`, `wol`, `bmc_relay` | off | see [Optional features](#optional-features) |
 | `env_file` | none | `KEY=value` secrets (device and BMC passwords); `fairy-agent secret set NAME` writes it |
 | `self_update.enabled`, `self_update.repo` | off, `n3ptune-cpu/Fairy-agent` | see [Updates](#updates-the-panels-update-button) |
-| `control_rate_per_min` | 12 | all control requests together (fan, power, Wake-on-LAN, BMC relay, update) |
+| `control_rate_per_min` | 12 | requests a minute, for everybody together, in each of three budgets that cannot use each other up: **control requests** (fan, power other than cancel, Wake-on-LAN, BMC relay, update, helper stop / start, the first-time set of the approval trust), all together; **approval challenges** (`POST /approval/challenge`), so an approved action costs one control request and one challenge, not two control requests; and **`POST /power` with `cancel`**, so that neither a burst of challenges nor a row of refused requests can keep a cancel out. One more is answered `429` (`Retry-After: 60`); the text says which budget |
 | `log_file` | Windows: `C:\ProgramData\fairy-agent\logs\agent.log` (5 MB, one old copy); Linux: the journal | |
 
 Unknown settings are an error (so a typo does not silently do nothing). `fairy-agent check-config` checks the

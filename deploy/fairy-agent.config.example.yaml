@@ -84,7 +84,11 @@ self_update:
   enabled: false
   # repo: n3ptune-cpu/Fairy-agent   # only for a fork; its releases must be signed with the same key
 
-control_rate_per_min: 12       # fan / power / Wake-on-LAN / update requests per minute, all together
+# Requests a minute, for everybody together, in each of three budgets that cannot use each other up:
+# control requests (fan, power, Wake-on-LAN, BMC relay, update, helper stop / start, the first-time set of the
+# approval trust) all together; approval challenges (POST /approval/challenge: an approved action costs one
+# control request and one challenge); and POST /power cancel. One more is answered 429.
+control_rate_per_min: 12
 
 # Devices on this machine's LAN that the panel cannot reach itself; the agent reads them and passes the readings
 # on (credentials stay here). Same entries as the panel's power_sources / ups. system_hint: self = this host

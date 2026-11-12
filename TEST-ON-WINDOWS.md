@@ -420,6 +420,9 @@ are sent to the agent; every shutdown that is sent is cancelled in the next step
 **[KEY]** marks the steps whose output matters most. Keep the Administrator window open until the end: once a
 trust is set, only that window can undo it. All control requests together are limited to 12 a minute
 (`control_rate_per_min`); typed by hand you do not reach that, a script has to pace itself (answer `429`).
+**[NEW 3]** `POST /approval/challenge` and `POST /power` with `cancel` each have a budget of their own of the
+same size (12 a minute each); a `429` for a challenge reads `too many approval challenge requests`, not `too
+many control requests`.
 
 ### A. Install the self-built agent over build 16
 
@@ -654,6 +657,12 @@ must still hold (nothing may have changed for requests without approval):
   `{"action":"shutdown","delay_s":5}` -> `[400]` (`delay_s must be between 10 and 86400`, the agent's own
   check); then step 13's shutdown with `delay_s` 600 -> `[200]`. Cancel it (step 14).
   `C:\ProgramData\fairy-agent\helper\approval-boot-shutdown.json` exists only after the `[200]`.
+
+**G4. Challenges cannot keep a cancel out.** Wait a full minute first (so that all budgets are fresh). Then
+13 times in a row (a loop; no pause) step 26b's challenge request, or any `POST /approval/challenge`:
+-> twelve answers that are not `429`, the 13th **`[429]` `too many approval challenge requests`**. At once:
+`POST /power` with `{"action":"cancel"}` -> **`[200]`** (before this fix: `[429] too many control requests`).
+Step 13's shutdown -> `[403] approval_required`, not `429`: the control budget is untouched.
 
 ### What to send back
 
