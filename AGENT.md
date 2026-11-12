@@ -993,6 +993,26 @@ the agent carries some requests out itself also `"agent_checks": ["fan_set", "fa
 the agent's to check; the helper checks the rest). The panel does not have to know: it asks
 `POST /approval/challenge`, and whoever will check answers.
 
+**Which machine.** An approval is for one machine. Every machine with a trust file has a **machine id** in
+that file: 22 characters made of 16 random bytes (or what the panel chose at the first-time set), made up when
+the trust is set for the first time and kept as long as the file is. It is a name, not a secret, and
+`GET /metrics` shows it (`"machine_id"`). Every approval names, for each request in it, the machine it is for,
+and the machine that checks uses **its own** id from **its own** trust file, whatever the approval says. So
+an approval you gave for one machine is refused by every other machine (`403 approval_refused`), also when
+somebody who controls the first machine's answers handed the panel the other machine's challenge and then
+passed the approved request on with a stolen control token. (That was possible before 2026-11-12: the
+approval named the request and a challenge, and a challenge is 32 random bytes that could be any machine's.)
+
+What this rests on, and what no machine can do for you: **the panel must know which id belongs to which
+machine.** It takes each machine's id on record when it sets the trust (or when it first sees one), builds
+every approval with the id on record, and treats two machines that show the same id, or a machine whose id
+is suddenly another one, as an alarm. A machine sees no other machine, so it **cannot notice** that another
+one has its id. That happens in one ordinary way: **a machine made from a copy of another machine's disk**
+(a cloned VM, a restored image) has the same trust file and so the same id, and the two then accept each
+other's approvals. On the copy, as root / Administrator: `fairy-agent helper-trust set --new-machine-id`
+(everything else in the file stays), or `helper-trust clear` and set the trust anew. `helper-trust show`
+says the same next to the id. The panel then has to be told the new id (it still has the old one on record).
+
 **What needs an approval** while trust is set:
 
 | Request | Approval | |
@@ -1012,6 +1032,9 @@ always did. `GET /metrics` says `"approval": {"state": "off", ...}`.
 
 The trust is four things: Pocket ID's address (issuer), the client id of the Pocket ID client "Fairy PC
 actions", Pocket ID's signing key(s), and the users who may approve (their id in Pocket ID, the token's `sub`).
+With the first trust the machine also gets its machine id ("Which machine" above): the panel's first-time set
+may propose one (the approval that proves the set is made with it, so a proof for one id sets no other), and
+when it proposes none, or the trust is set on the machine, the machine makes one up.
 
 * **The first time, from the panel, with a proof that it works.** While a machine has no trust file, the panel
   can set the trust once (`POST /approval/trust`), and only together with a passkey approval that fits the
@@ -1061,12 +1084,15 @@ fairy-agent helper-trust set --fetch-keys --keep-old-keys   # keep the old key p
 fairy-agent helper-trust set --user <id> --user <id>  # who may approve (replaces the list)
 fairy-agent helper-trust set --fan-window 0           # no fan window: every fan change needs an approval
 fairy-agent helper-trust set --boot-shutdown 600      # see "Settings" below
+fairy-agent helper-trust set --new-machine-id         # on a machine made from a copy of another one's disk
 fairy-agent helper-trust clear                        # remove it: approval off; the panel can set it again
 # everything at once, e.g. right after installing, without the panel:
 fairy-agent helper-trust set --issuer https://id.example.org --client-id <client id> --user <id>
 ```
 
-  `set` starts from the existing file and changes what you give. It prints what it will write, with each key's
+  `set` starts from the existing file and changes what you give. The machine id stays as it is: `set` makes
+  one up only when the file has none, or when you ask (`--new-machine-id`), and never takes one from a file
+  given with `--from`. It prints what it will write, with each key's
   thumbprint, and asks before writing (`--yes` does not ask). With `--fetch-keys`, or when there is no key yet,
   it reads the issuer's keys itself over https (`<issuer>/.well-known/openid-configuration`, then the
   `jwks_uri` named there, which must be on the same host; redirects are not followed). `--jwks FILE` takes
@@ -1096,7 +1122,19 @@ fairy-agent helper-trust set --issuer https://id.example.org --client-id <client
 **The trust file.** `approval-trust.json`. It holds no secret. Windows: `C:\ProgramData\fairy-agent\helper\`
 (the helper's folder: only Administrators and SYSTEM change it, the agent's account can read it). The folder
 and the file are checked like the helper's other files (owner and access list) every time before the file
-counts.
+counts. The machine id is in this file (`"machine_id"`) and nowhere else, because this is the one file that
+only the side that checks can write: on Windows the agent's service cannot change it, and it has no way to
+tell the helper another id (the helper reads the file, and takes no id over the pipe).
+
+**A trust file from before machine ids** (written by the test build of 2026-11-11; no release ever wrote
+one) has no `"machine_id"`. Nothing is ever checked with such a file. The service that owns the file adds an
+id when it starts: `fairy-agent-helper` on Windows, `fairy-agent` elsewhere. It adds that one member and
+changes nothing else, the file keeps its owner and mode, and the log says so once (`the trust file had no
+machine id ... one was added`). Where it cannot (Linux: the file is root's and the agent does not run as
+root; Windows: the helper that runs is not this version), the file stays as it was and the state is `broken`
+with the reason: fan, power and update requests are refused until `fairy-agent helper-trust set` is run on
+the machine (it keeps the file's values and writes it with an id) or the right service starts.
+`helper-trust show` only looks: it never adds the id itself.
 
 **Linux: whose file it is.** `/var/lib/fairy-agent/approval-trust.json`, in the agent's state folder, because
 the agent itself writes it at the first-time set. That folder belongs to the agent's service user
@@ -1158,14 +1196,17 @@ only root / Administrators (Linux: or the agent's own user) can remove it.
    nobody gets one for the rest of that minute; and, on Windows, drop the challenge of an update whose
    download takes longer than 90 s. Either stops approvals, never lets anything through.)
 2. The panel sends the browser to Pocket ID once, as the client "Fairy PC actions", with a nonce made from the
-   challenge and the request. Pocket ID asks for the passkey and signs an ID token with that nonce.
+   challenge, the request and the id of the machine it is for (the id the panel has on record for the machine
+   you chose, not one that came with the challenge). Pocket ID asks for the passkey and signs an ID token with
+   that nonce.
 3. The panel sends the request with the token attached. The machine first runs the request's own checks: is
    the delay allowed, is another action pending, can this machine sleep, are the fans in a mode that takes a
    duty, can an update be started. A request that fails one of them is refused for that reason and **costs
    nothing**: the approval is not looked at and stays good for the rest of its 180 s. Then, immediately before
    it acts, the machine checks: the token's signature with the pinned key (RS256), issuer, that it was issued
    for this client only, the user is one of the allowed ones, it is not expired, the passkey check
-   (`auth_time`) is not older than the challenge, it was a passkey sign-in, the nonce fits, and its own
+   (`auth_time`) is not older than the challenge, it was a passkey sign-in, the nonce fits (the machine makes
+   it from its own open challenge, the request it is about to run and its own machine id), and its own
    remembered request equals the request it is about to run. Then it uses the challenge up and runs the
    request. From that moment the approval is spent, also when the action then fails (the BMC does not answer,
    the system refuses the shutdown). A second use, another action, another machine: refused.
@@ -1181,8 +1222,8 @@ only root / Administrators (Linux: or the agent's own user) can remove it.
    system call or the BMC command. The agent never uses anything up for what the helper carries out. For an
    update the helper does it when it is asked to start the installer, after the download.
 
-One token can cover several machines and requests (one entry each); every machine finds its own entry. The
-exact formats are in `pkg/agent/api/approval.go`.
+One token can cover several machines and requests (one entry each, with that machine's id); every machine
+finds its own entry. The exact formats are in `pkg/agent/api/approval.go`.
 
 **Clock.** The machine's clock must be within 60 s of Pocket ID's. If it is further off, approvals are refused
 (the answer says `clock` or `auth_time`); nothing is ever accepted because of a wrong clock. Fix:
@@ -1202,12 +1243,15 @@ the user (`sub`), the key id and the first 8 characters of the challenge. Never 
 `C:\ProgramData\fairy-agent\helper\helper.log`. Linux: the agent's log (`journalctl -u fairy-agent`).
 
 **What the panel sees.** `GET /metrics` has `"approval": {"state": "off" | "required" | "broken" | "unknown",
-"enforced_by": "helper" | "agent", "proto": 1, "issuer": ..., "client_id": ..., "keys": [{"kid", "alg",
+"enforced_by": "helper" | "agent", "proto": 2, "machine_id": ..., "issuer": ..., "client_id": ..., "keys": [{"kid", "alg",
 "thumbprint"}], "users": <how many>, "trust_hash": ..., "set_by": "panel" | "admin", "set_at": ...,
 "fan_window_s": ..., "boot_shutdown_s": ..., "error": ...}`. No user ids
 and no keys, only how many users, each key's thumbprint, and `trust_hash`: the hash of issuer, client id, keys
 and users that the panel computes for a first-time set (`pkg/agent/api`: `TrustHash`), so a panel can tell
-whether a machine trusts exactly what it would set, without the user ids being sent. `unknown`: the Windows helper is not answering, or
+whether a machine trusts exactly what it would set, without the user ids being sent. `machine_id`: this
+machine's id ("Which machine" above); the panel keeps it on record and uses the one on record. `proto` is 2
+since approvals name the machine (1 was the test build of 2026-11-11, whose approvals this version refuses).
+`unknown`: the Windows helper is not answering, or
 the helper that is running is from before passkey approvals while this machine has a trust file ("Mixed
 versions" below); either way nothing that would go through the helper and need an approval runs.
 `"agent_checks": [...]` (Windows): the requests the agent carries out and checks itself; `"agent_error"`: why
@@ -1245,7 +1289,7 @@ new helper with trust set refuses the four kinds of request from an older agent 
 
 **An old helper behind a new agent** (Windows: the helper that is *running* is still the program from before
 passkey approvals, because an update did not restart it; `fairy-agent helper-status` then shows no
-`pipe protocol:   2`). That helper reads no trust file and would carry out whatever it is sent. So the agent
+`pipe protocol:   3`). That helper reads no trust file and would carry out whatever it is sent. So the agent
 looks at the trust file itself, at the moment a request arrives:
 
 * **No trust file:** nothing is checked and nothing asks for it, as before. No `approval` block; the two
@@ -1264,6 +1308,16 @@ looks at the trust file itself, at the moment a request arrives:
 
 The same refusal holds while no helper has answered at all since the agent started and a trust file exists:
 the agent does not hand a request that needs an approval to a helper it has not seen yet.
+
+**The test build of 2026-11-11** (pipe protocol 2, never released) counts as "from before" in every respect.
+Its helper checks approvals without a machine id, so an agent of this version does not rely on it and hands
+it nothing that needs an approval (`503 approval_unavailable`, `409 helper_too_old`, the block `unknown`,
+exactly as above); `helper-status` says `pipe protocol:   2 (the test build of 2026-11-11; this agent needs
+3)`. The other way round, this version's helper refuses that build's agent (its requests are marked
+protocol 2). Restarting does not help there, because the installed program is the old one: **install this
+version of both services** (the installer replaces and restarts both). The trust file that build left gets
+its machine id when this version's helper starts ("A trust file from before machine ids" above), and the
+panel then takes the id on record.
 
 **Going back to an older agent switches the check OFF.** A release from before passkey approvals does not know
 the trust file: put back on a machine that has one (`fairy-agent update --force` to an older release, an old

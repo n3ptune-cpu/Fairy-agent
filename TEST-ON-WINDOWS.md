@@ -446,8 +446,10 @@ many control requests`.
    -> the version the program was built with (`16-selfbuilt`, or `dev`).
 5. **[KEY]** The helper answers and knows approvals.
    `& "C:\Program Files\Fairy\fairy-agent.exe" helper-status`
-   -> `helper: running, answers on \\.\pipe\fairy-agent-helper`, a JSON line with `"proto":2`, then
-   `pipe protocol:   2` and a line that starts with `approval:        off (checked by the helper)`.
+   -> `helper: running, answers on \\.\pipe\fairy-agent-helper`, a JSON line with `"proto":3`, then
+   `pipe protocol:   3` and a line that starts with `approval:        off (checked by the helper)`.
+   **[NEW 4]** (It was 2 in the zip of 2026-11-11. `pipe protocol:   2 (the test build of 2026-11-11; this
+   agent needs 3)` means the helper is still that build: run the installer of this build, section H.)
 
 ### B. Set the trust on the PC
 
@@ -461,7 +463,10 @@ text works for the steps below if that client does not exist yet), your user id 
    `& "C:\Program Files\Fairy\fairy-agent.exe" helper-trust set --issuer https://id.example.org --client-id EXAMPLE-CLIENT-ID --user EXAMPLE-USER-ID`
    -> `to be written:`, the issuer, `pinned key:      kid ..., RS256, thumbprint ...`, `allowed users:   1`,
    `signing keys:    fetched just now from https://...`, then a line that starts with `written.`,
-   **[NEW 3]** a line `In effect within 5 seconds: the running helper (pipe protocol 2) ...` and one that
+   **[NEW 4]** under `to be written:` a line `machine id:      <22 characters> (names this machine in every
+   approval; ...` with two lines about a copied disk under it, and after `signing keys:` a line
+   `the machine id:   new, made up just now`,
+   **[NEW 3]** a line `In effect within 5 seconds: the running helper (pipe protocol 3) ...` and one that
    starts with `Until then what was in effect before still counts`,
    **[NEW]** and under it `NOT PROVEN: ...` (the command writes what it is given; only the panel's first-time
    set is checked against a real approval). **[NEW]** If a line `note: THE CLOCK: ...` shows: the VM's clock
@@ -620,7 +625,7 @@ services), so do it before section A, or after "Going back to build 16".
   `Start-Service fairy-agent`
   -> both services Running; the agent is the new program, the helper process is still build 16.
 * G1.2 `& "C:\Program Files\Fairy\fairy-agent.exe" helper-status`
-  -> **no** line `pipe protocol:   2`; instead `approval:        this helper is from before passkey approvals`.
+  -> **no** line `pipe protocol:   3`; instead `approval:        this helper is from before passkey approvals`.
 * G1.3 No trust file yet: a shutdown far away is accepted as before (step 13's request, `delay_s` 86400)
   -> `[200]`; cancel it (step 14). `/metrics` (step 16) has **no** `approval` block.
   (If this answers `[503] approval_unavailable` with `this agent cannot tell whether this machine has an
@@ -635,10 +640,10 @@ services), so do it before section A, or after "Going back to build 16".
   Before this fix: `[200]`, the PC would have shut down. The same for `reboot`, `sleep`, `POST /fan/mode`,
   `POST /fan/duty` (if fans are on) and `POST /update`: all `[503] approval_unavailable`.
 * G1.6 `POST /power` with `cancel` -> `[200]`. `POST /approval/challenge` -> `[409] helper_too_old`.
-* G1.7 **[KEY]** `/metrics` -> `"approval":{"state":"unknown","enforced_by":"helper","proto":1,"error":"the
+* G1.7 **[KEY]** `/metrics` -> `"approval":{"state":"unknown","enforced_by":"helper","proto":2,"error":"the
   running fairy-agent-helper is older than this agent ..."}`. Before this fix it said `"state":"required",
   "enforced_by":"agent"`.
-* G1.8 `Restart-Service fairy-agent-helper`, then `helper-status` -> `pipe protocol:   2`,
+* G1.8 `Restart-Service fairy-agent-helper`, then `helper-status` -> `pipe protocol:   3`,
   `approval:        required (checked by the helper)`. Step 13's shutdown -> `[403] approval_required`.
 * G1.9 Tidy up: `Remove-Item "C:\Program Files\Fairy\fairy-agent.exe.b16"`.
 
@@ -683,10 +688,52 @@ helper-trust set)`. `/metrics` (step 16) has `"trust_hash":"<the same 43 charact
 and `"set_at":"..."` in the `approval` block. `helper-trust clear` (step 23) prints, under `removed. Approval
 is off ...`, two lines that start with `That first-time set is open to whoever holds the control token`.
 
+### H. The machine id **[NEW 4]** (none of this has run on Windows)
+
+Since 2026-11-12 an approval is for one machine: the trust file holds a machine id, `/metrics` shows it, and
+the helper checks every approval with the id of **its** file. The pipe protocol is 3 and the `proto` of the
+`approval` block is 2. The zip of 2026-11-11 (pipe protocol 2) and this build do not work together in any
+mix: **install this build's program for both services** (the installer does both), never one of them alone.
+
+* H1 **A VM that still has the zip of 2026-11-11 and its trust file.** Before installing:
+  `Get-Content "C:\ProgramData\fairy-agent\helper\approval-trust.json"` -> no `"machine_id"`. Note the
+  file's access list: `icacls "C:\ProgramData\fairy-agent\helper\approval-trust.json"`. Install this build
+  (section A). Then:
+  * H1.1 **[KEY]** `Get-Content "C:\ProgramData\fairy-agent\helper\approval-trust.json"` -> the second line
+    is `"machine_id": "<22 characters>",` and every other line is as before.
+  * H1.2 **[KEY]** `icacls` on the file -> the same access list as before; `fsutil hardlink list` on it (step
+    N1) -> one line; `Get-ChildItem "C:\ProgramData\fairy-agent\helper" -Force` -> no file whose name starts
+    with `.approval-trust-`.
+  * H1.3 `Get-Content "C:\ProgramData\fairy-agent\helper\helper.log" -Tail 20` -> one line `approval: the
+    trust file had no machine id ... one was added, nothing else in it changed` with `machine_id=<the same 22
+    characters>`. `Restart-Service fairy-agent-helper`, look again: no second such line, the same id in the file.
+  * H1.4 `helper-status` -> `pipe protocol:   3`, `approval:        required (checked by the helper)` and
+    `machine id:      <the same 22 characters> (names this machine in every approval; ...`.
+* H2 **[KEY]** `/metrics` (step 16) -> the `approval` block has `"proto":2` and `"machine_id":"<the same 22
+  characters>"`, next to `trust_hash`, `set_by`, `set_at`.
+* H3 `helper-trust show` -> the `machine id:` line, and under it `A machine made from a copy of this disk has
+  the SAME id ... until the copy's trust is set anew: fairy-agent helper-trust set --new-machine-id`.
+* H4 `helper-trust set --fan-window 20 --yes` -> `the machine id:   kept as it was`; `/metrics` shows the same
+  id (wait 5 seconds). `helper-trust set --new-machine-id --yes` -> `the machine id:   NEW, it was <old>. The
+  panel has the old one on record ...`; `/metrics` shows another id. Put the fan window back (`--fan-window 30`).
+* H5 A first-time set from the network cannot change it: step 26's POST with `"machine_id":"aaaaaaaaaaaaaaaaaaaaaaaa"`
+  added to the body -> `[409] already_set`, and `/metrics` still shows the id of H4.
+* H6 (only if the old zip is still around; otherwise skip) **One service of each build.** The agent of this
+  build in front of the helper of 2026-11-11, with a trust file: `helper-status` -> `pipe protocol:   2 (the
+  test build of 2026-11-11; this agent needs 3)`; step 13's shutdown -> `[503] approval_unavailable` with
+  `the running fairy-agent-helper is older than this agent`; `POST /approval/challenge` -> `[409]
+  helper_too_old`. Nothing runs. Install this build for both and it ends.
+
+Not testable without the panel half: that an approval for another machine is refused (`[403] approval_refused`
+with `approval refused (nonce)`, and in `helper.log` an `approval: refused` line with `note="the entry with
+this machine's challenge names another machine id than this machine's"`). The Linux tests do exactly this
+with a made-up Pocket ID (`TestApprovalForOneMachineIsRefusedByAnother`,
+`TestWindowsHelperChecksWithItsOwnMachineID`, the second through the helper's code on an in-memory pipe).
+
 ### What to send back
 
 The output of steps 5, 8, 9, 13, 15, 20, 26, 26b, 27, 28, N1, N2 (and 31, 32b if done), of G1.2, G1.4, G1.5,
-G1.7, G1.8, G4, G5 and G6, and:
+G1.7, G1.8, G4, G5 and G6, of H1.1 to H1.4, H2 and H4, and:
 `Get-Content "C:\ProgramData\fairy-agent\helper\helper.log" -Tail 60`. If the helper did not start after
 step 3: Event Viewer > Windows Logs > Application, source `fairy-agent-helper`.
 
