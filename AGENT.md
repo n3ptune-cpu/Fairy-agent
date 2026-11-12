@@ -1551,7 +1551,7 @@ The file is `C:\ProgramData\fairy-agent\config.yaml` (Windows) or `/etc/fairy-ag
 | `ipmi`, `fan_control`, `power_control`, `wol`, `bmc_relay` | off | see [Optional features](#optional-features) |
 | `env_file` | none | `KEY=value` secrets (device and BMC passwords); `fairy-agent secret set NAME` writes it |
 | `self_update.enabled`, `self_update.repo` | off, `n3ptune-cpu/Fairy-agent` | see [Updates](#updates-the-panels-update-button) |
-| `control_rate_per_min` | 12 | requests a minute, for everybody together, in each of three budgets that cannot use each other up: **control requests** (fan, power other than cancel, Wake-on-LAN, BMC relay, update, helper stop / start, the first-time set of the approval trust), all together; **approval challenges** (`POST /approval/challenge`), so an approved action costs one control request and one challenge, not two control requests; and **`POST /power` with `cancel`**, so that neither a burst of challenges nor a row of refused requests can keep a cancel out. One more is answered `429` (`Retry-After: 60`); the text says which budget |
+| `control_rate_per_min` | 12 | requests a minute, for everybody together, in each of three budgets that cannot use each other up: **control requests** (fan, power other than cancel, Wake-on-LAN, BMC relay, update, helper stop / start, the first-time set of the approval trust), all together; **approval challenges** (`POST /approval/challenge`), so an approved action costs one control request and one challenge, not two control requests; and **`POST /power` with `cancel`**, so that neither a burst of challenges nor a row of refused requests can keep a cancel out (only other cancels with the control token can; requests with a wrong token or none count against nobody but themselves, see [Security in short](#security-in-short)). One more is answered `429` (`Retry-After: 60`); the text says which budget |
 | `log_file` | Windows: `C:\ProgramData\fairy-agent\logs\agent.log` (5 MB, one old copy); Linux: the journal | |
 
 Unknown settings are an error (so a typo does not silently do nothing). `fairy-agent check-config` checks the
@@ -1642,8 +1642,17 @@ are lists of devices: edit those in the file.
   (`--join CODE`, `-Join CODE`, `fairy-agent join --code CODE`) is still accepted, prints a deprecation line
   without the code, and will be removed in a later release.
 * Tokens are compared in a way that does not leak their length or content through
-  timing. Reading uses one token, changing anything needs the second, separate one. Repeated wrong tokens
-  block that address for a minute.
+  timing. Reading uses one token, changing anything needs the second, separate one (the read token on a
+  control route is a wrong token, and the other way round).
+* After 20 requests with a wrong token or none from one address within a minute, further such requests from
+  that address are answered `429 too many failed requests` until the minute is over. A request with the
+  right token is always served, from that address too, and never counted. So somebody who shares the panel's
+  address (another user or a container on the panel's host, a machine behind the same NAT) cannot keep the
+  panel out with wrong tokens: its polls, its challenges and the cancel of a shutdown get through. (Until
+  this version the 429 was for every request of the address, the panel's included.) What this does not do
+  is slow down guessing: a wrong token is told from a right one at any rate. What keeps a token from being
+  guessed is its length alone. The tokens the agent makes (`fairy-agent join`, the installers) are 32 random bytes (43 characters,
+  256 bits); one you set by hand must have at least 24 characters, and must be as random as those.
 * Read-only unless you switch features on; each control action is rate limited and logged with who asked.
 * With an approval trust set, fan changes, shutdown / reboot / sleep and updates run only with a fresh passkey
   confirmation at Pocket ID that the machine verifies itself, offline (Windows: the helper; Linux: the agent).

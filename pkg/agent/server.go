@@ -404,27 +404,55 @@ func (a *Agent) Handler() http.Handler {
 			writeJSON(w, 405, map[string]any{"error": "method not allowed"})
 			return
 		}
-		if !a.badAuth.allowPeek(ip) {
+		// The token is looked at first. A request with the right token for its route is always served and
+		// never counted. Only a request whose token is missing or wrong is counted, and refused with 429 once
+		// its address has 20 of those in the last minute (and then not counted again). Before, the 429 came
+		// first, for every request of the address: 20 requests without any token from the panel's address
+		// (another user or a container on the panel's host, a machine behind the same NAT) kept the panel's
+		// own tokens out, the cancel of a shutdown included (audit 5, r2-a2-01 = r2-a1-02).
+		//
+		// What that gives up: while an address was refused, nobody at it could try tokens; now a wrong token
+		// is told from a right one at any rate (429 against the route's answer). The tokens carry that alone:
+		// the ones this program makes are 32 random bytes (256 bits; main.go, newToken), and none shorter
+		// than MinTokenLen characters is taken. The comparison is as before: SHA-256 of what was sent against
+		// the stored hash, in constant time, whatever the address's count is.
+		locked := func() bool {
+			if a.badAuth.allowPeek(ip) {
+				return false
+			}
 			writeJSON(w, 429, map[string]any{"error": "too many failed requests"})
-			return
+			return true
+		}
+		// hasToken: the request shows one of this agent's tokens. For the two answers below that are the same
+		// for everybody (no token is needed for them): who shows a token gets them also from a refused address.
+		hasToken := func() bool {
+			ctl := a.hasCtl && tokenIs(r, a.ctlH)
+			return tokenIs(r, a.readH) || ctl
 		}
 		authed := false
 		switch {
 		case rt.control && rt.feature():
-			authed = a.hasCtl && tokenIs(r, a.ctlH)
+			authed = a.hasCtl && tokenIs(r, a.ctlH) // the read token is a wrong token here, and counted
 		case rt.control && rt.code == "":
 			// the helper endpoints: no helper service on this machine (always so on Linux)
-			writeJSON(w, 409, map[string]any{"error": "not_installed", "code": "not_installed"})
+			if hasToken() || !locked() {
+				writeJSON(w, 409, map[string]any{"error": "not_installed", "code": "not_installed"})
+			}
 			return
 		case rt.control:
 			// Feature off: nothing can happen, so say so (also to a panel whose control token this agent does
 			// not know, so the panel shows "disabled" instead of "wrong token").
-			writeJSON(w, 404, map[string]any{"error": strings.ReplaceAll(strings.TrimSuffix(rt.code, "_disabled"), "_", " ") + " is disabled on this agent", "code": rt.code})
+			if hasToken() || !locked() {
+				writeJSON(w, 404, map[string]any{"error": strings.ReplaceAll(strings.TrimSuffix(rt.code, "_disabled"), "_", " ") + " is disabled on this agent", "code": rt.code})
+			}
 			return
 		default:
 			authed = tokenIs(r, a.readH)
 		}
 		if !authed {
+			if locked() {
+				return
+			}
 			a.badAuth.allow(ip)
 			a.logOnce("auth:"+ip, "rejected request: wrong or missing token", "remote", ip, "path", r.URL.Path)
 			w.Header().Set("WWW-Authenticate", `Bearer realm="fairy-agent"`)
@@ -465,9 +493,11 @@ func (a *Agent) Handler() http.Handler {
 //     action needs one first. In the one budget of before, an approved action cost two requests, and twelve
 //     challenges (the default limit) left none for anything else, POST /power cancel included (audit 5,
 //     r1-a2-03);
-//   - budgetCancel: POST /power with the action cancel, the request that stops a shutdown. Nothing but other
-//     cancels can keep it out: not challenges, and not twelve refused requests of somebody who has the control
-//     token and no approval.
+//   - budgetCancel: POST /power with the action cancel, the request that stops a shutdown. No other budget
+//     can keep it out: not challenges, and not twelve refused requests of somebody who has the control token
+//     and no approval. Requests with a wrong token or none cannot either (they are counted per address, and
+//     only they are refused for it: Handler). What can: control_rate_per_min other cancels in the same minute,
+//     which need the control token. (The caps on open connections are another matter: listen.go, LimitConns.)
 const (
 	budgetControl   = "control"
 	budgetChallenge = "challenge"

@@ -18,8 +18,10 @@ import (
 	"time"
 
 	"github.com/n3ptune-cpu/Fairy-agent/pkg/agent/agenttest"
+	"github.com/n3ptune-cpu/Fairy-agent/pkg/agent/api"
 	"github.com/n3ptune-cpu/Fairy-agent/pkg/agent/collect"
 	"github.com/n3ptune-cpu/Fairy-agent/pkg/agent/ipmi/fakebmc"
+	"github.com/n3ptune-cpu/Fairy-agent/pkg/approval"
 )
 
 const (
@@ -263,13 +265,158 @@ func TestAuth(t *testing.T) {
 	}
 }
 
+// TestFailedAuthIsRateLimited: 20 requests with a wrong token or none from one address in a minute, and that
+// address's next requests with a wrong token or none are answered 429 (and not counted again).
 func TestFailedAuthIsRateLimited(t *testing.T) {
 	r := newRig(t, "")
 	for i := 0; i < 20; i++ {
-		r.do(t, "GET", "/metrics", "nope", nil)
+		if st, _ := r.do(t, "GET", "/metrics", "nope", nil); st != 401 {
+			t.Fatalf("wrong token %d: %d", i+1, st)
+		}
 	}
-	if st, _ := r.do(t, "GET", "/metrics", readTok, nil); st != 429 {
-		t.Fatal("after 20 bad tokens a minute the client is blocked", st)
+	if st, b := r.do(t, "GET", "/metrics", "nope", nil); st != 429 || b["error"] != "too many failed requests" {
+		t.Fatal("after 20 bad tokens a minute a wrong token is not even looked at", st, b)
+	}
+	if st, _ := r.do(t, "GET", "/metrics", "", nil); st != 429 {
+		t.Fatal("no token, after 20 bad ones", st)
+	}
+}
+
+// TestFailedAuthDoesNotLockTheRightTokenOut (audit 5, r2-a2-01 = r2-a1-02): the refusal after 20 failed requests
+// is for requests whose token is wrong or missing. A request with the right token for its route is served,
+// from the same address, at the same moment: the panel's poll, a challenge, and the cancel of a shutdown.
+// Before, 20 requests without any token from the panel's address kept the panel out for as long as they came.
+func TestFailedAuthDoesNotLockTheRightTokenOut(t *testing.T) {
+	r := newRig(t, "power_control: {enabled: true}\ncontrol_rate_per_min: 60\n")
+	r.a.d.Approval = approval.NewGate(approval.Options{Files: approval.Files{Path: filepath.Join(t.TempDir(), approval.TrustFileName)}, EnforcedBy: api.EnforcedByAgent})
+	cancel := map[string]any{"action": "cancel"}
+	for i := 0; i < 20; i++ {
+		if st, _ := r.do(t, "GET", "/metrics", "", nil); st != 401 {
+			t.Fatalf("request %d without a token: %d", i+1, st)
+		}
+	}
+	locked := func(what string) {
+		t.Helper()
+		for name, c := range map[string]struct{ method, path, tok string }{
+			"no token":                               {"GET", "/metrics", ""},
+			"a wrong token":                          {"GET", "/metrics", "nope-nope-nope-nope-nope-nope"},
+			"a wrong token on a control route":       {"POST", "/power", "nope-nope-nope-nope-nope-nope"},
+			"no token on a control route":            {"POST", "/power", ""},
+			"the read token on a control route":      {"POST", "/power", readTok},
+			"the read token for a challenge":         {"POST", api.PathApprovalChallenge, readTok},
+			"the control token on a read route":      {"GET", "/metrics", ctlTok},
+			"the control token for the processes":    {"GET", "/processes", ctlTok},
+			"no token, a feature that is off":        {"POST", "/wol", ""},
+			"a wrong token, a feature that is off":   {"POST", "/fan/mode", "nope-nope-nope-nope-nope-nope"},
+			"no token, the helper's route":           {"POST", api.PathHelperStop, ""},
+			"a wrong token, the first-time set":      {"POST", api.PathApprovalTrust, "nope-nope-nope-nope-nope-nope"},
+			"the read token with the wrong spelling": {"GET", "/metrics", readTok + "x"},
+		} {
+			if st, b := r.do(t, c.method, c.path, c.tok, cancel); st != 429 || b["error"] != "too many failed requests" {
+				t.Errorf("%s: %s: %d %v, want 429", what, name, st, b)
+			}
+		}
+	}
+	served := func(what string) {
+		t.Helper()
+		if st, m := r.do(t, "GET", "/metrics", readTok, nil); st != 200 || m["hostname"] == nil {
+			t.Errorf("%s: the right read token: %d", what, st)
+		}
+		if st, _ := r.do(t, "GET", "/processes", readTok, nil); st != 200 {
+			t.Errorf("%s: the right read token, /processes: %d", what, st)
+		}
+		if st, b := r.do(t, "POST", "/power", ctlTok, cancel); st != 200 {
+			t.Errorf("%s: the right control token, cancel: %d %v", what, st, b)
+		}
+		if st, b := r.do(t, "POST", api.PathApprovalChallenge, ctlTok, map[string]any{"verb": "power", "action": "shutdown", "delay_s": 60}); st != 200 || b["needed"] != false {
+			t.Errorf("%s: the right control token, a challenge: %d %v", what, st, b)
+		}
+		// the answers that need no token, for somebody who shows one
+		if st, b := r.do(t, "POST", "/wol", ctlTok, nil); st != 404 || b["code"] != "wol_disabled" {
+			t.Errorf("%s: a feature that is off, with the control token: %d %v", what, st, b)
+		}
+		if st, b := r.do(t, "POST", "/fan/mode", readTok, nil); st != 404 || b["code"] != "fan_control_disabled" {
+			t.Errorf("%s: a feature that is off, with the read token: %d %v", what, st, b)
+		}
+		if st, b := r.do(t, "POST", api.PathHelperStart, ctlTok, nil); st != 409 || b["code"] != "not_installed" {
+			t.Errorf("%s: the helper's route, with the control token: %d %v", what, st, b)
+		}
+	}
+	served("refused address")
+	locked("refused address")
+	served("refused address, after more refused requests") // and the right tokens were never counted
+	// a real shutdown is pending: the cancel that stops it gets through
+	if st, b := r.do(t, "POST", "/power", ctlTok, map[string]any{"action": "shutdown", "delay_s": 60}); st != 200 {
+		t.Fatalf("shutdown: %d %v", st, b)
+	}
+	locked("refused address, a shutdown pending")
+	if st, b := r.do(t, "POST", "/power", ctlTok, cancel); st != 200 || b["pending"] != nil || r.power.Cancels == 0 {
+		t.Fatalf("the cancel of a pending shutdown from a refused address: %d %v", st, b)
+	}
+}
+
+// TestFailedAuthCounting: what counts as a failed request is as it was. A wrong token and a missing one count;
+// on a control route the read token counts (it is the wrong token there), and on a read route the control
+// token; a right token never counts, however often; an answer that needs no token does not count; a refused
+// request (429) does not count again, so the refusal ends a minute after the twentieth failure.
+func TestFailedAuthCounting(t *testing.T) {
+	const wrong = "nope-nope-nope-nope-nope-nope"
+	fresh := func() *rig { return newRig(t, "power_control: {enabled: true}\ncontrol_rate_per_min: 60\n") }
+	fails := func(r *rig, n int) {
+		t.Helper()
+		for i := 0; i < n; i++ {
+			if st, _ := r.do(t, "GET", "/metrics", wrong, nil); st != 401 {
+				t.Fatalf("wrong token %d of %d: %d", i+1, n, st)
+			}
+		}
+	}
+	isLocked := func(r *rig) bool { st, _ := r.do(t, "GET", "/metrics", wrong, nil); return st == 429 }
+
+	for name, c := range map[string]struct {
+		method, path, tok string
+		status            int
+		counts            bool
+	}{
+		"no token":                          {"GET", "/metrics", "", 401, true},
+		"the read token on a control route": {"POST", "/power", readTok, 401, true},
+		"the control token on a read route": {"GET", "/metrics", ctlTok, 401, true},
+		"a wrong token on a control route":  {"POST", "/power", wrong, 401, true},
+		"the right read token":              {"GET", "/metrics", readTok, 200, false},
+		"the right control token":           {"POST", "/power", ctlTok, 200, false},
+		"a feature that is off, no token":   {"POST", "/wol", "", 404, false},
+		"a path that is none":               {"GET", "/nothing", "", 404, false},
+		"the wrong method":                  {"GET", "/power", "", 405, false},
+	} {
+		r := fresh()
+		fails(r, 19)
+		for i := 0; i < 3; i++ { // three of them: one that counts makes the twentieth, the others are refused
+			st, _ := r.do(t, c.method, c.path, c.tok, map[string]any{"action": "cancel"})
+			if want := map[bool]int{false: c.status, true: 429}[c.counts && i > 0]; st != want {
+				t.Errorf("%s, request %d after 19 failures: %d, want %d", name, i+1, st, want)
+			}
+		}
+		if isLocked(r) != c.counts {
+			t.Errorf("%s: counted as a failed request: %v, want %v", name, !c.counts, c.counts)
+		}
+	}
+
+	// a refused request is not counted again: the refusal ends one window after the twentieth failure
+	r := fresh()
+	const window = 600 * time.Millisecond
+	r.a.badAuth = newLimiter(20, window)
+	t0 := time.Now()
+	fails(r, 20)
+	last, refused := time.Now(), 0
+	for time.Since(t0) < window/2 { // well inside the window of the first failure: every one is refused
+		if st, _ := r.do(t, "GET", "/metrics", wrong, nil); st != 429 {
+			t.Fatalf("inside the window: %d", st)
+		}
+		refused++
+		time.Sleep(3 * time.Millisecond)
+	}
+	time.Sleep(time.Until(last.Add(window + 50*time.Millisecond)))
+	if st, _ := r.do(t, "GET", "/metrics", wrong, nil); st != 401 {
+		t.Errorf("one window after the twentieth failure a wrong token is answered %d, want 401 again (were the %d refused requests counted?)", st, refused)
 	}
 }
 
