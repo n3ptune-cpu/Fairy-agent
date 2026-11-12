@@ -68,6 +68,10 @@ type UpdateRequest struct {
 	RequestedBy any  `json:"requested_by"`
 	// Approval is the passkey approval the request carried (nil: none). The updater does not look inside.
 	Approval *api.Approval `json:"approval,omitempty"`
+	// Gate is the passkey check of an update this agent starts itself (nil: none, or the helper checks when it
+	// is asked to start the installer). Start asks it when the request has passed its own checks (a release
+	// key, no update in progress, the installer can be started), immediately before the run begins.
+	Gate Gated `json:"-"`
 }
 
 // UpdateCooldown is the least time between two installer runs that were asked for through the agent (the
@@ -267,6 +271,11 @@ func (u *Updater) Start(req UpdateRequest) (int, map[string]any) {
 	}
 	if !u.checkReady() {
 		return 503, map[string]any{"error": u.st.Message, "code": "self_update_unavailable"}
+	}
+	if req.Gate != nil { // only now is the approval used up: a request refused above has not cost it
+		if _, ref := req.Gate(); ref != nil {
+			return ref.Status, refusalBody(ref)
+		}
 	}
 	u.busy = true
 	u.done = make(chan struct{})

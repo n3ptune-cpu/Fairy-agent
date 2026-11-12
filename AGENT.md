@@ -1094,7 +1094,8 @@ only root / Administrators (Linux: or the agent's own user) can remove it.
   `UNAPPROVED shutdown accepted shortly after boot`. The request may ask for a delay of at most 600 s (it is
   for "switch off again now", not for a shutdown that happens a day later). "One" is one per boot: the use is
   recorded next to the trust file (`approval-boot-shutdown.json`), so restarting the helper / agent inside the
-  window gives no second one. Linux tells boots apart by the kernel's boot id. Windows has none; there the
+  window gives no second one. It is recorded when the shutdown is really scheduled: a request that the machine
+  refuses (a delay under `min_delay_s`, another action already pending) does not use it up. Linux tells boots apart by the kernel's boot id. Windows has none; there the
   record counts for the current boot unless it was made clearly before Windows started, by the clock (after a
   clock that jumped forward by more than the uptime, or sleep inside the window, one more could be accepted).
   If the record cannot be read or written, no shutdown is accepted without approval. Windows: "up" is the time
@@ -1109,11 +1110,27 @@ only root / Administrators (Linux: or the agent's own user) can remove it.
    use, 180 s (an update: 900 s), at most 16 open at a time.
 2. The panel sends the browser to Pocket ID once, as the client "Fairy PC actions", with a nonce made from the
    challenge and the request. Pocket ID asks for the passkey and signs an ID token with that nonce.
-3. The panel sends the request with the token attached. The machine checks, before anything runs: the token's
-   signature with the pinned key (RS256), issuer, that it was issued for this client only, the user is one of
-   the allowed ones, it is not expired, the passkey check (`auth_time`) is not older than the challenge, it was
-   a passkey sign-in, the nonce fits, and its own remembered request equals the request it is about to run.
-   Then it uses the challenge up and runs the request. A second use, another action, another machine: refused.
+3. The panel sends the request with the token attached. The machine first runs the request's own checks: is
+   the delay allowed, is another action pending, can this machine sleep, are the fans in a mode that takes a
+   duty, can an update be started. A request that fails one of them is refused for that reason and **costs
+   nothing**: the approval is not looked at and stays good for the rest of its 180 s. Then, immediately before
+   it acts, the machine checks: the token's signature with the pinned key (RS256), issuer, that it was issued
+   for this client only, the user is one of the allowed ones, it is not expired, the passkey check
+   (`auth_time`) is not older than the challenge, it was a passkey sign-in, the nonce fits, and its own
+   remembered request equals the request it is about to run. Then it uses the challenge up and runs the
+   request. From that moment the approval is spent, also when the action then fails (the BMC does not answer,
+   the system refuses the shutdown). A second use, another action, another machine: refused.
+
+   Whoever checks answers a request that carries no approval at all (and needs one) with
+   `403 approval_required` before any of those checks, and a broken trust file with
+   `503 approval_unavailable`, as before. So nothing changed for a request without approval.
+
+   Who does this on Windows: the agent runs its own checks (delay against `min_delay_s`, an action already
+   pending, the fan duty's range) and passes the request with its approval on. The **helper** answers a
+   request without approval `403 approval_required`, runs its checks (its own `min_delay_s`, sleep, the fan
+   mode, the temperature), and only then verifies the token and uses the challenge up, immediately before the
+   system call or the BMC command. The agent never uses anything up for what the helper carries out. For an
+   update the helper does it when it is asked to start the installer, after the download.
 
 One token can cover several machines and requests (one entry each); every machine finds its own entry. The
 exact formats are in `pkg/agent/api/approval.go`.

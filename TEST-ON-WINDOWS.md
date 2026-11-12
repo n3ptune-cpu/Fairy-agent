@@ -640,7 +640,20 @@ helper (a Supermicro board; not the test VM) and a real approval, so the panel h
 `full`, approve "zone 0 to 100 %" from the panel -> the panel shows the BMC's refusal (`409`, `fan mode is ...;
 set mode 'full' first`). At once, without approval:
 `POST /fan/mode {"mode":"full"}` -> **`[403] approval_required`** (before this fix: `[200]` for 30 s).
-`helper.log` has no line `approval: fan window open` for the refused duty.
+`helper.log` has no line `approval: fan window open` for the refused duty, and no `approval: accepted` for it
+either: a request the helper refuses for a reason of its own does not use the approval up. (Then approve
+"mode full" and send the first approval for "zone 0 to 100 %" again within its 3 minutes: `[200]`.)
+
+**G3. A refused request costs neither the approval nor the shutdown after boot.** The helper now looks at an
+approval (and records the shutdown after boot) only when a request has passed the helper's own checks. Through
+the agent the VM shows little of this, because the agent's own checks came before the helper already. What
+must still hold (nothing may have changed for requests without approval):
+
+* G3.1 Steps 13 to 19 of section C answer exactly as before (`[403] approval_required`).
+* G3.2 With section F's `--boot-shutdown 900`, inside the 15 minutes after a restart:
+  `{"action":"shutdown","delay_s":5}` -> `[400]` (`delay_s must be between 10 and 86400`, the agent's own
+  check); then step 13's shutdown with `delay_s` 600 -> `[200]`. Cancel it (step 14).
+  `C:\ProgramData\fairy-agent\helper\approval-boot-shutdown.json` exists only after the `[200]`.
 
 ### What to send back
 

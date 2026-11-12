@@ -165,36 +165,69 @@ func uncheckedText(seen bool, own string) string {
 	return why + " (restart the helper: POST " + api.PathHelperStop + ", then " + api.PathHelperStart + ", or Restart-Service fairy-agent-helper on the machine)"
 }
 
-// approved is the passkey check of a request that changes something; false: it answered already and nothing
-// may run. What the helper carries out, the helper checks when the request reaches it, so that passes here,
-// unless the helper is not known to check at all while this machine may have a trust file (helperUnchecked):
-// then the request is refused here and never reaches the helper.
-// What this process carries out itself is checked here, by the agent's own gate, and the approval's challenge
-// is used up before the request is carried out.
+// Gated is the passkey check of one request, handed to the part that carries the request out (Fan, Power,
+// Updater). That part calls it once, at the moment the request has passed every check of its own and the next
+// step is the system call or the BMC command. A refusal: nothing is carried out, and the answer is the
+// refusal's. Otherwise the request is carried out, and a fan change that was applied tells the pass so
+// (approval.Pass.Applied). The approval's challenge, or the one shutdown after boot, is used up inside this
+// call and not before, so a request that fails a check of its own costs neither.
+type Gated func() (*approval.Pass, *approval.Refusal)
+
+// refusalBody is the JSON body of a refusal.
+func refusalBody(ref *approval.Refusal) map[string]any {
+	body := map[string]any{"error": ref.Msg}
+	if ref.Code != "bad_request" {
+		body["code"] = ref.Code
+	}
+	return body
+}
+
+// approved is the passkey check of a request that changes something, in two steps.
 //
-// The pass is for the fan routes: they tell it when the change was applied (approval.Pass.Applied), which is
-// what opens the fan window. It is nil where the helper checks (the helper opens its own window).
-func (a *Agent) approved(w http.ResponseWriter, r *http.Request, req api.ApprovalRequest, ap *api.Approval) (*approval.Pass, bool) {
+// The first step is here, when the request arrives; false: it answered already and nothing may run. What the
+// helper carries out, the helper checks when the request reaches it, so that passes here, unless the helper is
+// not known to check at all while this machine may have a trust file (helperUnchecked): then the request is
+// refused here and never reaches the helper. What this process carries out itself is asked of the agent's own
+// gate, which at this point uses nothing up (approval.Gate.Precheck): it refuses a request that needs an
+// approval and carries none, and everything while the trust file cannot be used.
+//
+// The second step is the Gated that is returned (nil where the helper checks): the part that carries the
+// request out calls it when the request has passed its own checks (approval.Gate.Admit). There the approval is
+// verified and its challenge used up, or the one shutdown after boot recorded.
+func (a *Agent) approved(w http.ResponseWriter, r *http.Request, req api.ApprovalRequest, ap *api.Approval) (Gated, bool) {
+	ctx := r.Context()
 	if a.helperRuns(req.Verb) {
-		if why := a.helperUnchecked(r.Context()); why != "" {
+		if why := a.helperUnchecked(ctx); why != "" {
 			a.logOnce("unchecked-helper", "approval: request for the helper refused, the helper does not check approvals", "verb", req.Verb, "reason", why)
 			writeRefusal(w, &approval.Refusal{Status: 503, Code: api.CodeApprovalUnavailable, Msg: "not run: " + why})
 			return nil, false
 		}
 		return nil, true
 	}
+	if _, ref := a.ownCheck(ctx, req, ap, false); ref != nil {
+		writeRefusal(w, ref)
+		return nil, false
+	}
+	return func() (*approval.Pass, *approval.Refusal) { return a.ownCheck(ctx, req, ap, true) }, true
+}
+
+// ownCheck asks the agent's own gate about a request this process carries out: when it arrives (final false:
+// Precheck) and when it is about to be carried out (final true: Admit).
+func (a *Agent) ownCheck(ctx context.Context, req api.ApprovalRequest, ap *api.Approval, final bool) (*approval.Pass, *approval.Refusal) {
 	var pass *approval.Pass
 	var ref *approval.Refusal
-	if a.ownGateMissing(r.Context()) {
+	switch {
+	case a.ownGateMissing(ctx):
 		ref = noOwnCheck()
-	} else {
+	case final:
 		pass, ref = a.d.Approval.Admit(req, ap)
+	default:
+		ref = a.d.Approval.Precheck(req, ap != nil)
 	}
-	if ref == nil || (ref.Code == api.CodeApprovalUnavailable && a.helperSaysOff(r.Context())) {
-		return pass, true
+	if ref != nil && ref.Code == api.CodeApprovalUnavailable && a.helperSaysOff(ctx) {
+		return nil, nil
 	}
-	writeRefusal(w, ref)
-	return nil, false
+	return pass, ref
 }
 
 // helperSaysOff reports whether the helper, asked at this moment, says that this machine has no trust file.
@@ -213,11 +246,7 @@ func (a *Agent) helperSaysOff(ctx context.Context) bool {
 }
 
 func writeRefusal(w http.ResponseWriter, ref *approval.Refusal) {
-	body := map[string]any{"error": ref.Msg}
-	if ref.Code != "bad_request" {
-		body["code"] = ref.Code
-	}
-	writeJSON(w, ref.Status, body)
+	writeJSON(w, ref.Status, refusalBody(ref))
 }
 
 // approvalStatus is the "approval" block of GET /metrics. Where the helper checks, it is the helper's, with

@@ -998,7 +998,7 @@ func (a *Agent) fanMode(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 400, map[string]any{"error": err.Error()})
 		return
 	}
-	pass, ok := a.approved(w, r, api.ApprovalRequest{Verb: api.ApproveFanMode, Mode: &b.Mode}, b.Approval)
+	gate, ok := a.approved(w, r, api.ApprovalRequest{Verb: api.ApproveFanMode, Mode: &b.Mode}, b.Approval)
 	if !ok {
 		return
 	}
@@ -1008,11 +1008,37 @@ func (a *Agent) fanMode(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, st, body)
 		return
 	}
-	st, body := a.d.Fan.SetMode(r.Context(), b.Mode, who)
-	if st == 200 { // only a change that was applied opens the fan window
+	st, body := gatedFanChange(a.d.Fan, gate, func(f FanControl) (int, map[string]any) { return f.SetMode(r.Context(), b.Mode, who) },
+		func(f gatedFan) (int, map[string]any) { return f.SetModeGated(r.Context(), b.Mode, who, gate) })
+	writeJSON(w, st, body)
+}
+
+// gatedFan is a FanControl that asks a request's passkey check itself, at the moment the request has passed
+// its own checks (the in-process Fan).
+type gatedFan interface {
+	SetModeGated(ctx context.Context, mode, who string, gate Gated) (int, map[string]any)
+	SetDutyGated(ctx context.Context, zone, percent int, who string, gate Gated) (int, map[string]any)
+}
+
+// gatedFanChange carries out a fan change that has a passkey check of this agent's own (gate; nil: none, or
+// the helper checks). A fan control that asks the check itself does so after its own checks. For one that
+// cannot, the check is asked here, right before the change, and the pass is told when the change was applied.
+func gatedFanChange(fan FanControl, gate Gated, plain func(FanControl) (int, map[string]any), gated func(gatedFan) (int, map[string]any)) (int, map[string]any) {
+	if gate == nil {
+		return plain(fan)
+	}
+	if g, ok := fan.(gatedFan); ok {
+		return gated(g)
+	}
+	pass, ref := gate()
+	if ref != nil {
+		return ref.Status, refusalBody(ref)
+	}
+	st, body := plain(fan)
+	if st == 200 {
 		pass.Applied()
 	}
-	writeJSON(w, st, body)
+	return st, body
 }
 
 func (a *Agent) fanDuty(w http.ResponseWriter, r *http.Request) {
@@ -1031,7 +1057,7 @@ func (a *Agent) fanDuty(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 400, map[string]any{"error": "zone and percent must be integers"})
 		return
 	}
-	pass, ok := a.approved(w, r, api.ApprovalRequest{Verb: api.ApproveFanSet, Zone: &zone, Percent: &pct}, b.Approval)
+	gate, ok := a.approved(w, r, api.ApprovalRequest{Verb: api.ApproveFanSet, Zone: &zone, Percent: &pct}, b.Approval)
 	if !ok {
 		return
 	}
@@ -1041,10 +1067,8 @@ func (a *Agent) fanDuty(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, st, body)
 		return
 	}
-	st, body := a.d.Fan.SetDuty(r.Context(), zone, pct, who)
-	if st == 200 { // only a change that was applied opens the fan window
-		pass.Applied()
-	}
+	st, body := gatedFanChange(a.d.Fan, gate, func(f FanControl) (int, map[string]any) { return f.SetDuty(r.Context(), zone, pct, who) },
+		func(f gatedFan) (int, map[string]any) { return f.SetDutyGated(r.Context(), zone, pct, who, gate) })
 	writeJSON(w, st, body)
 }
 
@@ -1073,9 +1097,12 @@ func (a *Agent) power(w http.ResponseWriter, r *http.Request) {
 		if req.DelayS != nil {
 			delay = *req.DelayS
 		}
-		if _, ok := a.approved(w, r, api.ApprovalRequest{Verb: api.ApprovePower, Action: &b.Action, DelayS: &delay}, b.Approval); !ok {
+		// the first step of the passkey check; the second is req.Gate, which Power.Handle asks after its own checks
+		gate, ok := a.approved(w, r, api.ApprovalRequest{Verb: api.ApprovePower, Action: &b.Action, DelayS: &delay}, b.Approval)
+		if !ok {
 			return
 		}
+		req.Gate = gate
 	}
 	st, body := a.d.Power.Handle(req)
 	writeJSON(w, st, body)
@@ -1111,11 +1138,12 @@ func (a *Agent) update(w http.ResponseWriter, r *http.Request) {
 		if !a.updateApproval(w, r, &b) {
 			return
 		}
-	} else { // this agent starts the installer itself and checks itself, now; nothing further down looks at the approval
-		if _, ok := a.approved(w, r, api.ApprovalRequest{Verb: api.ApproveApplyUpdate}, b.Approval); !ok {
+	} else { // this agent starts the installer itself and checks itself: Updater.Start asks b.Gate after its own checks
+		gate, ok := a.approved(w, r, api.ApprovalRequest{Verb: api.ApproveApplyUpdate}, b.Approval)
+		if !ok {
 			return
 		}
-		b.Approval = nil
+		b.Gate, b.Approval = gate, nil // nothing further down looks at the approval itself
 	}
 	st, body := a.d.Updater.Start(b)
 	writeJSON(w, st, body)

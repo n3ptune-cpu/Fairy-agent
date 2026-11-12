@@ -39,6 +39,20 @@ type lrig struct {
 
 func newLinuxRig(t *testing.T, withGate bool) *lrig {
 	t.Helper()
+	return newLinuxRigWith(t, lrigOpts{gate: withGate})
+}
+
+// lrigOpts say how the Linux agent of a test is set up.
+type lrigOpts struct {
+	gate bool // the agent has its approval gate (as Run always builds it)
+	// uptime: how long the system has been up, for the gate's shutdown-after-boot setting (nil: not known)
+	uptime func() time.Duration
+	noKey  bool // a build without a release key: self-update answers "unavailable"
+}
+
+func newLinuxRigWith(t *testing.T, o lrigOpts) *lrig {
+	t.Helper()
+	withGate := o.gate
 	cfg, err := agent.Parse([]byte("ipmi: {enabled: true}\nfan_control: {enabled: true}\npower_control: {enabled: true}\nself_update: {enabled: true}\n"+
 		"wol: {enabled: true}\ncontrol_rate_per_min: 60\n"), filepath.Join(t.TempDir(), "config.yaml"))
 	if err != nil {
@@ -51,15 +65,24 @@ func newLinuxRig(t *testing.T, withGate bool) *lrig {
 	b := agent.NewBMC(r.bmc, 20*time.Millisecond)
 	go b.Run(ctx)
 	dir := t.TempDir()
-	r.upd = agent.NewUpdater(agent.UpdaterOptions{Version: "41-aaaaaaa", Key: r.gh.Pub, Client: r.gh.Client(),
+	uo := agent.UpdaterOptions{Version: "41-aaaaaaa", Key: r.gh.Pub, Client: r.gh.Client(),
 		StageDir: filepath.Join(dir, "state", "update"), ResultPath: filepath.Join(dir, "result", "result.json"),
 		Asset: "fairy-agent-linux-amd64", ResultWait: 50 * time.Millisecond,
-		Apply: func(context.Context) error { r.starts.Add(1); return nil }})
+		Apply: func(context.Context) error { r.starts.Add(1); return nil }}
+	if o.noKey {
+		uo.Key = nil
+	}
+	r.upd = agent.NewUpdater(uo)
 	d := agent.Deps{Collector: agenttest.NewCollector(), Version: "test", BMC: b, Fan: agent.NewFan(r.bmc, b, cfg.FanControl, nil),
 		Power: agent.NewPower(r.power, cfg.PowerControl.MinDelayS), Updater: r.upd, WOL: agent.NewWOL(nil)}
 	if withGate {
-		d.Approval = approval.NewGate(approval.Options{Files: approval.Files{Path: r.trust}, EnforcedBy: api.EnforcedByAgent,
-			Log: slog.New(slog.NewTextHandler(r.log, nil))})
+		gopts := approval.Options{Files: approval.Files{Path: r.trust}, EnforcedBy: api.EnforcedByAgent,
+			Log: slog.New(slog.NewTextHandler(r.log, nil))}
+		if o.uptime != nil {
+			gopts.Uptime = func() (time.Duration, error) { return o.uptime(), nil }
+			gopts.BootID = func() (string, error) { return "11111111-1111-4111-8111-111111111111", nil }
+		}
+		d.Approval = approval.NewGate(gopts)
 	}
 	srv := httptest.NewServer(agent.New(cfg, agent.Tokens{Read: readTok, Control: ctlTok}, d).Handler())
 	t.Cleanup(srv.Close)

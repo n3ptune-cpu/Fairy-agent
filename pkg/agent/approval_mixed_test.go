@@ -232,8 +232,10 @@ func TestWindowsFansInTheAgentAreCheckedByTheAgent(t *testing.T) {
 	// an honest panel can change the fans: the challenge comes from the agent, which is the one that checks
 	ok := r.approve(t, map[string]any{"verb": "fan_mode", "mode": "full"})
 	// ... and that approval is worth nothing for another request, at the agent or at the helper
-	st, b = r.post(t, "/fan/duty", map[string]any{"zone": 0, "percent": 35, "approval": ok})
-	wantRefusal(t, "fan mode approval for a duty", st, b, 403, api.CodeApprovalRefused)
+	// (another mode, not a duty: a duty is refused by the fan controller itself while the mode is not "full",
+	// before any approval is looked at)
+	st, b = r.post(t, "/fan/mode", map[string]any{"mode": "heavyio", "approval": ok})
+	wantRefusal(t, "fan mode approval for another mode", st, b, 403, api.CodeApprovalRefused)
 	st, b = r.post(t, "/power", map[string]any{"action": "shutdown", "delay_s": 60, "approval": ok})
 	wantRefusal(t, "the agent's fan approval for a shutdown at the helper", st, b, 403, api.CodeApprovalRefused)
 	if st, b := r.post(t, "/fan/mode", map[string]any{"mode": "full", "approval": ok}); st != 200 {

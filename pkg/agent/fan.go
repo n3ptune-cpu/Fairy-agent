@@ -13,6 +13,7 @@ import (
 
 	"github.com/n3ptune-cpu/Fairy-agent/pkg/agent/collect"
 	"github.com/n3ptune-cpu/Fairy-agent/pkg/agent/ipmi"
+	"github.com/n3ptune-cpu/Fairy-agent/pkg/approval"
 )
 
 // FanEvent is one entry of the fan log (/fan/status `events`).
@@ -191,6 +192,25 @@ func (f *Fan) reading(ctx context.Context) fanReading {
 // such mode) is remembered and reported in /fan/status `unsupported_modes`; the answer is 422 with code
 // "fan_mode_unsupported". The mode is still tried again on the next request (a BMC firmware update may add it).
 func (f *Fan) SetMode(ctx context.Context, mode, who string) (int, map[string]any) {
+	return f.SetModeGated(ctx, mode, who, nil)
+}
+
+// admit asks the request's passkey check (nil: there is none) at the one moment it is asked: every check of
+// the request itself has passed and the BMC is told next. A non-nil body is the refusal's answer.
+func admit(gate Gated) (*approval.Pass, int, map[string]any) {
+	if gate == nil {
+		return nil, 0, nil
+	}
+	pass, ref := gate()
+	if ref != nil {
+		return nil, ref.Status, refusalBody(ref)
+	}
+	return pass, 0, nil
+}
+
+// SetModeGated is SetMode for a request with a passkey check: gate is asked when the request has passed its
+// own checks and is about to be sent to the BMC, and the pass is told when the change was applied.
+func (f *Fan) SetModeGated(ctx context.Context, mode, who string, gate Gated) (int, map[string]any) {
 	if _, ok := ipmi.ModeByte(mode); !ok {
 		return 400, map[string]any{"error": "mode must be standard, full, optimal or heavyio"}
 	}
@@ -200,6 +220,10 @@ func (f *Fan) SetMode(ctx context.Context, mode, who string) (int, map[string]an
 	defer f.mu.Unlock()
 	if f.closed {
 		return 503, stoppingBody()
+	}
+	pass, st, refused := admit(gate)
+	if refused != nil {
+		return st, refused
 	}
 	if err := ipmi.SetFanMode(ctx, f.t, mode); err != nil {
 		if !modeUnsupported(err) {
@@ -221,6 +245,7 @@ func (f *Fan) SetMode(ctx context.Context, mode, who string) (int, map[string]an
 	f.noTemp = 0
 	f.changed = true
 	f.event("mode="+mode, who)
+	pass.Applied() // only a change that was applied opens the fan window
 	return 200, map[string]any{"mode": mode}
 }
 
@@ -282,6 +307,12 @@ func unusableTemp(bmc []ipmi.Reading, local []collect.Temp) (string, float64, bo
 // SetDuty is POST /fan/duty: only in "full" mode (the BMC ignores duties otherwise), never below MinDuty, and
 // below 100 % only while dutyRefusal has no objection (409 otherwise).
 func (f *Fan) SetDuty(ctx context.Context, zone, percent int, who string) (int, map[string]any) {
+	return f.SetDutyGated(ctx, zone, percent, who, nil)
+}
+
+// SetDutyGated is SetDuty for a request with a passkey check (see SetModeGated). The checks that can refuse
+// the request without changing anything (zone, percent, the fan mode, the temperature) all come first.
+func (f *Fan) SetDutyGated(ctx context.Context, zone, percent int, who string, gate Gated) (int, map[string]any) {
 	if zone != 0 && zone != 1 {
 		return 400, map[string]any{"error": "zone must be 0 or 1"}
 	}
@@ -308,11 +339,16 @@ func (f *Fan) SetDuty(ctx context.Context, zone, percent int, who string) (int, 
 			return 409, map[string]any{"error": msg, "code": code}
 		}
 	}
+	pass, st, refused := admit(gate)
+	if refused != nil {
+		return st, refused
+	}
 	if err := ipmi.SetDuty(ctx, f.t, byte(zone), percent); err != nil {
 		return 502, map[string]any{"error": "BMC refused the duty: " + safeErr(err)}
 	}
 	f.changed = true
 	f.event(fmt.Sprintf("duty zone %d=%d%%", zone, percent), who)
+	pass.Applied() // only a change that was applied opens the fan window
 	return 200, map[string]any{"zone": zone, "percent": percent}
 }
 

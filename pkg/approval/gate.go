@@ -369,11 +369,76 @@ func (g *Gate) find(id []byte) int {
 	return at
 }
 
-// Admit decides whether req may run now. ap is the approval the request carried (nil: none). The refusal is
-// nil when the request may run: trust is off; or the approval was accepted, in which case its challenge is used
-// up before Admit returns, whatever the request then does; or the request needs none right now (fan window,
-// the one shutdown after boot). An approval that is sent is always checked in full. A nil Gate lets everything
-// run.
+// enforced answers what every question about a request starts with. on is false when nothing is checked (no
+// trust file): the request may run. A refusal: the trust file cannot be used, or the request has no canonical
+// form. Otherwise trust is set and canon is the request's text. Caller holds g.mu.
+func (g *Gate) enforced(req api.ApprovalRequest) (canon string, on bool, ref *Refusal) {
+	g.reload(false)
+	switch g.state {
+	case api.ApprovalOff:
+		return "", false, nil
+	case api.ApprovalRequired:
+	default:
+		g.o.Log.Warn("approval: refused", "result", "refused", "reason", "trust file unusable", "verb", req.Verb)
+		return "", true, unavailable(g.loadErr)
+	}
+	canon, err := req.Canonical()
+	if err != nil { // nothing without a canonical form is ever run while trust is set
+		return "", true, &Refusal{Status: 400, Code: "bad_request", Msg: "not a request that can be approved: " + err.Error()}
+	}
+	return canon, true, nil
+}
+
+func notCarriedOut() *Refusal {
+	return &Refusal{Status: 400, Code: "bad_request", Msg: "the trust is set with POST " + api.PathApprovalTrust}
+}
+
+func noneSent() *Refusal {
+	return &Refusal{Status: 403, Code: api.CodeApprovalRequired,
+		Msg: "this needs a passkey approval (Pocket ID) and the request carried none"}
+}
+
+// Precheck is the first of the two questions about a request, asked when the request arrives, before any of
+// the request's own checks. It uses nothing up and records nothing. It refuses what can be refused without
+// looking at an approval: the trust file cannot be used (503), or the request needs an approval and carries
+// none (sent is false), and neither the fan window nor the one shutdown after boot would let it through now
+// (403 approval_required). A request that carries an approval passes here whatever is in it: the approval is
+// looked at once, by Admit, when the request has passed its own checks and is about to be carried out. So a
+// request that the machine refuses for a reason of its own (a delay under the minimum, an action already
+// pending, a duty the fans do not take) costs neither the approval nor the shutdown after boot.
+func (g *Gate) Precheck(req api.ApprovalRequest, sent bool) *Refusal {
+	if g == nil {
+		return nil
+	}
+	if req.Verb == api.ApproveTrustSet {
+		return notCarriedOut()
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	canon, on, ref := g.enforced(req)
+	if !on || ref != nil || sent {
+		return ref
+	}
+	now := g.o.Now()
+	if isFan(req) && g.fanLeft(now) > 0 {
+		return nil
+	}
+	if isShutdown(req) {
+		if _, ok := g.bootWindow(req, now); ok {
+			return nil
+		}
+	}
+	g.o.Log.Warn("approval: required, none sent", "result", "refused", "request", canon)
+	return noneSent()
+}
+
+// Admit is the second question, asked at the moment req is about to be carried out: every check of the request
+// itself has passed, and what comes next is the system call or the BMC command. ap is the approval the request
+// carried (nil: none). The refusal is nil when the request may run: trust is off; or the approval was
+// accepted, in which case its challenge is used up before Admit returns, whatever becomes of the request from
+// here on (an action that then fails does not make the approval usable again); or the request needs none
+// right now (the fan window, or the one shutdown after boot, which is recorded here). An approval that is
+// sent is always checked in full. A nil Gate lets everything run.
 //
 // The pass is not nil when an approval of a fan change was accepted: the caller tells it when the change was
 // applied (Pass.Applied), and only that opens the fan window.
@@ -382,22 +447,13 @@ func (g *Gate) Admit(req api.ApprovalRequest, ap *api.Approval) (*Pass, *Refusal
 		return nil, nil
 	}
 	if req.Verb == api.ApproveTrustSet { // not a request that is carried out: Init checks its own approval
-		return nil, &Refusal{Status: 400, Code: "bad_request", Msg: "the trust is set with POST " + api.PathApprovalTrust}
+		return nil, notCarriedOut()
 	}
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	g.reload(false)
-	switch g.state {
-	case api.ApprovalOff:
-		return nil, nil
-	case api.ApprovalRequired:
-	default:
-		g.o.Log.Warn("approval: refused", "result", "refused", "reason", "trust file unusable", "verb", req.Verb)
-		return nil, unavailable(g.loadErr)
-	}
-	canon, err := req.Canonical()
-	if err != nil { // nothing without a canonical form is ever run while trust is set
-		return nil, &Refusal{Status: 400, Code: "bad_request", Msg: "not a request that can be approved: " + err.Error()}
+	canon, on, ref := g.enforced(req)
+	if !on || ref != nil {
+		return nil, ref
 	}
 	now := g.o.Now()
 	if ap == nil {
@@ -420,8 +476,7 @@ func (g *Gate) Admit(req api.ApprovalRequest, ap *api.Approval) (*Pass, *Refusal
 			}
 		}
 		g.o.Log.Warn("approval: required, none sent", "result", "refused", "request", canon)
-		return nil, &Refusal{Status: 403, Code: api.CodeApprovalRequired,
-			Msg: "this needs a passkey approval (Pocket ID) and the request carried none"}
+		return nil, noneSent()
 	}
 	c, cl, reason := g.verify(g.trust, canon, ap, now)
 	if reason != "" {

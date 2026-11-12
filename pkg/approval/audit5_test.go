@@ -3,6 +3,8 @@ package approval_test
 // Audit 5, round 1: the gate's part of the fixes.
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -114,4 +116,75 @@ func TestFanWindowNotOpenedUnderAChangedTrust(t *testing.T) {
 	pass, ref = r2.g.Admit(req, r2.approve(req))
 	admitted(t, "approved, window off", pass, ref).Applied()
 	needsApproval(t, "window off", r2.g, fanSet(0, 60))
+}
+
+// TestPrecheckUsesNothingUp (r1-a1-02, r1-a2-01): the question that is asked when a request arrives. It refuses
+// what needs no look at an approval, and it leaves everything as it was: the challenge, the fan window, the
+// one shutdown after boot. Only Admit, asked when the request is about to be carried out, uses them.
+func TestPrecheckUsesNothingUp(t *testing.T) {
+	var none *approval.Gate
+	accepted(t, "no gate", none.Precheck(power("shutdown", 60), false))
+	off := newRig(t, false)
+	accepted(t, "off", off.g.Precheck(power("shutdown", 60), false))
+	accepted(t, "off, approval sent", off.g.Precheck(fanSet(0, 50), true))
+	hash := api.TrustHash(off.iss.Init())
+	refused(t, "trust_set is not a request that runs", off.g.Precheck(api.ApprovalRequest{Verb: api.ApproveTrustSet, TrustHash: &hash}, true), "bad_request", "")
+
+	r := newRig(t, true)
+	req := power("shutdown", 60)
+	refused(t, "none sent", r.g.Precheck(req, false), api.CodeApprovalRequired, "")
+	refused(t, "no canonical form", r.g.Precheck(power("explode", 60), true), "bad_request", "")
+	ap := r.approve(req)
+	for i := 0; i < 5; i++ {
+		accepted(t, "sent", r.g.Precheck(req, true))
+	}
+	// whatever is in the approval: Precheck does not look, Admit does
+	accepted(t, "sent, for another request", r.g.Precheck(power("reboot", 60), true))
+	_, ref := r.g.Admit(power("reboot", 60), ap)
+	refused(t, "the approval of a shutdown for a reboot", ref, api.CodeApprovalRefused, approval.ReasonNoChallenge)
+	_, ref = r.g.Admit(req, ap)
+	accepted(t, "the challenge is still open after six prechecks and a refused Admit for another request", ref)
+	_, ref = r.g.Admit(req, ap)
+	refused(t, "single use", ref, api.CodeApprovalRefused, approval.ReasonNoChallenge)
+
+	// the fan window lets a fan request without approval through, here as in Admit
+	fan := fanMode("full")
+	pass, ref := r.g.Admit(fan, r.approve(fan))
+	admitted(t, "approved fan change", pass, ref)
+	refused(t, "fan, window not open yet", r.g.Precheck(fanSet(0, 50), false), api.CodeApprovalRequired, "")
+	pass.Applied()
+	accepted(t, "fan, inside the window", r.g.Precheck(fanSet(0, 50), false))
+	refused(t, "shutdown, inside the fan window", r.g.Precheck(req, false), api.CodeApprovalRequired, "")
+
+	// the one shutdown after boot: Precheck says it would pass, as often as it is asked, and records nothing
+	b := newRig(t, true)
+	b.setLocal(func(tr *approval.Trust) { tr.BootShutdownS = 900 })
+	b.mu.Lock()
+	b.uptime = 2 * time.Minute
+	b.mu.Unlock()
+	mark := filepath.Join(filepath.Dir(b.files.Path), approval.BootMarkName)
+	for i := 0; i < 3; i++ {
+		accepted(t, "shutdown shortly after boot", b.g.Precheck(power("shutdown", 5), false))
+	}
+	refused(t, "reboot shortly after boot", b.g.Precheck(power("reboot", 5), false), api.CodeApprovalRequired, "")
+	refused(t, "a delay over 600 s", b.g.Precheck(power("shutdown", 601), false), api.CodeApprovalRequired, "")
+	if _, err := os.Lstat(mark); err == nil {
+		t.Fatal("Precheck recorded the shutdown after boot")
+	}
+	_, ref = b.g.Admit(power("shutdown", 60), nil)
+	accepted(t, "the one shutdown, when it is carried out", ref)
+	if _, err := os.Lstat(mark); err != nil {
+		t.Fatalf("Admit did not record the shutdown after boot: %v", err)
+	}
+	refused(t, "a second one: Precheck", b.g.Precheck(power("shutdown", 60), false), api.CodeApprovalRequired, "")
+	_, ref = b.g.Admit(power("shutdown", 60), nil)
+	refused(t, "a second one: Admit", ref, api.CodeApprovalRequired, "")
+
+	// a trust file that cannot be used refuses at once, with or without an approval
+	if err := os.WriteFile(r.files.Path, []byte("damaged"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	r.wait(6 * time.Second)
+	refused(t, "broken, none sent", r.g.Precheck(req, false), api.CodeApprovalUnavailable, "")
+	refused(t, "broken, sent", r.g.Precheck(req, true), api.CodeApprovalUnavailable, "")
 }

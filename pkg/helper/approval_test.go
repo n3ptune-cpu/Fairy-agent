@@ -259,21 +259,29 @@ func TestHelperEnforcesApproval(t *testing.T) {
 	swap := powerReq("reboot", 60)
 	swap.Approval = fan.Approval
 	wantCode(t, "fan approval for a reboot", a.v2(t, swap), 403, api.CodeApprovalRefused)
-	other := fanSetReq(0, 100)
-	other.Approval = fan.Approval
-	wantCode(t, "fan approval for another duty", a.v2(t, other), 403, api.CodeApprovalRefused)
 	if len(a.power.Scheduled) != 1 {
 		t.Fatalf("scheduled: %v", a.power.Scheduled)
 	}
-	// the fan approval itself still works (mode full first: also approved), and opens the fan window
+	// A request that the helper refuses for a reason of its own does not use the approval up (audit 5,
+	// r1-a2-01): the fans are not in "full" mode, so a duty changes nothing (409, the fan controller's own
+	// answer), and the approval is still good afterwards.
+	if resp := a.v2(t, fan); resp.Status != 409 || resp.Code == api.CodeApprovalRefused {
+		t.Fatalf("approved fan_set while the mode is not full: %+v", resp)
+	}
+	wantCode(t, "a refused fan_set opens no fan window", a.call(t, `{"v":1,"verb":"fan_mode","mode":"full","by":"test"}`), 403, api.CodeApprovalRequired)
+	// mode full (also approved); then the fan approval for another duty is refused, and for its own it works
 	mode := proto.Request{Verb: proto.VerbFanMode, Mode: ptr("full"), By: ptr("test")}
 	mode.Approval = a.approvalFor(t, mode)
 	if resp := a.v2(t, mode); resp.Status != 200 {
 		t.Fatalf("approved fan_mode: %+v", resp)
 	}
+	other := fanSetReq(0, 100)
+	other.Approval = fan.Approval
+	wantCode(t, "fan approval for another duty", a.v2(t, other), 403, api.CodeApprovalRefused)
 	if resp := a.v2(t, fan); resp.Status != 200 || a.duty(t, 0) != 50 {
-		t.Fatalf("approved fan_set: %+v, duty %d", resp, a.duty(t, 0))
+		t.Fatalf("approved fan_set, after the request that changed nothing: %+v, duty %d", resp, a.duty(t, 0))
 	}
+	wantCode(t, "fan_set replay", a.v2(t, fan), 403, api.CodeApprovalRefused)
 	if resp := a.call(t, `{"v":1,"verb":"fan_set","zone":1,"percent":70,"by":"test"}`); resp.Status != 200 || a.duty(t, 1) != 70 {
 		t.Errorf("fan change in the fan window: %+v", resp)
 	}
@@ -290,11 +298,14 @@ func TestHelperEnforcesApproval(t *testing.T) {
 		t.Fatal("the updater was started twice")
 	}
 
-	// a request that fails after its approval was accepted does not give the approval back
+	// a request the helper refuses for a reason of its own is refused for that reason every time, and its
+	// approval is never looked at: nothing is used up for a request that cannot run
 	short := powerReq("reboot", 10) // below this machine's min_delay_s (30)
 	short.Approval = a.approvalFor(t, short)
 	wantCode(t, "delay below the minimum", a.v2(t, short), 400, proto.CodeBadRequest)
-	wantCode(t, "the same approval again", a.v2(t, short), 403, api.CodeApprovalRefused)
+	wantCode(t, "the same request again", a.v2(t, short), 400, proto.CodeBadRequest)
+	// without an approval the answer is approval_required whatever else is wrong with the request
+	wantCode(t, "delay below the minimum, no approval", a.call(t, `{"v":1,"verb":"power","action":"reboot","delay_s":10,"by":"test"}`), 403, api.CodeApprovalRequired)
 
 	// the helper restarted: trust stays, open challenges are gone
 	pending := powerReq("reboot", 60)

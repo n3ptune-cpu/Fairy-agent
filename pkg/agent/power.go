@@ -156,6 +156,9 @@ type PowerRequest struct {
 	RequestedBy any    `json:"requested_by"`
 	// Approval is the passkey approval the request carried (nil: none). Power does not look inside.
 	Approval *api.Approval `json:"-"`
+	// Gate is the passkey check of a request this process carries out itself (nil: none, or the helper checks).
+	// Handle asks it when the request has passed every check of its own and is about to be scheduled.
+	Gate Gated `json:"-"`
 }
 
 // throughHelper reports whether shutdown, reboot and sleep are carried out by the Windows helper, which then is
@@ -209,6 +212,14 @@ func (p *Power) Handle(req PowerRequest) (int, map[string]any) {
 	}
 	if c := p.current(); c != nil {
 		return 409, map[string]any{"error": fmt.Sprintf("a %s is already pending; cancel it first", c.Action)}
+	}
+	// The request's own checks are done; it is scheduled next. Only now is its approval used up, or the one
+	// shutdown after boot recorded: a request refused above costs neither.
+	if req.Gate != nil {
+		if _, ref := req.Gate(); ref != nil {
+			slog.Warn("power: not scheduled", "action", req.Action, "code", ref.Code, "requested_by", who)
+			return ref.Status, refusalBody(ref)
+		}
 	}
 	msg := fmt.Sprintf("Fairy: %s requested by %s in %d seconds.", req.Action, who, delay)
 	var err error

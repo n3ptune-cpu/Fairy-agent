@@ -256,18 +256,46 @@ func refusal(ref *approval.Refusal) proto.Response {
 	return proto.Response{Status: ref.Status, Code: ref.Code, Error: ref.Msg}
 }
 
-// approve is the passkey check of a request that changes something: nil when r may run. While trust is set,
-// fan_set, fan_mode, power (other than cancel) and apply_update pass only with an approval this helper verified
-// itself (or inside the fan window, which an approved fan change opens once it was applied, or as the one
-// shutdown shortly after boot). fan_auto and power cancel are
-// never asked: they only make things safer, and the agent sends them with nobody present. The approval's
-// challenge is used up here, before anything of the request is carried out.
+// The passkey check of a request that changes something. While trust is set, fan_set, fan_mode, power (other
+// than cancel) and apply_update run only with an approval this helper verified itself (or inside the fan
+// window, which an approved fan change opens once it was applied, or as the one shutdown shortly after boot).
+// fan_auto and power cancel are never asked: they only make things safer, and the agent sends them with nobody
+// present.
 //
-// The pass is for the fan verbs: they tell it when the change was applied (approval.Pass.Applied), which is what
-// opens the fan window.
-func (s *Server) approve(r proto.Request) (*approval.Pass, *proto.Response) {
+// It is asked in two steps, so that a request the helper refuses for a reason of its own (a delay under the
+// minimum, a machine that cannot sleep, a duty while the fan mode is not "full") costs neither the approval nor
+// the one shutdown after boot:
+//
+//   - precheck, when the request arrives, before any of its own checks: it uses nothing up. It refuses a
+//     request that needs an approval and carries none, and everything while the trust file cannot be used. So
+//     a request without approval is answered approval_required whatever else is wrong with it;
+//   - admit, when the request has passed its own checks and the next step is the system call or the BMC
+//     command: here the approval is verified and its challenge used up, or the shutdown after boot recorded.
+
+// approvable is r as the gate knows it; false: r is not a request the gate is asked about (or there is no gate).
+func (s *Server) approvable(r proto.Request) (api.ApprovalRequest, bool) {
 	ar, needs := proto.ApprovalRequestOf(r)
-	if !needs || r.Verb == proto.VerbChallenge || s.p.Approval == nil {
+	return ar, needs && r.Verb != proto.VerbChallenge && s.p.Approval != nil
+}
+
+// precheck is the first step (nil: go on).
+func (s *Server) precheck(r proto.Request) *proto.Response {
+	ar, ok := s.approvable(r)
+	if !ok {
+		return nil
+	}
+	if ref := s.p.Approval.Precheck(ar, r.Approval != nil); ref != nil {
+		resp := refusal(ref)
+		return &resp
+	}
+	return nil
+}
+
+// admit is the second step (a nil answer: carry r out now). The pass is for the fan verbs: it is told when
+// the change was applied (approval.Pass.Applied), which is what opens the fan window.
+func (s *Server) admit(r proto.Request) (*approval.Pass, *proto.Response) {
+	ar, ok := s.approvable(r)
+	if !ok {
 		return nil, nil
 	}
 	pass, ref := s.p.Approval.Admit(ar, r.Approval)
@@ -276,6 +304,32 @@ func (s *Server) approve(r proto.Request) (*approval.Pass, *proto.Response) {
 		return nil, &resp
 	}
 	return pass, nil
+}
+
+// fanChange carries out a fan verb with the second step asked by the fan controller itself, after its own
+// checks. A refusal of the passkey check is answered as the helper answers every such refusal (status, code
+// and text of the refusal), not as a fan controller's answer.
+func (s *Server) fanChange(r proto.Request, change func(gate agent.Gated) (int, map[string]any)) proto.Response {
+	if no := s.precheck(r); no != nil {
+		return *no
+	}
+	var refused *proto.Response
+	st, body := change(func() (*approval.Pass, *approval.Refusal) {
+		ar, ok := s.approvable(r)
+		if !ok {
+			return nil, nil
+		}
+		pass, ref := s.p.Approval.Admit(ar, r.Approval)
+		if ref != nil {
+			resp := refusal(ref)
+			refused = &resp
+		}
+		return pass, ref
+	})
+	if refused != nil {
+		return *refused
+	}
+	return proto.WithStatus(st, body)
 }
 
 // challenge answers the verb challenge: a challenge bound to the request it names (one of the four that need an
@@ -364,28 +418,16 @@ func (s *Server) dispatch(ctx context.Context, r proto.Request) proto.Response {
 		if s.p.Fan == nil {
 			return disabled("fan control")
 		}
-		pass, no := s.approve(r)
-		if no != nil {
-			return *no
-		}
-		st, body := s.p.Fan.SetDuty(ctx, *r.Zone, *r.Percent, s.who(r))
-		if st == 200 { // only a change that was applied opens the fan window
-			pass.Applied()
-		}
-		return proto.WithStatus(st, body)
+		return s.fanChange(r, func(gate agent.Gated) (int, map[string]any) {
+			return s.p.Fan.SetDutyGated(ctx, *r.Zone, *r.Percent, s.who(r), gate)
+		})
 	case proto.VerbFanMode:
 		if s.p.Fan == nil {
 			return disabled("fan control")
 		}
-		pass, no := s.approve(r)
-		if no != nil {
-			return *no
-		}
-		st, body := s.p.Fan.SetMode(ctx, *r.Mode, s.who(r))
-		if st == 200 { // only a change that was applied opens the fan window
-			pass.Applied()
-		}
-		return proto.WithStatus(st, body)
+		return s.fanChange(r, func(gate agent.Gated) (int, map[string]any) {
+			return s.p.Fan.SetModeGated(ctx, *r.Mode, s.who(r), gate)
+		})
 	case proto.VerbFanAuto:
 		if s.p.Fan == nil {
 			return disabled("fan control")
@@ -401,7 +443,11 @@ func (s *Server) dispatch(ctx context.Context, r proto.Request) proto.Response {
 		if s.p.Updater == nil {
 			return disabled("self-update")
 		}
-		if _, no := s.approve(r); no != nil {
+		// nothing of its own to check in between: both steps at once
+		if no := s.precheck(r); no != nil {
+			return *no
+		}
+		if _, no := s.admit(r); no != nil {
 			return *no
 		}
 		if err := s.p.Updater(ctx); err != nil {
@@ -423,7 +469,7 @@ func (s *Server) power(r proto.Request) proto.Response {
 		}
 		return proto.OK(proto.PowerData{Action: "cancel"})
 	}
-	if _, no := s.approve(r); no != nil { // before anything else of a shutdown, reboot or sleep
+	if no := s.precheck(r); no != nil { // before anything else of a shutdown, reboot or sleep; uses nothing up
 		return *no
 	}
 	if min := s.minDelay(); *r.DelayS < min {
@@ -433,6 +479,11 @@ func (s *Server) power(r proto.Request) proto.Response {
 		if ok, why := s.canSleep(); !ok {
 			return proto.WithStatus(409, map[string]any{"error": "this machine cannot sleep: " + why, "code": "sleep_unavailable"})
 		}
+	}
+	// The request's own checks are done; the system is told next. Only now is the approval used up, or the one
+	// shutdown after boot recorded.
+	if _, no := s.admit(r); no != nil {
+		return *no
 	}
 	delay := time.Duration(*r.DelayS) * time.Second
 	var err error
