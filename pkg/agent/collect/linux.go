@@ -444,12 +444,27 @@ func (l *Linux) scanProcs(each func(procRow)) (total int) {
 	}
 }
 
-// describe reads the rest of one listed process: its command line (for the name, and for the listing when
-// o.Cmdline is on) and its user.
+// describe reads the rest of one listed process: its name, its command line when o.Cmdline is on, and its
+// user. With o.Cmdline off the command line is not even opened: the name then comes from the kernel's name of
+// the process and from the link to its program file (ExeProcName), so that nothing a program wrote into its
+// title can be in it.
 func (l *Linux) describe(r procRow, o ProcOptions, users map[int]string, btime, page int64, cmdBuf, statusBuf []byte) Process {
 	dir := filepath.Join(l.proc, strconv.Itoa(r.pid))
-	cmd, cut := readCmdline(filepath.Join(dir, "cmdline"), cmdBuf)
-	name := ProcName(r.comm, cmd)
+	var (
+		cmd  []byte
+		cut  bool
+		name string
+	)
+	if o.Cmdline {
+		cmd, cut = readCmdline(filepath.Join(dir, "cmdline"), cmdBuf)
+		name = ProcName(r.comm, cmd)
+	} else {
+		exe := ""
+		if len(r.comm) >= 15 { // only a name that may have been cut is looked up
+			exe, _ = os.Readlink(filepath.Join(dir, "exe"))
+		}
+		name = ExeProcName(r.comm, exe)
+	}
 	p := Process{PID: r.pid, Name: &name, RSS: P(r.rss * page),
 		CreateTime: P(Round(float64(btime)+float64(r.start)/clockTicks, 2))}
 	if r.hasCPU {

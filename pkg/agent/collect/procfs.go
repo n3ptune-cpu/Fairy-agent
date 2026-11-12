@@ -607,14 +607,23 @@ func CmdlineString(data []byte) string {
 	return strings.TrimSpace(strings.ReplaceAll(strings.TrimRight(string(data), "\x00"), "\x00", " "))
 }
 
-// ProcName is the process name: comm, or the program's file name when comm was cut at 15 characters.
+// ProcName is the process name where command lines are sent (processes.cmdline: true): comm, or the program's
+// file name when comm was cut at 15 characters. Where they are not sent, the name is ExeProcName's, which does
+// not look at the command line at all.
 //
-// The file name is taken from the first argument, and never more than the file name. A program that writes
-// its own title (Chromium and Electron helpers, anything started with a made-up argv[0]) has its whole
-// command line there, in one piece: "/opt/app/some-long-helper-name --type=renderer --token=...". The name
-// is what follows comm up to the first white space, so it holds no argument, whatever processes.cmdline says
-// (audit 5, r2-a2-02: with cmdline off, and unfiltered, the arguments were sent in "name"). A file name with
-// a space after its fifteenth character is cut there; one that cannot be found stays comm.
+// The file name is taken from the first argument, and no more than the file name is meant to be taken. A
+// program that writes its own title (Chromium and Electron helpers, anything started with a made-up argv[0])
+// has its whole command line there, in one piece: "/opt/app/some-long-helper-name --type=renderer
+// --token=...". The name is what follows comm up to the first white space (audit 5, r2-a2-02: with cmdline
+// off, and unfiltered, the arguments were sent in "name"). A file name with a space after its fifteenth
+// character is cut there; one that cannot be found stays comm.
+//
+// What this cannot tell apart: text that follows the name without ASCII white space. A title like
+// "some-long-helper-name--token=x", one with a no-break space (U+00A0) or an ideographic space (U+3000) for
+// a separator, or a name that first shows up inside an argument ("worker --socket=/run/some-long-helper-name.
+// sock;token=x") still ends up in the name, unfiltered, next to the filtered command line (second review of
+// ae9384f..5a6658c, 4 of 22 shapes; audit 5, r3-a1-03). That needs a program name of 15 characters or more
+// and a title of such a shape; the command line is being sent on that machine anyway.
 func ProcName(comm string, cmdline []byte) string {
 	if len(comm) < 15 || len(cmdline) == 0 {
 		return comm
@@ -645,6 +654,30 @@ func ProcName(comm string, cmdline []byte) string {
 		return arg0[i:end]
 	}
 	return comm
+}
+
+// ExeProcName is the process name where command lines are not sent (processes.cmdline: false). It is made
+// from two things the kernel keeps about the program and nothing else, so no part of a command line or of a
+// title a program wrote for itself can be in it (audit 5, r3-a1-03):
+//
+//   - comm, the kernel's own name of the process: the program's file name cut at 15 characters (or what the
+//     program gave itself with prctl / pthread_setname_np, also at most 15);
+//   - exe, what the link /proc/<pid>/exe points to, the program's file ("" when it cannot be read: a process
+//     of another user, a kernel thread). When comm was cut and the file's name begins with it, the name is
+//     the file's whole name. The kernel writes " (deleted)" after the path of a file that was removed; that
+//     is taken off.
+//
+// A process the agent may not look into therefore shows the 15 characters of comm, as top does.
+func ExeProcName(comm, exe string) string {
+	if len(comm) < 15 || exe == "" {
+		return comm
+	}
+	name := strings.TrimSuffix(exe, " (deleted)")
+	name = name[strings.LastIndexByte(name, '/')+1:]
+	if len(name) > 255 || !strings.HasPrefix(name, comm) {
+		return comm
+	}
+	return name
 }
 
 // isSpaceOrControl: a byte that ends a file name inside a title (space, tab, line ends, any control character).

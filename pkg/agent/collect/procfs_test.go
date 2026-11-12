@@ -259,6 +259,31 @@ func TestWindowsHelpers(t *testing.T) {
 	}
 }
 
+// TestExeProcName (audit 5, r3-a1-03): the name of a process where command lines are off, from the kernel's
+// name and the link to the program's file alone.
+func TestExeProcName(t *testing.T) {
+	for _, c := range []struct{ comm, exe, want string }{
+		{"nvidia-persiste", "/usr/bin/nvidia-persistenced", "nvidia-persistenced"},
+		{"nvidia-persiste", "", "nvidia-persiste"},                                           // the link cannot be read: another user's process
+		{"nvidia-persiste", "/usr/bin/nvidia-persistenced (deleted)", "nvidia-persistenced"}, // the file was replaced by an update
+		{"exactly15chars!", "/usr/bin/exactly15chars!", "exactly15chars!"},
+		{"very long progr", "/opt/very long program name with spaces", "very long program name with spaces"},
+		{"averyveryverylo", "/opt/x/averyveryverylongname--token=in-the-file-name", "averyveryverylongname--token=in-the-file-name"}, // a file that is really called so
+		{"llama-server", "/usr/bin/llama-server", "llama-server"},                                                                    // not cut: never looked up
+		{"sshd", "/usr/sbin/sshd", "sshd"},
+		{"my_long_script.", "/usr/bin/python3.12", "my_long_script."},            // a script: the file is the interpreter, the name stays the script's
+		{"ThreadPoolForeg", "/opt/app/some-long-helper-name", "ThreadPoolForeg"}, // a name the program gave itself
+		{"kworker/u16:3-e", "", "kworker/u16:3-e"},                               // a kernel thread has no file
+		{"verylongprogram", "verylongprogramname", "verylongprogramname"},        // no folder in the link
+		{"verylongprogram", "/opt/verylongprogramname/", "verylongprogram"},      // not a file name
+		{"verylongprogram", "/opt/" + "verylongprogram" + strings.Repeat("x", 250), "verylongprogram"},
+	} {
+		if got := ExeProcName(c.comm, c.exe); got != c.want {
+			t.Errorf("ExeProcName(%q, %q) = %q, want %q", c.comm, c.exe, got, c.want)
+		}
+	}
+}
+
 // TestProcNameHoldsNoArguments (audit 5, r2-a2-02): comm is cut at 15 characters, so a longer program name is
 // completed from the first argument. A program that wrote its own title has its whole command line in that
 // argument, and "name" carried it, secrets included, also with processes.cmdline off. The name is the file

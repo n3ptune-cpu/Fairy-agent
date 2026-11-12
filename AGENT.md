@@ -1504,7 +1504,7 @@ runs the same program), rename the current `fairy-agent.exe` away, rename `fairy
 | Board fans and voltages | yes (hwmon chips) | only through the BMC (Supermicro, `ipmi:`) |
 | CPU watts | yes (RAPL, see the table above) | only with [Core Temp](#core-temp-optional-windows) |
 | Battery (laptops) | charge %, state, AC, draw in watts, time left, health | charge %, state, AC, Windows' own time-left estimate (no watts) |
-| Processes | all; command lines only with `processes.cmdline: true` (a filter blanks the secrets it recognises: best effort). The name is the program's file name and never holds an argument, also for a program that writes its whole command line into its title | all names; details for programs it may open; the program's path instead of its command line; per-program dedicated GPU memory for every card (Windows' "GPU Process Memory" counter, like Task Manager) |
+| Processes | all; command lines only with `processes.cmdline: true` (a filter blanks the secrets it recognises: best effort). With command lines off, the name is not taken from the command line at all: it is the name of the program's file where the agent may see it, otherwise the 15 characters the kernel keeps of it (as `top` shows it). With command lines on, a name longer than 15 characters is completed from the program's title, and a title of an unusual shape can leave argument text in it (see [Security in short](#security-in-short)) | all names; details for programs it may open; the program's path instead of its command line; per-program dedicated GPU memory for every card (Windows' "GPU Process Memory" counter, like Task Manager) |
 
 **Not possible on Windows without a driver**, and therefore never done: CPU core temperatures, CPU package
 watts, motherboard sensor chips (fans, voltages), and other programs' command-line arguments. Tools that show
@@ -1699,9 +1699,19 @@ are lists of devices: edit those in the file.
   they are sent, a filter blanks the passwords and tokens it recognises before they leave the machine (and
   again in the panel). The filter is best effort: it cannot know every way a program takes a secret.
   Command lines are off only for installs made with this release or later; an existing agent keeps sending
-  them, filtered, until `fairy-agent config set processes.cmdline false` and a restart. With them off, no
-  argument of any process is sent: a process's name is its program's file name and nothing after it (a
-  program that writes its whole command line into its title used to show up with its arguments in the name).
+  them, filtered, until `fairy-agent config set processes.cmdline false` and a restart. With them off, the
+  agent does not open any process's command line, so no argument of any process is sent. A process's name
+  then comes from two things the kernel keeps: its own name of the process (the program's file name, cut at
+  15 characters; a program can give itself another one of that length) and, where the agent may read it, the
+  link to the program's file, from which a name that was cut is completed. The agent may read that link for
+  processes of its own user only, so most programs with a long name show the first 15 characters, as `top`
+  does. (Until this version a long name was completed from the program's title, also with command lines
+  off, and a title of an unusual shape, such as `some-long-program-name--token=...` with nothing between
+  name and argument, was sent whole as the name.) With command lines **on**, the name is still completed
+  from the title, up to the first space, tab or line end. Argument text that follows the name without one of
+  those (no separator at all, a no-break space, or a name that first appears inside an argument) then stays
+  in the name, where the secret filter does not look. That takes a program name of 15 characters or more and
+  such a title; if it matters to you, switch command lines off.
 * The BMC relay reaches private addresses only, passes the BMC password to ipmitool only through its
   environment, sends a Redfish login only to the certificate named in `tls_fingerprint`, and never logs
   passwords.

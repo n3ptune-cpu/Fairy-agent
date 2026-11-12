@@ -252,7 +252,9 @@ func TestProcTop(t *testing.T) {
 
 // TestProcessListNameHoldsNoArguments (audit 5, r2-a2-02): a listing made with command lines off sends no
 // argument of any process, also not in "name": a program with a name of 15 characters or more that wrote its
-// own title has its arguments in its first argument.
+// own title has its arguments in its first argument. Since audit 5, r3-a1-03 the name of such a listing is not
+// taken from the command line at all: it is the kernel's name, completed from the link to the program's file
+// where the agent may read that link.
 func TestProcessListNameHoldsNoArguments(t *testing.T) {
 	const secret = "POC-NOT-A-REAL-SECRET"
 	l := fakeProc(t, map[int][]byte{
@@ -266,15 +268,25 @@ func TestProcessListNameHoldsNoArguments(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	want := map[int]string{300: "verylongprogramname", 301: "some-long-helper-name", 302: "nvidia-persistenced"}
+	// the link to the program's file: 300 has one, 301 has none (another user's process: the agent may not
+	// read it), 302 has one to a file that was removed since
+	for pid, exe := range map[int]string{300: "/opt/tools/verylongprogramname", 302: "/usr/bin/nvidia-persistenced (deleted)"} {
+		if err := os.Symlink(exe, filepath.Join(l.proc, strconv.Itoa(pid), "exe")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	want := map[bool]map[int]string{
+		true:  {300: "verylongprogramname", 301: "some-long-helper-name", 302: "nvidia-persistenced"},
+		false: {300: "verylongprogramname", 301: "some-long-helpe", 302: "nvidia-persistenced"},
+	}
 	for _, withCmdline := range []bool{false, true} {
 		list, _, err := l.Processes(context.Background(), ProcOptions{Cmdline: withCmdline, MemTotal: 16 << 30, Interval: time.Millisecond})
 		if err != nil || len(list) != 3 {
 			t.Fatal(len(list), err)
 		}
 		for _, p := range list {
-			if p.Name == nil || *p.Name != want[p.PID] {
-				t.Errorf("cmdline %v: pid %d has the name %q, want %q", withCmdline, p.PID, *p.Name, want[p.PID])
+			if p.Name == nil || *p.Name != want[withCmdline][p.PID] {
+				t.Errorf("cmdline %v: pid %d has the name %q, want %q", withCmdline, p.PID, *p.Name, want[withCmdline][p.PID])
 			}
 			if !withCmdline && p.Cmdline != nil {
 				t.Errorf("pid %d: a command line although they are off: %q", p.PID, *p.Cmdline)
@@ -283,5 +295,104 @@ func TestProcessListNameHoldsNoArguments(t *testing.T) {
 				t.Errorf("pid %d: the row holds an argument although command lines are off: %s", p.PID, b)
 			}
 		}
+	}
+}
+
+// TestProcessListNamesWithCommandLinesOff (audit 5, r3-a1-03, and the second review's note on F5): the 22
+// titles the reviewer started real programs with, four of which still put argument text into "name" (no
+// separator after the name, a no-break space or an ideographic space for one, the name first seen inside an
+// argument). With command lines off the name is the program file's name, or the kernel's 15 characters of it
+// where the link to the file cannot be read, whatever the title says; with a made-up secret in every title,
+// none is in any row. Each shape runs twice: with the link (a process the agent may look into) and without.
+func TestProcessListNamesWithCommandLinesOff(t *testing.T) {
+	const dir = "/srv/f5"
+	shapes := []struct {
+		what, file, title string
+	}{
+		{"a title with arguments (Electron style)", dir + "/verylongprogramname", dir + "/verylongprogramname --db-password=SECRET-A --user=admin"},
+		{"spaces in the real path", dir + "/dir with space/verylongprogramname", dir + "/dir with space/verylongprogramname"},
+		{"spaces in the path, title with arguments", dir + "/dir with space/verylongprogramname", dir + "/dir with space/verylongprogramname --token=SECRET-B2"},
+		{"a file name with spaces", dir + "/very long program name with spaces", dir + "/very long program name with spaces"},
+		{"a file name with spaces + arguments in the title", dir + "/very long program name with spaces", dir + "/very long program name with spaces --pw=SECRET-C2"},
+		{"a name of exactly 15 characters", dir + "/exactly15chars_", dir + "/exactly15chars_"},
+		{"exactly 15 characters, title with arguments", dir + "/exactly15chars_", "exactly15chars_ --key=SECRET-D2"},
+		{"a long name, plain", dir + "/averyveryverylongname", dir + "/averyveryverylongname"},
+		{"a deleted executable", dir + "/deletedprogramnamelong (deleted)", dir + "/deletedprogramnamelong"},
+		{"a file name that is not UTF-8", dir + "/nonutf8-\xff\xfe-programname", dir + "/nonutf8-\xff\xfe-programname"},
+		{"not UTF-8 after the name, with arguments", dir + "/verylongprogramname", dir + "/verylongprogramname\xff\xfe --pw=SECRET-H2"},
+		{"the name first shows up inside an argument", dir + "/verylongprogramname", "worker --socket=/run/verylongprogramname.sock;token=SECRET-I"},
+		{"a tab between name and arguments", dir + "/verylongprogramname", "verylongprogramname\t--pw=SECRET-J"},
+		{"a line feed between name and arguments", dir + "/verylongprogramname", "verylongprogramname\n--pw=SECRET-K"},
+		{"a no-break space (U+00A0) between name and arguments", dir + "/verylongprogramname", "verylongprogramname\u00a0--pw=SECRET-L"},
+		{"no separator at all", dir + "/verylongprogramname", "verylongprogramname--pw=SECRET-M"},
+		{"a relative path", dir + "/verylongprogramname", "./verylongprogramname --pw=SECRET-N"},
+		{"a login shell's dash", dir + "/verylongshellname", "-verylongshellname"},
+		{"a folder of the same beginning, then arguments", dir + "/verylongprogramname-dir/shortname", dir + "/verylongprogramname-dir/shortname --pw=SECRET-P"},
+		{"the name after a colon, then arguments", dir + "/verylongprogramname", "sshd: verylongprogramname --pw=SECRET-Q"},
+		{"an empty argv[0]", dir + "/verylongprogramname", ""},
+		{"U+3000 (ideographic space) before the arguments", dir + "/verylongprogramname", "verylongprogramname\u3000--pw=SECRET-S"},
+	}
+	if len(shapes) != 22 {
+		t.Fatal(len(shapes))
+	}
+	fileName := func(exe string) string {
+		return strings.TrimSuffix(exe[strings.LastIndexByte(exe, '/')+1:], " (deleted)")
+	}
+	comm := func(exe string) string { // the kernel's name: the file's name, cut at 15
+		n := fileName(exe)
+		if len(n) > 15 {
+			n = n[:15]
+		}
+		return n
+	}
+	cmdlines := map[int][]byte{}
+	for i, c := range shapes {
+		cmdlines[1000+i], cmdlines[2000+i] = []byte(c.title+"\x00600\x00"), []byte(c.title+"\x00600\x00")
+	}
+	l := fakeProc(t, cmdlines)
+	for i, c := range shapes {
+		for _, pid := range []int{1000 + i, 2000 + i} {
+			line := fmt.Sprintf("%d (%s) S 1 1 1 0 -1 4194560 100 0 0 0 250 50 0 0 20 0 4 0 9000 123456789 2048 18446744073709551615\n", pid, comm(c.file))
+			if err := os.WriteFile(filepath.Join(l.proc, strconv.Itoa(pid), "stat"), []byte(line), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := os.Symlink(c.file, filepath.Join(l.proc, strconv.Itoa(1000+i), "exe")); err != nil { // 2000+i: no link
+			t.Fatal(err)
+		}
+	}
+	list, _, err := l.Processes(context.Background(), ProcOptions{Cmdline: false, MemTotal: 16 << 30, Interval: time.Millisecond})
+	if err != nil || len(list) != 2*len(shapes) {
+		t.Fatal(len(list), err)
+	}
+	for _, p := range list {
+		c := shapes[p.PID%1000]
+		want := fileName(c.file) // with the link: the file's whole name
+		if p.PID >= 2000 {
+			want = comm(c.file) // without: the kernel's 15 characters
+		}
+		if p.Name == nil || *p.Name != want {
+			t.Errorf("%s (pid %d): name %q, want %q", c.what, p.PID, *p.Name, want)
+		}
+		if b, _ := json.Marshal(p); p.Cmdline != nil || bytes.Contains(b, []byte("SECRET")) || bytes.Contains(b, []byte("--")) {
+			t.Errorf("%s (pid %d): the row holds argument text although command lines are off: %s", c.what, p.PID, b)
+		}
+	}
+	// the same titles with command lines ON: the four shapes the name cannot be told from still carry
+	// argument text in "name" (ProcName says why); this pins what the guide says about that setting
+	list, _, err = l.Processes(context.Background(), ProcOptions{Cmdline: true, MemTotal: 16 << 30, Interval: time.Millisecond})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var inName []string
+	for _, p := range list {
+		if p.PID < 2000 && strings.Contains(*p.Name, "SECRET") {
+			inName = append(inName, *p.Name)
+		}
+	}
+	sort.Strings(inName)
+	if want := []string{"verylongprogramname--pw=SECRET-M", "verylongprogramname.sock;token=SECRET-I",
+		"verylongprogramname\u00a0--pw=SECRET-L", "verylongprogramname\u3000--pw=SECRET-S"}; strings.Join(inName, "|") != strings.Join(want, "|") {
+		t.Errorf("with command lines on, names that hold argument text: %q, want the four known shapes %q", inName, want)
 	}
 }
