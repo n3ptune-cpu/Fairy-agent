@@ -240,3 +240,82 @@ func TestCheckJSONForLetsNoFoldedMemberReachAField(t *testing.T) {
 		t.Errorf("passed %d, refused %d", passed, refused)
 	}
 }
+
+// FuzzCheckJSONFor (audit 5, r3-a1-02): whatever text passes the strict look for a struct, encoding/json reads
+// it with every field filled from the member of exactly that field's name and from no other. The text is
+// decoded twice: into the struct (which matches names without case), and by hand from maps, where a name is
+// only itself. The two results must be the same, at the top and inside the nested structs.
+func FuzzCheckJSONFor(f *testing.F) {
+	type inner struct {
+		Token string `json:"token"`
+		N     int    `json:"n"`
+	}
+	type req struct {
+		Action   string          `json:"action"`
+		DelayS   json.RawMessage `json:"delay_s"`
+		Keys     []inner         `json:"keys"`
+		Approval *inner          `json:"approval"`
+	}
+	for _, seed := range []string{
+		`{"action":"shutdown","delay_s":60,"keys":[{"token":"a","n":1}],"approval":{"token":"t","n":2}}`,
+		`{"action":"shutdown","delay_s":3600,"delay_` + "\u017f" + `":60}`,
+		`{"action":"shutdown","DELAY_S":60}`, `{"Action":"x"}`, `{"` + "\u212a" + `eys":[]}`, `{"keys":[{"Token":"a"},{"token":"b","N":3}]}`,
+		`{"approval":{"to` + "\u212a" + `en":"a"}}`, `{"approval":null,"keys":null,"delay_s":null}`, `{"x":{"action":1,"Action":2}}`, `[]`, `{}`, `7`,
+		`{"action":"a","delay_\u017f":1}`, `{"keys":[null,{"n":1,"\u004e":2}]}`,
+	} {
+		f.Add([]byte(seed))
+	}
+	exactInner := func(raw json.RawMessage) (in inner, ok bool) {
+		var m map[string]json.RawMessage
+		if json.Unmarshal(raw, &m) != nil {
+			return in, false
+		}
+		if v, there := m["token"]; there && json.Unmarshal(v, &in.Token) != nil {
+			return in, false
+		}
+		if v, there := m["n"]; there && json.Unmarshal(v, &in.N) != nil {
+			return in, false
+		}
+		return in, true
+	}
+	f.Fuzz(func(t *testing.T, b []byte) {
+		var got req
+		if approval.CheckJSONFor(b, &got) != nil || json.Unmarshal(b, &got) != nil {
+			return
+		}
+		var m map[string]json.RawMessage
+		if json.Unmarshal(b, &m) != nil || m == nil {
+			return
+		}
+		var want req
+		if v, there := m["action"]; there && json.Unmarshal(v, &want.Action) != nil {
+			return
+		}
+		if v, there := m["delay_s"]; there {
+			want.DelayS = append(json.RawMessage(nil), v...)
+		}
+		if v, there := m["keys"]; there && string(v) != "null" {
+			var items []json.RawMessage
+			if json.Unmarshal(v, &items) != nil {
+				return
+			}
+			want.Keys = make([]inner, len(items))
+			for i, it := range items {
+				var ok bool
+				if want.Keys[i], ok = exactInner(it); !ok {
+					return
+				}
+			}
+		}
+		if v, there := m["approval"]; there && string(v) != "null" {
+			in, ok := exactInner(v)
+			if !ok {
+				return
+			}
+			want.Approval = &in
+		}
+		if !reflect.DeepEqual(got, want) {
+			t.Fatalf("%q passed the strict look, and encoding/json filled a field from a member of another spelling:\n got %+v\nwant %+v", b, got, want)
+		}
+	})
+}
