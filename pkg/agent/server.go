@@ -535,14 +535,15 @@ func (l *limiter) allowPeek(key string) bool {
 	return n < l.n
 }
 
-// decodeBody reads the body of a control request: one JSON value and nothing after it, and no member twice in
-// one object (strictBody). Members the request does not know are ignored, as before.
+// decodeBody reads the body of a control request: one JSON value and nothing after it, no member twice in one
+// object, and no member of the request spelled in another way than its name (strictBodyFor). Members the
+// request does not know are ignored, as before.
 func decodeBody(r *http.Request, v any) error {
 	b, err := io.ReadAll(r.Body)
 	if err != nil {
 		return errors.New("request body too large")
 	}
-	if err := strictBody(b); err != nil {
+	if err := strictBodyFor(b, v); err != nil {
 		return err
 	}
 	if err := json.Unmarshal(b, v); err != nil {
@@ -555,8 +556,14 @@ func decodeBody(r *http.Request, v any) error {
 // is there twice (json takes the last one, also when the names differ only in case; another reader of the same
 // request, or of its approval, could take the first), text that is not UTF-8, objects nested deeper than any
 // request is. The panel's bodies are made by a JSON encoder and have none of these (audit 5, r2-a1-06).
-func strictBody(b []byte) error {
-	err := approval.CheckJSON(b)
+func strictBody(b []byte) error { return strictBodyFor(b, nil) }
+
+// strictBodyFor is strictBody for a body that is read into v, and refuses one thing more: a member that
+// encoding/json would read into a field of v (or of the approval inside it) although it is not spelled as
+// that field is. To encoding/json "DELAY_S", and "delay_s" written with a long s (U+017F), are "delay_s". The
+// panel's encoder writes every name exactly (audit 5, r3-a1-02).
+func strictBodyFor(b []byte, v any) error {
+	err := approval.CheckJSONFor(b, v)
 	if err == nil {
 		return nil
 	}

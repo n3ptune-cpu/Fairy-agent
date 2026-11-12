@@ -340,8 +340,9 @@ func decodeRequest(b []byte, version int) (Request, error) {
 	if len(b) > limit {
 		return r, &Error{Code: CodeTooLarge, Msg: "request too large"}
 	}
-	// no member twice (encoding/json would take the last one), valid UTF-8, nothing after the object
-	if err := approval.CheckJSON(b); err != nil {
+	// no member twice (encoding/json would take the last one), no member spelled in another way than its name
+	// (encoding/json would read it all the same), valid UTF-8, nothing after the object
+	if err := approval.CheckJSONFor(b, &r); err != nil {
 		if err.Error() == "data after the JSON value" {
 			return Request{}, bad("one request per frame")
 		}

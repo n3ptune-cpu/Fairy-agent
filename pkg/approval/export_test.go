@@ -12,3 +12,6 @@ func (g *Gate) Check(req api.ApprovalRequest, ap *api.Approval) *Refusal {
 	}
 	return ref
 }
+
+// FoldName is foldName, for the test that holds it against encoding/json.
+func FoldName(s string) string { return foldName(s) }

@@ -329,14 +329,14 @@ func (a *Agent) approvalStatus(ctx context.Context) (api.ApprovalStatus, bool) {
 	return api.ApprovalStatus{}, false
 }
 
-// decodeStrictBody reads a body that must be exactly one JSON object with no member v does not have, and no
-// member twice (strictBody).
+// decodeStrictBody reads a body that must be exactly one JSON object with no member v does not have, no
+// member twice and no member spelled in another way than its name (strictBodyFor).
 func decodeStrictBody(r *http.Request, v any) error {
 	b, err := io.ReadAll(r.Body)
 	if err != nil {
 		return errors.New("request body too large")
 	}
-	if err := strictBody(b); err != nil && err.Error() != "invalid JSON body" { // those two keep their texts below
+	if err := strictBodyFor(b, v); err != nil && err.Error() != "invalid JSON body" { // those two keep their texts below
 		return err
 	}
 	dec := json.NewDecoder(bytes.NewReader(b))

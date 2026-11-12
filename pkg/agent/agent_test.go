@@ -1030,6 +1030,131 @@ func TestCmdlineIsRedactedWheneverItIsOn(t *testing.T) {
 	}
 }
 
+// TestControlBodyNamesAreSpelledExactly (audit 5, r3-a1-02): encoding/json reads a member into a field whose
+// name is the same without case, by Unicode's folding: "DELAY_S" is "delay_s" to it, and so is "delay_s"
+// written with a long s (U+017F). The check for "no member twice" compared lower-case forms, so
+// {"delay_s":3600,"delay_\u017f":60} passed and the SECOND value ran. Now two names that fold to one are "twice",
+// and a member that would be read into a field of the request although it is not spelled as the field is, is
+// refused too, on every route and inside the approval. Members a request does not know stay as they were.
+func TestControlBodyNamesAreSpelledExactly(t *testing.T) {
+	r := newRig(t, "power_control: {enabled: true}\nwol: {enabled: true, allowed_macs: [\"3c:ec:ef:00:11:22\"]}\ncontrol_rate_per_min: 60\n")
+	r.a.d.Approval = approval.NewGate(approval.Options{Files: approval.Files{Path: filepath.Join(t.TempDir(), approval.TrustFileName)}, EnforcedBy: api.EnforcedByAgent})
+	raw := func(path, body string) (int, map[string]any) {
+		t.Helper()
+		req, _ := http.NewRequest("POST", r.srv.URL+path, strings.NewReader(body))
+		req.Header.Set("Authorization", "Bearer "+ctlTok)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		out := map[string]any{}
+		_ = json.NewDecoder(resp.Body).Decode(&out)
+		return resp.StatusCode, out
+	}
+	const (
+		twice   = "invalid JSON body: a name is used twice in one object"
+		spelled = "invalid JSON body: a name is not spelled exactly as the member it would be read as"
+		longS   = "\u017f" // a long s: "delay_" + longS is "delay_s" to encoding/json
+		kelvin  = "\u212a" // a Kelvin sign: kelvin + "eys" is "keys"
+	)
+	entry := `{"machine_id":"mmmmmmmmmmmmmmmmmmmmmm","challenge":"` + strings.Repeat("A", 43) + `","request":"power action=shutdown delay_s=60"}`
+	for _, c := range []struct{ path, body, want string }{
+		{"/power", `{"action":"shutdown","delay_s":3600,"delay_` + longS + `":60}`, twice},   // the auditor's body
+		{"/power", `{"action":"shutdown","delay_s":3600,"delay_\u017f":60}`, twice},          // the same, written as an escape
+		{"/power", `{"action":"shutdown","delay_` + longS + `":60,"delay_s":3600}`, spelled}, // the other way round: refused at its first member
+		{"/power", `{"action":"shutdown","delay_s":3600,"DELAY_S":60}`, twice},
+		{"/power", `{"action":"shutdown","DELAY_S":60}`, spelled},
+		{"/power", `{"action":"shutdown","Delay_S":60}`, spelled},
+		{"/power", `{"action":"shutdown","delay_` + longS + `":60}`, spelled},
+		{"/power", `{"action":"shutdown","delay_\u017f":60}`, spelled},
+		{"/power", `{"Action":"shutdown","delay_s":60}`, spelled},
+		{"/power", `{"ACTION":"cancel"}`, spelled},
+		{"/power", `{"action":"shutdown","delay_s":60,"Requested_By":"x"}`, spelled},
+		{"/power", `{"action":"shutdown","delay_s":60,"reque` + longS + `ted_by":"x"}`, spelled},
+		{"/power", `{"action":"shutdown","delay_s":60,"Approval":{"token":"a","entries":[]}}`, spelled},
+		{"/power", `{"action":"shutdown","delay_s":60,"approval":{"to` + kelvin + `en":"a","entries":[]}}`, spelled},
+		{"/power", `{"action":"shutdown","delay_s":60,"approval":{"token":"a","to` + kelvin + `en":"b","entries":[]}}`, twice},
+		{"/power", `{"action":"shutdown","delay_s":60,"approval":{"token":"a","entrie` + longS + `":[]}}`, spelled},
+		{"/power", `{"action":"shutdown","delay_s":60,"approval":{"token":"a","entries":[` + strings.Replace(entry, `"request"`, `"reque`+longS+`t"`, 1) + `]}}`, spelled},
+		{"/power", `{"action":"shutdown","delay_s":60,"approval":{"token":"a","entries":[` + entry + `,` + strings.Replace(entry, `"machine_id"`, `"Machine_ID"`, 1) + `]}}`, spelled},
+		{"/wol", `{"MAC":"3c:ec:ef:00:11:22"}`, spelled},
+		{"/wol", `{"mac":"3c:ec:ef:00:11:22","Port":9}`, spelled},
+		{api.PathApprovalChallenge, `{"verb":"power","action":"reboot","delay_s":3600,"delay_` + longS + `":77}`, twice}, // the auditor's second body
+		{api.PathApprovalChallenge, `{"verb":"power","action":"reboot","delay_` + longS + `":77}`, spelled},
+		{api.PathApprovalChallenge, `{"verb":"power","action":"reboot","DELAY_S":77}`, spelled},
+		{api.PathApprovalChallenge, `{"verb":"trust_set","tru` + longS + `t_ha` + longS + `h":"` + strings.Repeat("A", 43) + `"}`, spelled},
+		{api.PathApprovalChallenge, `{"verb":"power","action":"reboot","delay_s":3600,"Kind":1}`, "invalid JSON body (or a member this request does not take)"}, // as before
+		{api.PathApprovalTrust, `{"issuer":"https://a.test.invalid","client_id":"c","` + kelvin + `eys":[],"users":["u"]}`, spelled},
+		{api.PathApprovalTrust, `{"issuer":"https://a.test.invalid","client_id":"c","keys":[],"` + kelvin + `eys":[],"users":["u"]}`, twice},
+		{api.PathApprovalTrust, `{"i` + longS + longS + `uer":"https://a.test.invalid","client_id":"c","keys":[],"users":["u"]}`, spelled},
+		{api.PathApprovalTrust, `{"issuer":"https://a.test.invalid","client_id":"c","keys":[{"kty":"RSA","` + kelvin + `id":"k"}],"users":["u"]}`, spelled},
+		{api.PathApprovalTrust, `{"issuer":"https://a.test.invalid","client_id":"c","keys":[],"u` + longS + `er` + longS + `":["u"]}`, spelled},
+		{api.PathApprovalTrust, `{"issuer":"https://a.test.invalid","client_id":"c","keys":[],"users":["u"],"Machine_Id":"mmmmmmmmmmmmmmmmmmmmmm"}`, spelled},
+	} {
+		st, b := raw(c.path, c.body)
+		if st != 400 || b["error"] != c.want {
+			t.Errorf("POST %s %s: %d %v, want 400 %q", c.path, c.body, st, b, c.want)
+		}
+		if c.path == api.PathApprovalTrust && b["code"] != "invalid" {
+			t.Errorf("POST %s %s: code %v, want invalid (as this route's other 400s)", c.path, c.body, b["code"])
+		}
+	}
+	if len(r.power.Scheduled) != 0 || len(r.sent) != 0 {
+		t.Fatalf("something was carried out: %v %v", r.power.Scheduled, r.sent)
+	}
+	// As before: members a request does not know, in any spelling, and whatever is inside "requested_by".
+	// "Cyrillic" has a letter that only looks like s: it is another name, also to encoding/json.
+	for _, body := range []string{
+		`{"action":"cancel","Comment":"from an older panel","X-Request-ID":"A1","requested_by":"admin"}`,
+		`{"action":"cancel","requested_by":{"Name":"Alice","ID":7,"Roles":["Admin"]}}`,
+		`{"action":"cancel","delay_\u0455":60}`,
+		`{"action":"cancel","delays":60,"delay-s":60}`,
+	} {
+		if st, b := raw("/power", body); st != 200 {
+			t.Errorf("POST /power %s: %d %v, want 200", body, st, b)
+		}
+	}
+	if st, b := raw("/wol", `{"mac":"3c:ec:ef:00:11:22","broadcast":null,"port":9,"Note":"x"}`); st != 200 || len(r.sent) != 1 {
+		t.Errorf("wol: %d %v", st, b)
+	}
+	// What a panel sends is written by a JSON encoder from these very names: every shape the released panel
+	// and the panel with approvals build, through the look their route gives them.
+	ap := &api.Approval{Token: strings.Repeat("t", 64), Entries: []api.MachineEntry{{MachineID: strings.Repeat("M", 22), Challenge: strings.Repeat("A", 43), Request: "apply_update"}}}
+	zone, pct, delay, who := 1, 60, 3600, "Zo\u00eb \"admin\""
+	for name, c := range map[string]struct{ body, into any }{
+		"wol":           {map[string]any{"mac": "02:00:00:00:00:01", "broadcast": nil, "port": 9, "password": who}, &WOLRequest{}},
+		"bmc/power":     {map[string]any{"target": who, "action": "on", "requested_by": who}, &BMCRequest{}},
+		"update":        {map[string]any{"requested_by": map[string]any{"name": who, "sub": "u1", "roles": []string{"admin"}}, "approval": ap}, &UpdateRequest{}},
+		"helper":        {map[string]any{}, &struct{}{}},
+		"challenge":     {map[string]any{"verb": "power", "action": "shutdown", "delay_s": delay}, &api.ApprovalRequest{}},
+		"challenge fan": {api.ApprovalRequest{Verb: api.ApproveFanSet, Zone: &zone, Percent: &pct}, &api.ApprovalRequest{}},
+		"trust": {api.TrustInit{Issuer: "https://id.example", ClientID: "c", Users: []string{"u1", "u2"}, MachineID: strings.Repeat("M", 22),
+			Keys: []api.TrustKey{{Kty: "RSA", Kid: "k", Alg: "RS256", Use: "sig", N: strings.Repeat("n", 342), E: "AQAB"}}, Approval: ap}, &api.TrustInit{}},
+	} {
+		b, err := json.Marshal(c.body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := strictBodyFor(b, c.into); err != nil {
+			t.Errorf("%s: %s: REFUSED: %v", name, b, err)
+		}
+	}
+	for _, c := range []struct { // this route reads into a struct of its own: through the route
+		name string
+		body any
+	}{
+		{"power", map[string]any{"action": "shutdown", "delay_s": delay, "requested_by": who}},
+		{"power cancel", map[string]any{"action": "cancel", "delay_s": 0, "requested_by": who}},
+		{"power+approval", map[string]any{"action": "shutdown", "delay_s": delay, "requested_by": who, "approval": ap}},
+		{"power cancel", map[string]any{"action": "cancel"}},
+	} {
+		if st, b := r.do(t, "POST", "/power", ctlTok, c.body); st != 200 {
+			t.Errorf("%s: %d %v", c.name, st, b)
+		}
+	}
+}
+
 // TestControlBodyWithAMemberTwice (audit 5, r2-a1-06): a control request's body in which a member is there
 // twice was read with the last one counting (also when the two names differ only in letter case). Such a body
 // is refused now, on every control route and on the two approval routes, and nothing is carried out. A body

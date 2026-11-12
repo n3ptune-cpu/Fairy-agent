@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/n3ptune-cpu/Fairy-agent/pkg/agent/api"
 )
 
 func code(err error) string {
@@ -223,6 +225,72 @@ func TestLimiterClasses(t *testing.T) {
 	}
 	if !l.AllowRequest(Request{Verb: VerbStatus}) {
 		t.Fatal("a read was kept out by the others")
+	}
+}
+
+// TestDecodeRequestNamesAreSpelledExactly (audit 5, r3-a1-02): encoding/json reads "DELAY_S", and "delay_s"
+// written with a long s (U+017F), into the field "delay_s". The check for a member twice compared lower-case
+// forms: {"v":1,"verb":"power","action":"reboot","delay_s":3600,"delay_\u017f":30} was a reboot in 30 s. Two
+// names that fold to one are "twice" now, and a member that is not spelled as its field is refused, at every
+// depth, in both frame versions.
+func TestDecodeRequestNamesAreSpelledExactly(t *testing.T) {
+	const longS, kelvin = "\u017f", "\u212a"
+	entry := `{"machine_id":"mmmmmmmmmmmmmmmmmmmmmm","challenge":"` + strings.Repeat("A", 43) + `","request":"apply_update"}`
+	for _, c := range []struct {
+		in   string
+		v3   bool
+		want string
+	}{
+		{`{"v":1,"verb":"power","action":"reboot","delay_s":3600,"delay_` + longS + `":30}`, false, "a name is used twice in one object"}, // the auditor's frame
+		{`{"v":1,"verb":"power","action":"reboot","delay_s":3600,"delay_\u017f":30}`, false, "a name is used twice in one object"},
+		{`{"v":1,"verb":"power","action":"reboot","delay_` + longS + `":30}`, false, "not spelled exactly"},
+		{`{"v":1,"verb":"power","action":"reboot","DELAY_S":30}`, false, "not spelled exactly"},
+		{`{"v":1,"Verb":"ping"}`, false, "not spelled exactly"},
+		{`{"V":1,"verb":"ping"}`, false, "not spelled exactly"},
+		{`{"v":1,"verb":"fan_set","zone":0,"Percent":30}`, false, "not spelled exactly"},
+		{`{"v":3,"verb":"challenge","for":"trust_set","tru` + longS + `t_ha` + longS + `h":"` + strings.Repeat("A", 43) + `"}`, true, "not spelled exactly"},
+		{`{"v":3,"verb":"apply_update","approval":{"to` + kelvin + `en":"a.b.c","entries":[` + entry + `]}}`, true, "not spelled exactly"},
+		{`{"v":3,"verb":"apply_update","approval":{"token":"a.b.c","to` + kelvin + `en":"d.e.f","entries":[` + entry + `]}}`, true, "a name is used twice in one object"},
+		{`{"v":3,"verb":"apply_update","approval":{"token":"a.b.c","entries":[` + strings.Replace(entry, `"request"`, `"reque`+longS+`t"`, 1) + `]}}`, true, "not spelled exactly"},
+		{`{"v":3,"verb":"trust_init","trust":{"issuer":"https://a.test.invalid","client_id":"c","` + kelvin + `eys":[],"users":["u"]}}`, true, "not spelled exactly"},
+		{`{"v":3,"verb":"trust_init","trust":{"issuer":"https://a.test.invalid","client_id":"c","keys":[{"` + kelvin + `ty":"RSA"}],"u` + longS + `ers":["u"]}}`, true, "not spelled exactly"},
+		{`{"v":3,"verb":"trust_init","Trust":{"issuer":"https://a.test.invalid"}}`, true, "not spelled exactly"},
+	} {
+		decode := DecodeRequest
+		if c.v3 {
+			decode = DecodeRequestV3
+		}
+		_, err := decode([]byte(c.in))
+		if err == nil || code(err) != CodeBadRequest || !strings.Contains(err.Error(), c.want) {
+			t.Errorf("%.110s: %v, want %s with %q", c.in, err, CodeBadRequest, c.want)
+		}
+	}
+	// every frame the agent's own encoder makes is spelled exactly: each verb with everything it can carry
+	zone, pct, mode, action, delay, by, forVerb, hash := 1, 60, "full", "shutdown", 3600, "panel 100.64.0.1", "power", strings.Repeat("A", 43)
+	ap := &api.Approval{Token: "a.b.c", Entries: []api.MachineEntry{{MachineID: strings.Repeat("m", 22), Challenge: strings.Repeat("A", 43), Request: "apply_update"}}}
+	trust := &api.TrustInit{Issuer: "https://id.test.invalid", ClientID: "c", Users: []string{"u"}, MachineID: strings.Repeat("m", 22),
+		Keys: []api.TrustKey{{Kty: "RSA", Kid: "k", Alg: "RS256", Use: "sig", N: strings.Repeat("n", 342), E: "AQAB"}}, Approval: ap}
+	for _, r := range []Request{
+		{Verb: VerbPing}, {Verb: VerbStatus}, {Verb: VerbFanStatus},
+		{Verb: VerbFanSet, Zone: &zone, Percent: &pct, By: &by}, {Verb: VerbFanSet, Zone: &zone, Percent: &pct, By: &by, Approval: ap},
+		{Verb: VerbFanMode, Mode: &mode, By: &by, Approval: ap}, {Verb: VerbFanAuto, By: &by},
+		{Verb: VerbPower, Action: &action, DelayS: &delay, By: &by, Approval: ap},
+		{Verb: VerbApplyUpdate, By: &by, Approval: ap},
+		{Verb: VerbChallenge, For: &forVerb, Action: &action, DelayS: &delay, By: &by},
+		{Verb: VerbChallenge, For: &[]string{api.ApproveTrustSet}[0], TrustHash: &hash, By: &by},
+		{Verb: VerbTrustInit, Trust: trust, By: &by},
+	} {
+		b, err := EncodeRequest(r)
+		if err != nil {
+			t.Fatalf("%s: %v", r.Verb, err)
+		}
+		decode := DecodeRequest
+		if FrameVersion(r) == Version3 {
+			decode = DecodeRequestV3
+		}
+		if _, err := decode(b); err != nil {
+			t.Errorf("the agent's own frame %s: %v", b, err)
+		}
 	}
 }
 
