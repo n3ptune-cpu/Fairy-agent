@@ -330,7 +330,15 @@ func (r *RememberedPower) ScheduleBy(action string, delay time.Duration, who str
 func (r *RememberedPower) schedule(action string, delay time.Duration, message, who string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.current() // forget a record whose time has passed, with its file
+	// One action at a time, here too, and not only in Power, which asks before it sends: on Windows Power's
+	// look at what is pending is the helper's status of a few seconds ago, and for some seconds after the PC's
+	// clock was set forward it shows nothing (audit 6, r4-a1-02). A sleep taken then replaced the record of a
+	// shutdown that Windows went on counting down: the shutdown was never shown again, and Cancel stopped the
+	// sleep's timer and nothing else. (A second shutdown Windows refuses itself; a sleep it knows nothing of.)
+	// current also forgets a record whose time has passed, with its file.
+	if rec := r.current(); rec != nil {
+		return fmt.Errorf("a %s is already pending; cancel it first", rec.Action)
+	}
 	if err := r.exec.Schedule(action, delay, message); err != nil {
 		return err
 	}
