@@ -8,10 +8,12 @@ import (
 	"bytes"
 	"encoding/base64"
 	"errors"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/n3ptune-cpu/Fairy-agent/pkg/agent/api"
 	"github.com/n3ptune-cpu/Fairy-agent/pkg/approval"
@@ -548,5 +550,53 @@ func TestBrokenTrustFileGetsNoMachineID(t *testing.T) {
 		if _, err := r.files.AddMachineID(nil); err == nil {
 			t.Errorf("%s: AddMachineID took it", name)
 		}
+	}
+}
+
+// TestFailingMachineIDIsLoggedOnce (second review of 8119ea0..ae9384f, N3): an id that cannot be added is
+// tried again at every look, and each try has a temporary file with another made-up name. The system's error
+// carries that name, so the reason was another text at every look, and the gate, which writes a state into the
+// log once for as long as its reason stays the same, wrote "approval: broken" every five seconds while a panel
+// asked. The name is out of the text: one line, and a reason that reads the same every time.
+func TestFailingMachineIDIsLoggedOnce(t *testing.T) {
+	r := newRig(t, false)
+	dir, err := os.MkdirTemp("", "tn") // a short path: the whole reason fits into the answer's 300 characters
+	must(t, err)
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	r.files.Path = filepath.Join(dir, approval.TrustFileName)
+	must(t, os.WriteFile(r.files.Path, legacyFile(t), 0o600))
+	files := r.files
+	var names []string
+	files.Keep = func(tmp string, _ os.FileInfo) error {
+		names = append(names, filepath.Base(tmp))
+		return &os.PathError{Op: "lchown", Path: tmp, Err: errors.New("invalid argument")} // as the system says it
+	}
+	g := approval.NewGate(approval.Options{Files: files, EnforcedBy: api.EnforcedByAgent, Now: r.Now, Log: slog.New(slog.NewTextHandler(r.log, nil))})
+	var first string
+	for look := 0; look < 5; look++ {
+		st := g.Status()
+		if st.State != api.ApprovalBroken || !strings.Contains(st.Error, "adding one failed: lchown ") || !strings.Contains(st.Error, "/.approval-trust-*.tmp: invalid argument") {
+			t.Fatalf("look %d: %+v", look+1, st)
+		}
+		if look == 0 {
+			first = st.Error
+		} else if st.Error != first {
+			t.Errorf("look %d: the reason changed:\n%s\n%s", look+1, first, st.Error)
+		}
+		r.wait(6 * time.Second)
+	}
+	if len(names) != 5 || names[0] == names[1] || names[1] == names[2] {
+		t.Fatalf("the test did not see five tries with names of their own: %v", names)
+	}
+	for _, n := range names {
+		if strings.Contains(first, n) || strings.Contains(r.log.String(), n) {
+			t.Errorf("the name of a temporary file (%s) is in the reason or in the log", n)
+		}
+	}
+	if n := strings.Count(r.log.String(), `msg="approval: broken"`); n != 1 {
+		t.Errorf("%d lines \"approval: broken\" for five looks at the same failure, want 1:\n%s", n, r.log.String())
+	}
+	if left := tempFiles(t, filepath.Dir(r.files.Path)); len(left) != 0 {
+		t.Errorf("files left behind: %v", left)
 	}
 }

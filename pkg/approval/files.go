@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 
 	"github.com/n3ptune-cpu/Fairy-agent/pkg/agent/api"
 )
@@ -167,9 +168,9 @@ func (f Files) AddMachineID(rnd io.Reader) (string, error) {
 			return "", err
 		}
 	}
-	tmp, err := os.CreateTemp(dir, ".approval-trust-*.tmp")
+	tmp, err := os.CreateTemp(dir, trustTempPattern)
 	if err != nil {
-		return "", err
+		return "", sameEveryTime(err)
 	}
 	renamed := false
 	defer func() { // whatever goes wrong from here on, the temporary file does not stay
@@ -198,11 +199,31 @@ func (f Files) AddMachineID(rnd io.Reader) (string, error) {
 		err = os.Rename(tmp.Name(), f.Path) // takes the place of the old file under its name, in one step
 	}
 	if err != nil {
-		return "", err
+		return "", sameEveryTime(err)
 	}
 	renamed = true
 	syncDir(dir)
 	return id, nil
+}
+
+// trustTempPattern is the name of a temporary file next to the trust file; "*" is a number made up for each.
+const trustTempPattern = ".approval-trust-*.tmp"
+
+var trustTempName = regexp.MustCompile(`\.approval-trust-[0-9]+\.tmp`)
+
+// sameEveryTime is err with the made-up number of a temporary file's name taken out of its text. An attempt
+// that keeps failing (AddMachineID is tried again at every look, every five seconds while a panel asks) fails
+// with another name each time; with the name in the text, a failure that never changes looked like a new one
+// at every look, and the gate, which logs a state once for as long as its reason stays the same, logged it
+// every time (second review of 8119ea0..ae9384f, N3).
+func sameEveryTime(err error) error {
+	if err == nil {
+		return nil
+	}
+	if text := err.Error(); trustTempName.MatchString(text) {
+		return errors.New(trustTempName.ReplaceAllString(text, trustTempPattern))
+	}
+	return err
 }
 
 // write puts t into a temporary file in the trust file's folder and returns its name.
@@ -217,7 +238,7 @@ func (f Files) write(t *Trust) (string, error) {
 			return "", fmt.Errorf("the folder of the trust file is not safe: %w", err)
 		}
 	}
-	tmp, err := os.CreateTemp(dir, ".approval-trust-*.tmp")
+	tmp, err := os.CreateTemp(dir, trustTempPattern)
 	if err != nil {
 		return "", err
 	}
