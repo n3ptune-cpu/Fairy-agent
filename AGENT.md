@@ -852,16 +852,23 @@ to cancel: systemctl poweroff was already run`, not "cancelled".
 * The record ends when the action's time has passed (plus one minute), on Cancel, and when Windows has been
   started again since.
 * While one action is pending, a second one is refused with HTTP 409 (`a shutdown is already pending; cancel it
-  first`).
+  first`). In the seconds in which the agent itself does not see the pending action (right after the PC's
+  clock was set forward), the helper refuses the second one instead, and that arrives as HTTP 500 with the
+  same words.
 * While the helper is stopped, Cancel answers 503 `helper_stopped` instead of "ok": the agent cannot tell
-  whether a shutdown is pending. Start the helper, then cancel. This is the one way a request with the
+  whether a shutdown is pending. Start the helper, then cancel. The same 503 answers while the helper runs
+  and did not answer the agent's last status question (it shows as "helper: error" then). This is the one way a request with the
   control token alone can keep a cancel out: `POST /helper/stop` needs no passkey approval. Windows goes on
   counting the shutdown down meanwhile; `shutdown /a` typed on the PC cancels it in any case.
 * When the helper was handed a shutdown, reboot, sleep or cancel and did not answer in its time (5 s, counted
-  from the moment the request is written to it), the agent answers 504, not "could not schedule": the helper
-  may have carried the request out all the same. The agent then asks the helper again for what is pending,
-  and Cancel reaches it. The same 504 answers a fan change, an approval question and "Turn on" when the
-  helper has the request and is silent.
+  from the moment the agent has its connection to the helper), the agent answers 504, not "could not
+  schedule": the helper may have carried the request out all the same, or may still do so. The agent then
+  asks the helper again for what is pending, and shows it as soon as the helper reports it. For one minute
+  after such a shutdown, reboot or sleep every Cancel is passed on to the helper. As long as the helper shows
+  nothing pending in that minute, Cancel answers 409 (`... may still be scheduled: send the cancel again`)
+  instead of "ok", because the request may still be on its way inside the helper; once the helper shows the
+  action, Cancel aborts it as usual. The same 504 answers a fan change (there the time is 25 s), an approval
+  question and "Turn on" when the helper has the request and is silent.
 * Two limits. A Fairy shutdown that you abort by hand (`shutdown /a`) stays shown in the panel until its time
   or until you press Cancel, because Windows offers no way to ask. A pending **sleep** is a timer inside the
   helper: it is lost when the helper restarts.

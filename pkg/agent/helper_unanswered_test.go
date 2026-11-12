@@ -63,6 +63,16 @@ type heldPower struct {
 	*agent.RememberedPower
 	entered chan struct{} // one value per Cancel that came in
 	release chan struct{} // nil: Cancel is not held
+	before  chan struct{} // nil: a request goes to the power part at once; else it waits here first
+}
+
+// ScheduleBy holds a request up BEFORE the power part takes it (in the helper: its request budget, the
+// approval's check). The helper's status says "nothing pending" meanwhile, and that is true.
+func (h *heldPower) ScheduleBy(action string, delay time.Duration, who string) error {
+	if h.before != nil {
+		<-h.before
+	}
+	return h.RememberedPower.ScheduleBy(action, delay, who)
 }
 
 func (h *heldPower) Cancel() error {
@@ -240,6 +250,40 @@ func TestAShutdownTheHelperDidNotAnswerIsNotCalledFailed(t *testing.T) {
 	}
 	if p := r.pending(t); p != nil {
 		t.Fatalf("pending after the cancel: %v", p)
+	}
+}
+
+// Review of fix7, RF7-02. The helper holds the request up before its power part has it, and answers nothing in
+// time: 504. A cancel then finds nothing at the helper. It is not answered "ok, nothing pending": the helper
+// schedules the shutdown a moment later. The cancel sent again reaches Windows, although the agent's copy of
+// the helper's status is still the one that says nothing (no status loop runs in this rig).
+func TestACancelWhileTheHelperStillHoldsTheRequestIsNotOK(t *testing.T) {
+	r := newUnansweredRig(t, 300*time.Millisecond, false)
+	r.firstStatus(t)
+	r.part.before = make(chan struct{})
+	if st, body := do(t, r.base, "POST", "/power", ctlTok, shutdownIn60); st != 504 {
+		t.Fatalf("POST /power: %d %v", st, body)
+	}
+	st, body := do(t, r.base, "POST", "/power", ctlTok, map[string]any{"action": "cancel"})
+	text, _ := body["error"].(string)
+	if st != 409 || !strings.Contains(text, "may still be scheduled") || !strings.Contains(text, "send the cancel again") {
+		t.Fatalf("a cancel while the helper holds the request: %d %v; want 409 and the reason", st, body)
+	}
+	if n, aborts := r.windows.asked(); n != 0 || aborts != 0 {
+		t.Fatalf("Windows was asked for %d shutdown(s) and %d abort(s) so far", n, aborts)
+	}
+	close(r.part.before) // the helper's power part takes the request now
+	r.waitSchedules(t, 1)
+	st, body = do(t, r.base, "POST", "/power", ctlTok, map[string]any{"action": "cancel"})
+	if _, aborts := r.windows.asked(); st != 200 || body["action"] != "cancel" || aborts != 1 {
+		t.Fatalf("the cancel sent again: %d %v, Windows was asked to abort %d time(s); want 200 and 1", st, body, aborts)
+	}
+	if p := r.pending(t); p != nil {
+		t.Fatalf("pending after the cancel: %v", p)
+	}
+	st, body = do(t, r.base, "POST", "/power", ctlTok, map[string]any{"action": "cancel"})
+	if _, aborts := r.windows.asked(); st != 200 || aborts != 1 {
+		t.Fatalf("a cancel with nothing pending, the action seen and cancelled: %d %v, %d abort(s)", st, body, aborts)
 	}
 }
 

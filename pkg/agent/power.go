@@ -73,6 +73,13 @@ type Power struct {
 	// asked to stop it since (or the asking failed). The record above is what this process believes; the
 	// countdown is the exec's. While this is set, Cancel asks the exec also when the record shows nothing.
 	unstopped bool
+	// maybe is steady's reading when a shutdown, reboot or sleep (maybeWhat) got no answer from the exec (zero:
+	// none, or settled): the helper has the request and may still take it. For unansweredFor after that, or
+	// until the exec itself shows a pending action, a cancel is passed on whatever the record says, and one
+	// that found nothing is not answered "ok" (review of fix7, RF7-02). A later request that was accepted does
+	// not end it: the earlier one can still be taken once the later one is cancelled.
+	maybe     time.Time
+	maybeWhat string
 	// dropped is the time (Pending.At) of the action this process cancelled last: what the exec still reports
 	// for a moment afterwards (the helper's status is cached for a few seconds) is not shown again. Compared
 	// within two seconds.
@@ -94,6 +101,24 @@ func (p *Power) canSleep() (bool, string) {
 		p.sleep.until = now.Add(10 * time.Minute)
 	}
 	return p.sleep.ok, p.sleep.why
+}
+
+// unansweredFor is how long after a request that got no answer the exec may still take it, as far as Power
+// goes: see Power.maybe. What can hold a request up inside the helper before its power part has it (its request
+// budget, the approval's check, a disk that stalls) takes milliseconds as a rule; a helper that does not answer
+// at all is "not running" to the agent, and a cancel then says so (503).
+const unansweredFor = time.Minute
+
+// maybePending reports whether a request that got no answer may still be taken by the exec. Caller holds p.mu.
+func (p *Power) maybePending() bool {
+	if p.maybe.IsZero() {
+		return false
+	}
+	if p.steady().Sub(p.maybe) > unansweredFor {
+		p.maybe = time.Time{}
+		return false
+	}
+	return true
 }
 
 // defaultPowerDelayS is the delay of a POST /power without delay_s. It is also the delay an approval must have
@@ -159,6 +184,7 @@ func (p *Power) current() *Pending {
 			// helper said is a few seconds old, and its time is compared with the time of day here (a clock set
 			// forward hides it until the helper's next status, which gives it its new time).
 			p.unstopped = true
+			p.maybe = time.Time{} // the exec has an action: a request that got no answer has arrived
 			return &c
 		}
 	}
@@ -217,6 +243,14 @@ func (p *Power) Handle(req PowerRequest) (int, map[string]any) {
 	case "cancel":
 		// Only an action of Fairy's own is cancelled. With none pending the operating system is not asked to
 		// abort anything: a shutdown Fairy did not start is not the panel's to cancel.
+		maybe := p.maybePending()
+		if maybe {
+			// A request got no answer a moment ago. What counts for this cancel is the helper's word of now, not
+			// its status of some seconds ago, in which the request may not be yet.
+			if a, ok := p.exec.(interface{ AskAgain() }); ok {
+				a.AskAgain()
+			}
+		}
 		c := p.current()
 		if c == nil {
 			// the helper is the one that remembers; while it is stopped nobody can tell (or cancel)
@@ -227,7 +261,7 @@ func (p *Power) Handle(req PowerRequest) (int, map[string]any) {
 			// Nothing on record. What this process scheduled itself and never asked the exec to stop is stopped
 			// all the same (the exec's Cancel stops what the exec scheduled and nothing else; with nothing left
 			// it does nothing): "ok" without asking, when the record was wrong, left the countdown running.
-			if !p.unstopped {
+			if !p.unstopped && !maybe {
 				return 200, map[string]any{"action": "cancel", "pending": nil}
 			}
 		}
@@ -253,6 +287,16 @@ func (p *Power) Handle(req PowerRequest) (int, map[string]any) {
 		} else if err != nil {
 			slog.Error("power: cancel failed", "error", err.Error(), "requested_by", who)
 			return 500, map[string]any{"error": "could not cancel: " + safeErr(err)}
+		}
+		if c == nil && p.maybePending() {
+			// The helper took the cancel and had nothing to stop, or stopped what had just arrived: its answer
+			// does not say which. The request that got no answer may still be on its way inside the helper, and
+			// then it is scheduled after this cancel. "ok, nothing pending" for that was wrong (a run wrote "it is
+			// ON" and the machine went off): 409, the agent's own "not now", and the flag stays, so the cancel
+			// sent again is passed on again.
+			slog.Warn("power: a cancel found nothing to stop; a request that got no answer may still be scheduled", "action", p.maybeWhat, "requested_by", who)
+			return 409, map[string]any{"error": "nothing was pending when the cancel reached the helper, but the " + p.maybeWhat +
+				" that got no answer a moment ago may still be scheduled: send the cancel again (for a minute after such a request the agent cannot say that nothing is pending)"}
 		}
 		p.unstopped = false
 		if c != nil {
@@ -307,10 +351,13 @@ func (p *Power) Handle(req PowerRequest) (int, map[string]any) {
 		// The helper has the request and did not answer in its time: the countdown may be running (audit 6,
 		// r4-a1-01: "could not schedule" for a shutdown that Windows was counting down). Nothing is put on
 		// record here, because nobody knows; what the helper's next status says is shown (its old one is not
-		// used again: HelperClient.call). And a cancel asks the helper from now on, also while nothing is shown.
+		// used again: HelperClient.call). And a cancel asks the helper from now on, also while nothing is shown;
+		// for a minute, or until the helper shows the action, one that finds nothing is not "ok" (maybe). What
+		// the helper reports from now on is this request, not the echo of an action cancelled before (dropped).
 		p.unstopped = true
+		p.maybe, p.maybeWhat, p.dropped = p.steady(), req.Action, 0
 		slog.Error("power: the request got no answer; it may be scheduled all the same", "action", req.Action, "error", err.Error(), "requested_by", who)
-		return helperUnanswered("the "+req.Action, "it may be scheduled all the same. Look at what the machine shows as pending; a cancel reaches it")
+		return helperUnanswered("the "+req.Action, "it may be scheduled all the same, now or in a moment. Look at what the machine shows as pending; every cancel of the next minute is passed on to the helper")
 	}
 	if err != nil {
 		slog.Error("power: could not schedule", "action", req.Action, "error", err.Error(), "requested_by", who)

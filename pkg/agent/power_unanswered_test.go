@@ -30,7 +30,7 @@ func (s *silentExec) CanSleep() (bool, string) { return true, "" }
 var errPipe = errors.New("read pipe: i/o timeout")
 
 // A shutdown the helper did not answer: 504 with words that say it may be scheduled, nothing made up on
-// record, and from then on a cancel reaches the power part although nothing is shown.
+// record, and from then on every cancel reaches the power part although nothing is shown.
 func TestPowerSaysNoAnswerAndACancelStillReachesThePowerPart(t *testing.T) {
 	ex := &silentExec{scheduleErr: &HelperUnanswered{Err: errPipe}}
 	p := NewPower(ex, 10)
@@ -47,11 +47,13 @@ func TestPowerSaysNoAnswerAndACancelStillReachesThePowerPart(t *testing.T) {
 	if p.State()["pending"] != nil {
 		t.Fatal("a countdown nobody knows of is on record")
 	}
-	if st, body := p.Handle(PowerRequest{Action: "cancel"}); st != 200 || ex.cancels != 1 {
-		t.Fatalf("cancel with nothing shown: %d %v, the power part was asked %d time(s); want 200 and 1", st, body, ex.cancels)
-	}
-	if st, _ := p.Handle(PowerRequest{Action: "cancel"}); st != 200 || ex.cancels != 1 {
-		t.Fatalf("a second cancel asked the power part again (%d times in all)", ex.cancels)
+	// Every cancel of the next minute reaches the power part. One that found nothing there is not "ok": the
+	// request may still be on its way (review of fix7, RF7-02; this test held "200" for the first of them and
+	// "nobody is asked" for the second, which is what was wrong). The minute itself: power_maybe_test.go.
+	for i := 1; i <= 2; i++ {
+		if st, body := p.Handle(PowerRequest{Action: "cancel"}); st != 409 || ex.cancels != i {
+			t.Fatalf("cancel %d with nothing shown: %d %v, the power part was asked %d time(s); want 409 and %d", i, st, body, ex.cancels, i)
+		}
 	}
 	// a plain failure is still "could not schedule", 500, and asks nobody afterwards
 	ex2 := &silentExec{scheduleErr: errors.New("access denied")}

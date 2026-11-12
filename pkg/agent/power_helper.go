@@ -36,3 +36,7 @@ func (p *HelperPower) PendingKnown() bool {
 	defer p.c.stMu.Unlock()
 	return p.c.hasLast
 }
+
+// AskAgain throws the agent's copy of the helper's status away: the next look at what is pending asks the
+// helper itself. Power uses it for a cancel in the minute after a request that got no answer.
+func (p *HelperPower) AskAgain() { p.c.invalidate() }
