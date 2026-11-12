@@ -742,10 +742,41 @@ this machine's challenge names another machine id than this machine's"`). The Li
 with a made-up Pocket ID (`TestApprovalForOneMachineIsRefusedByAnother`,
 `TestWindowsHelperChecksWithItsOwnMachineID`, the second through the helper's code on an in-memory pipe).
 
+### I. After the second round of the fifth audit **[NEW 5]** (none of this has run on Windows)
+
+Three changes of 2026-11-12 that a VM can show. They need the trust of section B to be set and both services
+running. `Test-FairyApproval-3.ps1` does them as its steps I1 to I3.
+
+* I1 **[KEY]** **A made-up approval for an update is refused before anything is downloaded.** The agent now
+  looks at an update's approval itself (with its own read-only look at `helper\approval-trust.json`) before
+  it downloads; the helper still checks it afterwards. Needs `self_update.enabled: true`.
+  `Set-Content -Path "C:\fairy-selfbuilt\update-junk.json" -Value '{"approval":{"token":"x","entries":[]}}' -Encoding ASCII`
+  `curl.exe -s -w " [%{http_code}]" -H "Authorization: Bearer $ctl" --data-binary "@C:\fairy-selfbuilt\update-junk.json" "$base/update"`
+  -> `{"code":"approval_refused","error":"approval refused (entries): the list of entries is not well-formed, ..."} [403]`
+  at once, and `/metrics` (step 16) does NOT show `"self_update":{"state":"downloading"...`. Before this
+  change: `{"state":"downloading",...} [202]`, the release was fetched, and a minute later `self_update`
+  said `failed` with `starting the installer: helper: approval refused (entries)`.
+  If it still answers `[202]`: the agent could not read the helper's trust file itself (the open question of
+  step N2) and went on as before; nothing is installed (the helper refuses). Please send the answer, and
+  `"agent_error"` of the `approval` block in `/metrics`.
+* I2 **A request in which a member is there twice is refused.**
+  `Set-Content -Path "C:\fairy-selfbuilt\twice.json" -Value '{"action":"shutdown","delay_s":600,"action":"cancel"}' -Encoding ASCII`
+  `curl.exe -s -w " [%{http_code}]" -H "Authorization: Bearer $ctl" --data-binary "@C:\fairy-selfbuilt\twice.json" "$base/power"`
+  -> `{"error":"invalid JSON body: a name is used twice in one object"} [400]`. Before this change: `[200]`
+  with `"action":"cancel"` (the last of the two counted). The body is made so that an agent from before the
+  change cancels, and schedules nothing.
+* I3 **[KEY]** **Wrong tokens do not keep the right token out.** 21 requests with a wrong token, then the
+  right ones (one line; it prints the 21 answers):
+  `1..21 | ForEach-Object { curl.exe -s -o NUL -w "%{http_code} " -H "Authorization: Bearer wrong-wrong-wrong-wrong-wrong" "$base/metrics" }`
+  -> `401` twenty times (or fewer, if something else failed in the same minute), then `429`.
+  `curl.exe -s -o NUL -w "[%{http_code}]" -H "Authorization: Bearer $read" "$base/metrics"` -> **`[200]`**
+  (before this change: `[429]`, for a minute). Step 14's cancel -> **`[200]`**. The wrong token once more
+  -> `{"error":"too many failed requests"} [429]`. (`$read` is the read token of step 11.)
+
 ### What to send back
 
 The output of steps 5, 8, 9, 13, 15, 20, 26, 26b, 27, 28, N1, N2 (and 31, 32b if done), of G1.2, G1.4, G1.5,
-G1.7, G1.8, G4, G5 and G6, of H1.1 to H1.4, H2 and H4, and:
+G1.7, G1.8, G4, G5 and G6, of H1.1 to H1.4, H2 and H4, of I1 and I3, and:
 `Get-Content "C:\ProgramData\fairy-agent\helper\helper.log" -Tail 60`. If the helper did not start after
 step 3: Event Viewer > Windows Logs > Application, source `fairy-agent-helper`.
 
