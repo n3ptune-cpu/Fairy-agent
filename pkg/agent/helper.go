@@ -609,6 +609,12 @@ type HelperApproval interface {
 	// answer now (stopped, starting, its pipe down) or is a helper from before approvals: then nothing is known,
 	// and what it said earlier does not count.
 	ApprovalNow(ctx context.Context) (st api.ApprovalStatus, known bool)
+	// Checks reports what this agent knows of the approval check of the helper it reaches, from the helper's
+	// latest status answer. seen is false while no helper has answered since this agent started. checks is true
+	// when the helper that answered last speaks pipe protocol 2 and reports an approval state; it is false for a
+	// helper from before approvals (an update that has not restarted the helper yet), which carries out fan and
+	// power requests without looking at any approval.
+	Checks(ctx context.Context) (seen, checks bool)
 	// Challenge and TrustInit pass the request to the helper and return the HTTP status and body.
 	Challenge(ctx context.Context, req api.ApprovalRequest) (int, any)
 	TrustInit(ctx context.Context, in api.TrustInit) (int, any)
@@ -644,6 +650,15 @@ func (c *HelperClient) ApprovalNow(ctx context.Context) (api.ApprovalStatus, boo
 		return api.ApprovalStatus{}, false
 	}
 	return *c.last.Approval, true
+}
+
+// Checks: see HelperApproval. The helper that answered last counts, also while it is not running: what starts
+// again is seen within one status refresh.
+func (c *HelperClient) Checks(ctx context.Context) (seen, checks bool) {
+	c.Status(ctx)
+	c.stMu.Lock()
+	defer c.stMu.Unlock()
+	return c.hasLast, c.hasLast && c.last.Proto >= proto.Version2 && c.last.Approval != nil
 }
 
 // approvalCall sends a protocol version 2 request and turns the helper's answer into an HTTP answer.

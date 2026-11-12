@@ -1039,8 +1039,11 @@ fairy-agent helper-trust set --issuer https://id.example.org --client-id <client
   thumbprint, and asks before writing (`--yes` does not ask). With `--fetch-keys`, or when there is no key yet,
   it reads the issuer's keys itself over https (`<issuer>/.well-known/openid-configuration`, then the
   `jwks_uri` named there, which must be on the same host; redirects are not followed). `--jwks FILE` takes
-  them from a file instead. Compare the thumbprint with Pocket ID's before you answer yes. A change is in
-  effect within 5 seconds; nothing has to be restarted.
+  them from a file instead. Compare the thumbprint with Pocket ID's before you answer yes. Whoever checks
+  (the helper, the agent) reads the file again every 5 seconds, so a change is in effect within 5 seconds and
+  nothing has to be restarted, with one exception that `set` tells you about in its last lines: a helper from
+  before passkey approvals that is still running reads no trust file at all (`NOT IN EFFECT IN THE HELPER
+  YET`; see "Mixed versions" below).
 
   **`set` on the machine proves nothing.** Unlike the panel's first-time set it needs no approval (you are at
   the machine), so it writes what it is given, and says so (`NOT PROVEN`). If the issuer, the client id or a
@@ -1132,7 +1135,9 @@ the user (`sub`), the key id and the first 8 characters of the challenge. Never 
 **What the panel sees.** `GET /metrics` has `"approval": {"state": "off" | "required" | "broken" | "unknown",
 "enforced_by": "helper" | "agent", "proto": 1, "issuer": ..., "client_id": ..., "keys": [{"kid", "alg",
 "thumbprint"}], "users": <how many>, "fan_window_s": ..., "boot_shutdown_s": ..., "error": ...}`. No user ids
-and no keys, only how many users and each key's thumbprint. `unknown`: the Windows helper is not answering.
+and no keys, only how many users and each key's thumbprint. `unknown`: the Windows helper is not answering, or
+the helper that is running is from before passkey approvals while this machine has a trust file ("Mixed
+versions" below); either way nothing that would go through the helper and need an approval runs.
 `"agent_checks": [...]` (Windows): the requests the agent carries out and checks itself; `"agent_error"`: why
 it cannot (those are then refused; only while the helper answers and says there is no trust file do they run
 as they do without trust). No `approval` block: an agent from before this, or Windows without the
@@ -1163,8 +1168,29 @@ is the one the challenge was issued for, approved once, by an allowed user, with
 which machine and action you started before you touch the passkey for an unexpected Pocket ID page.
 
 **Mixed versions.** An agent or helper from before this ignores an approval and checks nothing, as before. A
-new helper with trust set refuses the four kinds of request from an older agent (nothing runs unapproved). An
-old helper behind a new agent: no `approval` block, the two routes answer `409 helper_too_old`.
+new helper with trust set refuses the four kinds of request from an older agent (nothing runs unapproved).
+
+**An old helper behind a new agent** (Windows: the helper that is *running* is still the program from before
+passkey approvals, because an update did not restart it; `fairy-agent helper-status` then shows no
+`pipe protocol:   2`). That helper reads no trust file and would carry out whatever it is sent. So the agent
+looks at the trust file itself, at the moment a request arrives:
+
+* **No trust file:** nothing is checked and nothing asks for it, as before. No `approval` block; the two
+  approval routes answer `409 helper_too_old`; fan, power and update requests work as they always did.
+* **A trust file (or a broken one, or the agent cannot tell):** the agent refuses every fan, power and update
+  request that would go through that helper, with or without an approval: `503 approval_unavailable`, and the
+  text names the repair. Nothing reaches the old helper. `GET /metrics` says
+  `"approval": {"state": "unknown", "enforced_by": "helper", "error": "the running fairy-agent-helper is older
+  than this agent ..."}`: it does **not** say `required`, because nothing can enforce it at that moment.
+  `POST /power` with `cancel`, wake and the BMC power-on relay work as always; what the agent carries out
+  itself (`agent_checks`) it goes on checking itself. The two approval routes answer `409 helper_too_old`.
+  Repair: restart the helper (`Restart-Service fairy-agent-helper`, or from the panel: stop the helper, then
+  start it). What starts is the new program, and it checks.
+* `fairy-agent helper-trust set` typed in this state says so (`NOT IN EFFECT IN THE HELPER YET`) instead of
+  "in effect within 5 seconds".
+
+The same refusal holds while no helper has answered at all since the agent started and a trust file exists:
+the agent does not hand a request that needs an approval to a helper it has not seen yet.
 
 ## Updates (the panel's Update button)
 

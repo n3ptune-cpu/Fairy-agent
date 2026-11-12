@@ -457,7 +457,8 @@ text works for the steps below if that client does not exist yet), your user id 
 7. Set it. It fetches Pocket ID's signing key, shows it and asks; answer `yes`.
    `& "C:\Program Files\Fairy\fairy-agent.exe" helper-trust set --issuer https://id.example.org --client-id EXAMPLE-CLIENT-ID --user EXAMPLE-USER-ID`
    -> `to be written:`, the issuer, `pinned key:      kid ..., RS256, thumbprint ...`, `allowed users:   1`,
-   `signing keys:    fetched just now from https://...`, then a line that starts with `written.`
+   `signing keys:    fetched just now from https://...`, then a line that starts with `written.`,
+   **[NEW 3]** a line `In effect within 5 seconds: the running helper (pipe protocol 2) ...`,
    **[NEW]** and under it `NOT PROVEN: ...` (the command writes what it is given; only the panel's first-time
    set is checked against a real approval). **[NEW]** If a line `note: THE CLOCK: ...` shows: the VM's clock
    and Pocket ID's differ by more than 45 s; set the VM's clock (`w32tm /resync`) before going on.
@@ -599,9 +600,45 @@ N3. The shutdown shortly after boot takes no long delay. (No restart needed: a d
 33. Switch it off again.
     `& "C:\Program Files\Fairy\fairy-agent.exe" helper-trust set --boot-shutdown 0 --yes`
 
+### G. After the fifth audit **[NEW 3]** (none of this has run on Windows)
+
+These steps are for the code after the audit of 2026-11-12. They need the trust of section B to be set, unless
+a step says otherwise. Nothing here has run on Windows; each step says what a good answer looks like.
+
+**G1. The old helper is still running after an update (the audit's finding 01).** This is the one state in
+which requests ran with no check at all. It needs the released build 16 installed and running first (both
+services), so do it before section A, or after "Going back to build 16".
+
+* G1.1 Replace the program while the **helper keeps running** (Windows lets a running program be renamed):
+  `Stop-Service fairy-agent`
+  `Rename-Item "C:\Program Files\Fairy\fairy-agent.exe" fairy-agent.exe.b16`
+  `Copy-Item "C:\fairy-selfbuilt\fairy-agent-windows-amd64.exe" "C:\Program Files\Fairy\fairy-agent.exe"`
+  `Start-Service fairy-agent`
+  -> both services Running; the agent is the new program, the helper process is still build 16.
+* G1.2 `& "C:\Program Files\Fairy\fairy-agent.exe" helper-status`
+  -> **no** line `pipe protocol:   2`; instead `approval:        this helper is from before passkey approvals`.
+* G1.3 No trust file yet: a shutdown far away is accepted as before (step 13's request, `delay_s` 86400)
+  -> `[200]`; cancel it (step 14). `/metrics` (step 16) has **no** `approval` block.
+* G1.4 **[KEY]** Set the trust (step 7's command, with `--yes`).
+  -> `written.`, then **`NOT IN EFFECT IN THE HELPER YET: the fairy-agent-helper that is running is from before
+  passkey approvals`** and `Restart it now: Restart-Service fairy-agent-helper`. It must NOT say `In effect
+  within 5 seconds`.
+* G1.5 **[KEY]** At once (no waiting), step 13's shutdown without approval
+  -> **`[503]` with `approval_unavailable`**, text `the running fairy-agent-helper is older than this agent`.
+  Before this fix: `[200]`, the PC would have shut down. The same for `reboot`, `sleep`, `POST /fan/mode`,
+  `POST /fan/duty` (if fans are on) and `POST /update`: all `[503] approval_unavailable`.
+* G1.6 `POST /power` with `cancel` -> `[200]`. `POST /approval/challenge` -> `[409] helper_too_old`.
+* G1.7 **[KEY]** `/metrics` -> `"approval":{"state":"unknown","enforced_by":"helper","proto":1,"error":"the
+  running fairy-agent-helper is older than this agent ..."}`. Before this fix it said `"state":"required",
+  "enforced_by":"agent"`.
+* G1.8 `Restart-Service fairy-agent-helper`, then `helper-status` -> `pipe protocol:   2`,
+  `approval:        required (checked by the helper)`. Step 13's shutdown -> `[403] approval_required`.
+* G1.9 Tidy up: `Remove-Item "C:\Program Files\Fairy\fairy-agent.exe.b16"`.
+
 ### What to send back
 
-The output of steps 5, 8, 9, 13, 15, 20, 26, 26b, 27, 28, N1, N2 (and 31, 32b if done), and:
+The output of steps 5, 8, 9, 13, 15, 20, 26, 26b, 27, 28, N1, N2 (and 31, 32b if done), of G1.2, G1.4, G1.5,
+G1.7 and G1.8, and:
 `Get-Content "C:\ProgramData\fairy-agent\helper\helper.log" -Tail 60`. If the helper did not start after
 step 3: Event Viewer > Windows Logs > Application, source `fairy-agent-helper`.
 

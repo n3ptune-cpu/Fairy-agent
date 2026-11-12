@@ -63,10 +63,13 @@ Linux: run it as root. In the agent's own state folder it works as the agent's u
 
 // Seams for the tests.
 var (
-	trustFiles      = func(cfg *agent.Config) approval.Files { return agent.ApprovalAdminFiles(cfg) }
-	trustIsAdmin    = isAdmin
-	trustBecome     = trustBecomeOwner
-	trustNow        = time.Now
+	trustFiles   = func(cfg *agent.Config) approval.Files { return agent.ApprovalAdminFiles(cfg) }
+	trustIsAdmin = isAdmin
+	trustBecome  = trustBecomeOwner
+	trustNow     = time.Now
+	// trustHelper says what runs next to the trust file on this machine (trustEffect): the Windows helper's
+	// service state and, when it runs, its status answer. Other systems have no helper.
+	trustHelper     = helperForTrust
 	trustHTTPClient = func() *http.Client {
 		return &http.Client{Timeout: 15 * time.Second,
 			CheckRedirect: func(*http.Request, []*http.Request) error { return errors.New("the issuer answered with a redirect") }}
@@ -270,13 +273,56 @@ func helperTrustCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) in
 	if st, _, _, err := files.Load(); st != api.ApprovalRequired {
 		return fail(fmt.Errorf("the file was written but cannot be used, so everything that needs an approval is refused until this is repaired: %v", err))
 	}
-	fmt.Fprintln(stdout, "written. In effect within 5 seconds; from now on only this command changes it (the panel cannot).")
+	fmt.Fprintln(stdout, "written. From now on only this command changes it (the panel cannot).")
+	for _, l := range trustEffect(trustHelper()) {
+		fmt.Fprintln(stdout, l)
+	}
 	fmt.Fprintln(stdout, "NOT PROVEN: nothing has checked that Pocket ID issues approvals that fit these values (the panel's own")
 	fmt.Fprintln(stdout, "  first-time set is accepted only with such a proof; this command writes what it is given). A wrong issuer")
 	fmt.Fprintln(stdout, "  spelling, client id or user id, or a clock that is more than 60 s off, shows at the first approval as")
 	fmt.Fprintln(stdout, "  \"approval refused\". Approve one action from the panel now, while you are at this machine.")
 	fmt.Fprintln(stdout, "  To undo: fairy-agent helper-trust clear")
 	return 0
+}
+
+// Helper states for trustEffect, beyond the api.Helper... ones.
+const (
+	trustNoHelperHere = "none"     // not Windows: the agent is the one that checks
+	trustHelperAsked  = "answered" // the helper runs and answered a status request
+)
+
+// trustEffect says, after helper-trust set has written the trust file, when what it asks for is really in
+// effect, from what runs on this machine: state is trustNoHelperHere, api.HelperNotInstalled, another service
+// state of the helper, or trustHelperAsked with the helper's status answer in statusData; err is why the
+// helper could not be asked. The command prints what is true, not what is usual: a helper from before passkey
+// approvals that is still running (an update that did not restart it) reads no trust file at all.
+func trustEffect(state string, statusData []byte, err error) []string {
+	const reads = "reads the trust file again every 5 seconds"
+	switch {
+	case state == trustNoHelperHere:
+		return []string{"In effect within 5 seconds, if the fairy-agent service runs this version: it " + reads + ".",
+			"  An older fairy-agent (from before passkey approvals) ignores the file: `fairy-agent --version`, then restart the service."}
+	case err != nil:
+		return []string{"NOT KNOWN whether it is in effect: the helper could not be asked (" + clipText(err.Error(), 200) + ").",
+			"  Check: `fairy-agent helper-status` must show `pipe protocol:   2` and `approval:        required`."}
+	case state == api.HelperNotInstalled:
+		return []string{"In effect within 5 seconds for what the agent carries out itself: no fairy-agent-helper is installed, the agent " + reads + "."}
+	case state != trustHelperAsked:
+		return []string{"The fairy-agent-helper service is not running (" + state + "): it reads the trust file when it starts.",
+			"  Until then nothing that goes through the helper runs at all, and the agent refuses updates."}
+	}
+	var sd struct {
+		Proto    int                 `json:"proto"`
+		Approval *api.ApprovalStatus `json:"approval"`
+	}
+	if json.Unmarshal(statusData, &sd) != nil || sd.Proto < 2 || sd.Approval == nil {
+		return []string{"NOT IN EFFECT IN THE HELPER YET: the fairy-agent-helper that is running is from before passkey approvals",
+			"  (pipe protocol 1, the program from before the last update). It reads no trust file and checks nothing.",
+			"  Until it is restarted, the agent refuses the fan, power and update requests that go through it",
+			"  (503 approval_unavailable), and the panel's challenge is answered 409 helper_too_old.",
+			"  Restart it now: Restart-Service fairy-agent-helper   (then: fairy-agent helper-status)"}
+	}
+	return []string{"In effect within 5 seconds: the running helper (pipe protocol " + strconv.Itoa(sd.Proto) + ") " + reads + ", and so does the agent."}
 }
 
 // clockNote says so when this machine's clock (now) and the issuer's (the Date of its answer) are far enough

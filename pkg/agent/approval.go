@@ -120,12 +120,64 @@ func (a *Agent) ownGateMissing(ctx context.Context) bool {
 	return ok && st.State != api.ApprovalOff
 }
 
+// helperUnchecked says why a request that the helper carries out would run without the check this machine may
+// ask for ("": it would not, send it). The agent hands such requests to the helper and relies on the helper's
+// check, so it must know that the helper has one: a helper from before approvals (the program that is still
+// running after an update that did not restart it) carries out fan and power requests without looking at
+// anything. While the helper is not known to check, only "this machine has no trust file", seen by the agent
+// itself at this moment, lets the request through: then there is nothing to enforce, and the old helper works
+// as it always did. A trust file, a broken one, or a folder the agent cannot look into all refuse.
+func (a *Agent) helperUnchecked(ctx context.Context) string {
+	h, ok := a.helperApproval()
+	if !ok {
+		return "" // no helper installed: a request for it fails by itself
+	}
+	seen, checks := h.Checks(ctx)
+	if checks {
+		return ""
+	}
+	own := ""
+	if a.d.Approval != nil {
+		own = a.d.Approval.StatusNow().State
+	}
+	if own == api.ApprovalOff {
+		return ""
+	}
+	return uncheckedText(seen, own)
+}
+
+// uncheckedText is the sentence for a helper that cannot be relied on to check approvals: seen says whether it
+// answered at all since this agent started (then it is one from before approvals), own is what the agent itself
+// sees of the trust file ("": it has no check of its own).
+func uncheckedText(seen bool, own string) string {
+	why := "the fairy-agent-helper has not answered since this agent started, so it is not known whether it checks passkey approvals"
+	if seen {
+		why = "the running fairy-agent-helper is older than this agent: it knows no passkey approvals and carries out what it is sent unchecked"
+	}
+	switch own {
+	case api.ApprovalRequired:
+		why += ", and this machine has an approval trust file"
+	case api.ApprovalBroken:
+		why += ", and this machine's approval trust file cannot be used"
+	default:
+		why += ", and this agent cannot tell whether this machine has an approval trust file"
+	}
+	return why + " (restart the helper: POST " + api.PathHelperStop + ", then " + api.PathHelperStart + ", or Restart-Service fairy-agent-helper on the machine)"
+}
+
 // approved is the passkey check of a request that changes something; false: it answered already and nothing
-// may run. What the helper carries out, the helper checks when the request reaches it, so that passes here.
+// may run. What the helper carries out, the helper checks when the request reaches it, so that passes here,
+// unless the helper is not known to check at all while this machine may have a trust file (helperUnchecked):
+// then the request is refused here and never reaches the helper.
 // What this process carries out itself is checked here, by the agent's own gate, and the approval's challenge
 // is used up before the request is carried out.
 func (a *Agent) approved(w http.ResponseWriter, r *http.Request, req api.ApprovalRequest, ap *api.Approval) bool {
 	if a.helperRuns(req.Verb) {
+		if why := a.helperUnchecked(r.Context()); why != "" {
+			a.logOnce("unchecked-helper", "approval: request for the helper refused, the helper does not check approvals", "verb", req.Verb, "reason", why)
+			writeRefusal(w, &approval.Refusal{Status: 503, Code: api.CodeApprovalUnavailable, Msg: "not run: " + why})
+			return false
+		}
 		return true
 	}
 	var ref *approval.Refusal
@@ -189,12 +241,37 @@ func (a *Agent) approvalStatus(ctx context.Context) (api.ApprovalStatus, bool) {
 			return st, true
 		}
 	}
-	// Windows without a helper that knows approvals: nothing to report, unless a trust file is there all the
-	// same (the helper was removed after trust was set): then this agent checks what it carries out.
+	// Windows without a helper that knows approvals.
+	own := api.ApprovalStatus{}
 	if a.d.Approval != nil {
-		if st := a.d.Approval.Status(); st.State != api.ApprovalOff {
-			return st, true
+		own = a.d.Approval.Status()
+	}
+	if own.State == api.ApprovalOff {
+		return api.ApprovalStatus{}, false // and no trust file: nothing is checked and nothing asks for it, as before
+	}
+	if h, ok := a.helperApproval(); ok {
+		// A helper from before approvals is installed (an update that has not restarted it yet), and this
+		// machine has a trust file, or the agent cannot tell. Nobody enforces what the file asks for where
+		// the helper carries requests out, so those are refused (approved, updateApproval), and the block
+		// says exactly that: "unknown", not the agent's own "required".
+		seen, _ := h.Checks(ctx)
+		st := api.ApprovalStatus{State: api.ApprovalUnknown, EnforcedBy: api.EnforcedByHelper, Proto: api.ApprovalProto,
+			Error: uncheckedText(seen, own.State)}
+		if checks := a.ownChecks(); len(checks) > 0 {
+			st.AgentChecks = checks
+			switch {
+			case a.d.Approval == nil:
+				st.AgentError = "this agent has no check of its own; these requests are refused while approval is not off"
+			case own.State == api.ApprovalBroken:
+				st.AgentError = own.Error
+			}
 		}
+		return st, true
+	}
+	// No helper at all, and a trust file is there all the same (the helper was removed after trust was set):
+	// this agent checks what it carries out.
+	if a.d.Approval != nil {
+		return own, true
 	}
 	return api.ApprovalStatus{}, false
 }
@@ -339,6 +416,11 @@ func (a *Agent) helperCheckState(ctx context.Context) (string, string) {
 	}
 	if own == api.ApprovalOff {
 		return api.ApprovalOff, ""
+	}
+	if ok {
+		if seen, checks := h.Checks(ctx); seen && !checks { // it answers, and it is one from before approvals
+			return api.ApprovalUnknown, uncheckedText(true, own)
+		}
 	}
 	why := "the helper, which checks the approval of an update on this machine, is not answering"
 	switch own {

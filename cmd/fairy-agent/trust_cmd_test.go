@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"crypto/rsa"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -311,5 +312,55 @@ func TestHelperTrustSetWarnsAboutTheClock(t *testing.T) {
 		if got := clockNote(c.issuer, c.now) != ""; got != c.warn {
 			t.Errorf("issuer %d, machine %d: warned %v, want %v", c.issuer.Unix(), c.now.Unix(), got, c.warn)
 		}
+	}
+}
+
+// TestHelperTrustSetSaysWhatIsInEffect (audit 5, r1-a1-01): `helper-trust set` used to end with "In effect
+// within 5 seconds" whatever ran on the machine. With a helper from before passkey approvals still running (an
+// update that did not restart it) nothing was in effect at all. The command now says what is true for what
+// runs next to the file.
+func TestHelperTrustSetSaysWhatIsInEffect(t *testing.T) {
+	status := func(v map[string]any) []byte { b, _ := json.Marshal(v); return b }
+	newHelper := status(map[string]any{"version": "x", "proto": 2, "approval": map[string]any{"state": "off", "enforced_by": "helper", "proto": 1}})
+	oldHelper := status(map[string]any{"version": "0.6.0", "features": []string{"power"}, "sleep_ok": true})
+	for _, c := range []struct {
+		name, state string
+		data        []byte
+		err         error
+		want, never []string
+	}{
+		{"not Windows", trustNoHelperHere, nil, nil, []string{"In effect within 5 seconds, if the fairy-agent service runs this version", "An older fairy-agent"}, []string{"NOT IN EFFECT"}},
+		{"the new helper runs", trustHelperAsked, newHelper, nil, []string{"In effect within 5 seconds: the running helper (pipe protocol 2)"}, []string{"NOT"}},
+		{"the old helper still runs", trustHelperAsked, oldHelper, nil,
+			[]string{"NOT IN EFFECT IN THE HELPER YET", "from before passkey approvals", "503 approval_unavailable", "Restart-Service fairy-agent-helper"}, []string{"In effect within"}},
+		{"a helper that says proto 2 but reports no approval state", trustHelperAsked, status(map[string]any{"proto": 2}), nil, []string{"NOT IN EFFECT IN THE HELPER YET"}, []string{"In effect within"}},
+		{"an answer that is not JSON", trustHelperAsked, []byte("?"), nil, []string{"NOT IN EFFECT IN THE HELPER YET"}, []string{"In effect within"}},
+		{"the helper is stopped", api.HelperStopped, nil, nil, []string{"is not running (stopped)", "reads the trust file when it starts"}, []string{"In effect within"}},
+		{"no helper installed", api.HelperNotInstalled, nil, nil, []string{"In effect within 5 seconds for what the agent carries out itself"}, []string{"NOT"}},
+		{"the helper cannot be asked", "", nil, errors.New("the helper's pipe: access is denied"), []string{"NOT KNOWN whether it is in effect", "access is denied", "pipe protocol:   2"}, []string{"In effect within"}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			r := newTrustRig(t)
+			old := trustHelper
+			trustHelper = func() (string, []byte, error) { return c.state, c.data, c.err }
+			t.Cleanup(func() { trustHelper = old })
+			code, out, errs := r.run("", "set", "--yes", "--issuer", r.issuer.URL, "--client-id", "c", "--user", "u")
+			if code != 0 || !strings.Contains(out, "written. From now on only this command changes it") {
+				t.Fatalf("set: %d\n%s\n%s", code, out, errs)
+			}
+			for _, w := range c.want {
+				if !strings.Contains(out, w) {
+					t.Errorf("output lacks %q:\n%s", w, out)
+				}
+			}
+			for _, n := range c.never {
+				if strings.Contains(strings.SplitN(out, "NOT PROVEN", 2)[0], n) {
+					t.Errorf("output says %q:\n%s", n, out)
+				}
+			}
+			if r.trust() == nil {
+				t.Fatal("the trust file was not written")
+			}
+		})
 	}
 }

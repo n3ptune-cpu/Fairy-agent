@@ -20,6 +20,7 @@ import (
 	"golang.org/x/sys/windows/svc/mgr"
 
 	"github.com/n3ptune-cpu/Fairy-agent/pkg/agent"
+	"github.com/n3ptune-cpu/Fairy-agent/pkg/agent/api"
 	"github.com/n3ptune-cpu/Fairy-agent/pkg/agent/collect"
 	"github.com/n3ptune-cpu/Fairy-agent/pkg/helper"
 	"github.com/n3ptune-cpu/Fairy-agent/pkg/helper/proto"
@@ -293,6 +294,53 @@ func deleteHelper(m *mgr.Mgr) {
 	}
 	_ = eventlog.Remove(proto.ServiceName)
 	removeHelperFirewall()
+}
+
+// helperForTrust tells `fairy-agent helper-trust set` what runs next to the trust file it has just written
+// (trustEffect): the helper service's state and, when it runs, the data of its status answer, asked over the
+// pipe as helper-status does (administrators may open it). An error means that the helper could not be asked.
+func helperForTrust() (string, []byte, error) {
+	m, err := mgr.Connect()
+	if err != nil {
+		return "", nil, fmt.Errorf("the service manager: %w", err)
+	}
+	defer m.Disconnect()
+	h, err := m.OpenService(proto.ServiceName)
+	if err != nil {
+		return api.HelperNotInstalled, nil, nil
+	}
+	defer h.Close()
+	st, err := h.Query()
+	if err != nil {
+		return "", nil, fmt.Errorf("the helper service: %w", err)
+	}
+	if st.State != svc.Running {
+		return api.HelperStopped, nil, nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	conn, err := winpipe.Dial(ctx, proto.PipeName, func() (uint32, error) {
+		q, err := h.Query()
+		return q.ProcessId, err
+	}, nil)
+	if err != nil {
+		return "", nil, fmt.Errorf("the helper's pipe: %w", err)
+	}
+	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(10 * time.Second))
+	b, _ := proto.EncodeRequest(proto.Request{Verb: proto.VerbStatus})
+	if err := proto.WriteFrame(conn, b, proto.MaxRequest); err != nil {
+		return "", nil, fmt.Errorf("the helper's pipe: %w", err)
+	}
+	f, err := proto.ReadFrame(conn, proto.MaxResponse)
+	if err != nil {
+		return "", nil, fmt.Errorf("the helper's pipe: %w", err)
+	}
+	r, err := proto.DecodeResponse(f)
+	if err != nil || r.Status != 200 {
+		return "", nil, fmt.Errorf("the helper answered %d %s", r.Status, r.Error)
+	}
+	return trustHelperAsked, r.Data, nil
 }
 
 // helperStatus is `fairy-agent helper-status` (Administrator): asks the helper over its pipe (administrators

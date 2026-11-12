@@ -383,8 +383,9 @@ func oldHelper(t *testing.T, conn net.Conn) {
 }
 
 // TestNewAgentOldHelper: an agent of this version in front of a helper from before approvals (an update that
-// has not restarted the helper yet): no approval block, both routes say helper_too_old, nothing is sent to the
-// helper that it does not know.
+// has not restarted the helper yet), on a machine without a trust file: no approval block, both routes say
+// helper_too_old, nothing is sent to the helper that it does not know. (With a trust file:
+// TestOldRunningHelperWithATrustFile.)
 func TestNewAgentOldHelper(t *testing.T) {
 	cfg, err := agent.Parse([]byte("power_control: {enabled: true}\n"), filepath.Join(t.TempDir(), "config.yaml"))
 	if err != nil {
@@ -398,7 +399,10 @@ func TestNewAgentOldHelper(t *testing.T) {
 	}
 	client := agent.NewHelperClient(dial, scm, true)
 	client.Every = 10 * time.Millisecond
-	d := agent.Deps{Collector: agenttest.NewCollector(), Version: "test", Helper: client,
+	// as Run builds it on Windows: the agent's own gate reads the helper's trust file (there is none here)
+	gate := approval.NewGate(approval.Options{Files: approval.Files{Path: filepath.Join(t.TempDir(), approval.TrustFileName)},
+		EnforcedBy: api.EnforcedByAgent, ReadOnly: true})
+	d := agent.Deps{Collector: agenttest.NewCollector(), Version: "test", Helper: client, Approval: gate,
 		Power: agent.NewPower(client.Power(), cfg.PowerControl.MinDelayS), HelperSources: []string{api.FeaturePower}}
 	srv := httptest.NewServer(agent.New(cfg, agent.Tokens{Read: readTok, Control: ctlTok}, d).Handler())
 	t.Cleanup(srv.Close)

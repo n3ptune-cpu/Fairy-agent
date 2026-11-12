@@ -41,6 +41,9 @@ func setup(cfgPath string, _, _ bool) error { return setupSelfUpdate(cfgPath) }
 
 func removeHelper() error { return errors.New("the helper exists only on Windows") }
 
+// helperForTrust: there is no helper on this system; the agent checks approvals itself (trust_cmd.go).
+func helperForTrust() (string, []byte, error) { return trustNoHelperHere, nil, nil }
+
 func helperStatus() int {
 	fmt.Println("helper: Windows only (on Linux the agent needs no elevated helper)")
 	return 3
