@@ -4,9 +4,12 @@ package agent
 // panel's fix7r2, R2-04). The exec of these tests is a stand-in; nothing is shut down.
 
 import (
+	"errors"
 	"math"
 	"testing"
 	"time"
+
+	"github.com/n3ptune-cpu/Fairy-agent/pkg/agent/api"
 )
 
 type countingExec struct{ scheduled, cancelled int }
@@ -262,5 +265,120 @@ func TestASleepIsOverWhenTheMachineWokeUp(t *testing.T) {
 	m.pass(58*time.Second + time.Millisecond)
 	if m.shown() != nil {
 		t.Fatalf("still shown after the minute of grace: %+v", *m.shown())
+	}
+}
+
+// Cancel with nothing on record. What this process scheduled itself, and never asked the power part to stop,
+// is stopped all the same: the record is what this process believes, the timer is the power part's. (After
+// the change above no way is known in which the record is gone while the timer runs; the test takes the
+// record away by hand.) The answer is 200 as it always was, and the log says nothing.
+func TestCancelStopsWhatThisProcessScheduledAlsoWithNothingOnRecord(t *testing.T) {
+	m := newMachine()
+	if code, body := m.ask(t, "shutdown", 120); code != 200 {
+		t.Fatal(code, body)
+	}
+	m.pass(30 * time.Second)
+	m.p.pending = nil // the record is wrong, whatever made it so
+	if m.shown() != nil {
+		t.Fatal("still shown")
+	}
+	logs := captureLog(t)
+	code, body := m.p.Handle(PowerRequest{Action: "cancel", RequestedBy: "wake-update"})
+	if code != 200 || body["action"] != "cancel" || body["pending"] != nil || len(body) != 2 {
+		t.Fatalf("cancel: %d %v", code, body)
+	}
+	if m.ex.stopped != 1 {
+		t.Fatalf("cancel answered 200 and stopped the timer %d time(s): the machine goes off in 90 s", m.ex.stopped)
+	}
+	m.pass(3 * time.Hour)
+	if len(m.ex.fired) != 0 {
+		t.Fatalf("ran after the cancel: %v", m.ex.fired)
+	}
+	// asked once: the next cancel finds nothing of this process's and asks nobody
+	if code, _ := m.p.Handle(PowerRequest{Action: "cancel"}); code != 200 || m.ex.cancels != 1 {
+		t.Fatalf("a second cancel: %d, the power part was asked %d time(s) in all, want 1", code, m.ex.cancels)
+	}
+	if logs.String() != "" {
+		t.Fatalf("a cancel with nothing on record wrote to the log:\n%s", logs.String())
+	}
+}
+
+// A process that scheduled nothing asks the power part nothing, as before: there is nothing of its own to
+// stop, and a shutdown somebody else started is not the panel's to cancel. Nor is anything asked twice.
+func TestCancelWithNothingOfItsOwnAsksNobody(t *testing.T) {
+	m := newMachine()
+	logs := captureLog(t)
+	for i := 0; i < 3; i++ {
+		if code, body := m.p.Handle(PowerRequest{Action: "cancel"}); code != 200 || body["pending"] != nil {
+			t.Fatal(code, body)
+		}
+	}
+	if m.ex.cancels != 0 || logs.String() != "" {
+		t.Fatalf("the power part was asked %d time(s); log:\n%s", m.ex.cancels, logs.String())
+	}
+	// an action that was cancelled is stopped once, not once more by every later cancel
+	if code, body := m.ask(t, "reboot", 120); code != 200 {
+		t.Fatal(code, body)
+	}
+	for i := 0; i < 3; i++ {
+		if code, _ := m.p.Handle(PowerRequest{Action: "cancel"}); code != 200 {
+			t.Fatal(code)
+		}
+	}
+	if m.ex.cancels != 1 || m.ex.stopped != 1 {
+		t.Fatalf("three cancels of one action: asked %d time(s), stopped %d", m.ex.cancels, m.ex.stopped)
+	}
+	// an action that ran its time (here: a sleep the machine woke up from) leaves nothing to stop; the one
+	// cancel that still asks does nothing and says ok
+	if code, body := m.ask(t, "sleep", 60); code != 200 {
+		t.Fatal(code, body)
+	}
+	m.pass(62 * time.Second)
+	m.set(8 * time.Hour)
+	if code, body := m.p.Handle(PowerRequest{Action: "cancel"}); code != 200 || body["pending"] != nil {
+		t.Fatal(code, body)
+	}
+	if m.ex.cancels != 2 || m.ex.stopped != 1 || len(m.ex.fired) != 1 {
+		t.Fatalf("asked %d, stopped %d, ran %v", m.ex.cancels, m.ex.stopped, m.ex.fired)
+	}
+}
+
+// failingExec cannot cancel while err is set.
+type failingExec struct {
+	timerExec
+	err error
+}
+
+func (e *failingExec) Cancel() error {
+	if e.err != nil {
+		return e.err
+	}
+	return e.timerExec.Cancel()
+}
+
+// When the power part cannot be asked, a cancel with nothing on record does not answer "ok" either: nobody
+// knows then whether the action is stopped. It can be asked again.
+func TestCancelWithNothingOnRecordSaysSoWhenThePowerPartFails(t *testing.T) {
+	steady := time.Unix(5000, 0)
+	ex := &failingExec{timerExec: timerExec{steady: func() time.Time { return steady }}}
+	p := NewPower(ex, 0)
+	p.steady = ex.steady
+	d := 120
+	if code, body := p.Handle(PowerRequest{Action: "shutdown", DelayS: &d}); code != 200 {
+		t.Fatal(code, body)
+	}
+	p.pending = nil
+	captureLog(t)
+	ex.err = errors.New("access denied")
+	if code, body := p.Handle(PowerRequest{Action: "cancel"}); code != 500 || body["error"] != "could not cancel: access denied" {
+		t.Fatalf("cancel while the power part fails: %d %v", code, body)
+	}
+	ex.err = api.ErrHelperStopped
+	if code, body := p.Handle(PowerRequest{Action: "cancel"}); code != 503 || body["code"] != api.ReasonHelperStopped {
+		t.Fatalf("cancel while the helper is stopped: %d %v", code, body)
+	}
+	ex.err = nil
+	if code, _ := p.Handle(PowerRequest{Action: "cancel"}); code != 200 || ex.stopped != 1 {
+		t.Fatalf("cancel once the power part answers again: %d, stopped %d", code, ex.stopped)
 	}
 }

@@ -65,6 +65,10 @@ type Power struct {
 	// since is steady's reading when the pending action was scheduled, kept as it was read (no .UTC(), no unix
 	// seconds: either would drop the steady part). pending.At is the time of day it was scheduled for.
 	since time.Time
+	// unstopped: this process scheduled an action and the exec has not been asked to stop it since (or the
+	// asking failed). The record above is what this process believes; the countdown is the exec's. While this
+	// is set, Cancel asks the exec also when the record shows nothing.
+	unstopped bool
 	// dropped is the time (Pending.At) of the action this process cancelled last: what the exec still reports
 	// for a moment afterwards (the helper's status is cached for a few seconds) is not shown again. Compared
 	// within two seconds.
@@ -212,7 +216,12 @@ func (p *Power) Handle(req PowerRequest) (int, map[string]any) {
 				return 503, map[string]any{"error": "helper stopped: cannot tell whether a shutdown is pending, and cannot cancel one",
 					"code": api.ReasonHelperStopped}
 			}
-			return 200, map[string]any{"action": "cancel", "pending": nil}
+			// Nothing on record. What this process scheduled itself and never asked the exec to stop is stopped
+			// all the same (the exec's Cancel stops what the exec scheduled and nothing else; with nothing left
+			// it does nothing): "ok" without asking, when the record was wrong, left the countdown running.
+			if !p.unstopped {
+				return 200, map[string]any{"action": "cancel", "pending": nil}
+			}
 		}
 		if err := p.exec.Cancel(); errors.Is(err, api.ErrHelperStopped) {
 			return 503, map[string]any{"error": "helper stopped: cannot cancel", "code": api.ReasonHelperStopped}
@@ -220,8 +229,11 @@ func (p *Power) Handle(req PowerRequest) (int, map[string]any) {
 			slog.Error("power: cancel failed", "error", err.Error(), "requested_by", who)
 			return 500, map[string]any{"error": "could not cancel: " + safeErr(err)}
 		}
-		slog.Warn("power: cancelled", "action", c.Action, "requested_by", who)
-		p.pending, p.dropped = nil, c.At
+		p.unstopped = false
+		if c != nil {
+			slog.Warn("power: cancelled", "action", c.Action, "requested_by", who)
+			p.pending, p.dropped = nil, c.At
+		}
 		return 200, map[string]any{"action": "cancel", "pending": nil}
 	case "shutdown", "reboot":
 	case "sleep":
@@ -272,6 +284,7 @@ func (p *Power) Handle(req PowerRequest) (int, map[string]any) {
 	}
 	at := collect.Round(float64(p.now().UnixMilli())/1000+float64(delay), 3)
 	p.pending, p.dropped, p.since = &Pending{Action: req.Action, At: at, DelayS: delay, RequestedBy: who}, 0, p.steady()
+	p.unstopped = true
 	slog.Warn("power: scheduled", "action", req.Action, "delay_s", delay, "requested_by", who)
 	return 200, map[string]any{"action": req.Action, "pending": *p.pending}
 }
