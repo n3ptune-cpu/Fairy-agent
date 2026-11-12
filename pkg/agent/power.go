@@ -65,9 +65,9 @@ type Power struct {
 	// since is steady's reading when the pending action was scheduled, kept as it was read (no .UTC(), no unix
 	// seconds: either would drop the steady part). pending.At is the time of day it was scheduled for.
 	since time.Time
-	// unstopped: this process scheduled an action and the exec has not been asked to stop it since (or the
-	// asking failed). The record above is what this process believes; the countdown is the exec's. While this
-	// is set, Cancel asks the exec also when the record shows nothing.
+	// unstopped: this process scheduled an action, or showed one the exec remembers, and the exec has not been
+	// asked to stop it since (or the asking failed). The record above is what this process believes; the
+	// countdown is the exec's. While this is set, Cancel asks the exec also when the record shows nothing.
 	unstopped bool
 	// dropped is the time (Pending.At) of the action this process cancelled last: what the exec still reports
 	// for a moment afterwards (the helper's status is cached for a few seconds) is not shown again. Compared
@@ -151,6 +151,10 @@ func (p *Power) current() *Pending {
 	if src, ok := p.exec.(pendingSource); ok {
 		// the exec's clock reading for the same action differs from this process's by a few milliseconds
 		if c, ok := src.PendingAction(); ok && math.Abs(c.At-p.dropped) > 2 && now <= c.At+60 {
+			// Shown as Fairy's own, so Cancel asks the exec for it also when a later look shows nothing: what the
+			// helper said is a few seconds old, and its time is compared with the time of day here (a clock set
+			// forward hides it until the helper's next status, which gives it its new time).
+			p.unstopped = true
 			return &c
 		}
 	}
