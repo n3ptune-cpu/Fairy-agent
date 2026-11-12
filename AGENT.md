@@ -852,6 +852,11 @@ rule above); if the agent is restarted in the meantime, the pending action is dr
   whether a shutdown is pending. Start the helper, then cancel. This is the one way a request with the
   control token alone can keep a cancel out: `POST /helper/stop` needs no passkey approval. Windows goes on
   counting the shutdown down meanwhile; `shutdown /a` typed on the PC cancels it in any case.
+* When the helper was handed a shutdown, reboot, sleep or cancel and did not answer in its time (5 s, counted
+  from the moment the request is written to it), the agent answers 504, not "could not schedule": the helper
+  may have carried the request out all the same. The agent then asks the helper again for what is pending,
+  and Cancel reaches it. The same 504 answers a fan change, an approval question and "Turn on" when the
+  helper has the request and is silent.
 * Two limits. A Fairy shutdown that you abort by hand (`shutdown /a`) stays shown in the panel until its time
   or until you press Cancel, because Windows offers no way to ask. A pending **sleep** is a timer inside the
   helper: it is lost when the helper restarts.

@@ -229,6 +229,11 @@ func (p *Power) Handle(req PowerRequest) (int, map[string]any) {
 		}
 		if err := p.exec.Cancel(); errors.Is(err, api.ErrHelperStopped) {
 			return 503, map[string]any{"error": "helper stopped: cannot cancel", "code": api.ReasonHelperStopped}
+		} else if unanswered(err) {
+			// The helper has the cancel and did not answer: the action may be stopped or not. Not "could not
+			// cancel", and not "cancelled": the record stays, and the cancel can be sent again.
+			slog.Error("power: the cancel got no answer", "error", err.Error(), "requested_by", who)
+			return helperUnanswered("the cancel", "the pending action may be cancelled or not: look at what the machine shows as pending, and cancel again if it is still there")
 		} else if err != nil {
 			slog.Error("power: cancel failed", "error", err.Error(), "requested_by", who)
 			return 500, map[string]any{"error": "could not cancel: " + safeErr(err)}
@@ -281,6 +286,15 @@ func (p *Power) Handle(req PowerRequest) (int, map[string]any) {
 	if errors.As(err, &refused) { // the machine's approval check said no: its status, code and text
 		slog.Warn("power: not scheduled", "action", req.Action, "code", refused.Code, "requested_by", who)
 		return refused.Status, map[string]any{"error": refused.Msg, "code": refused.Code}
+	}
+	if unanswered(err) {
+		// The helper has the request and did not answer in its time: the countdown may be running (audit 6,
+		// r4-a1-01: "could not schedule" for a shutdown that Windows was counting down). Nothing is put on
+		// record here, because nobody knows; what the helper's next status says is shown (its old one is not
+		// used again: HelperClient.call). And a cancel asks the helper from now on, also while nothing is shown.
+		p.unstopped = true
+		slog.Error("power: the request got no answer; it may be scheduled all the same", "action", req.Action, "error", err.Error(), "requested_by", who)
+		return helperUnanswered("the "+req.Action, "it may be scheduled all the same. Look at what the machine shows as pending; a cancel reaches it")
 	}
 	if err != nil {
 		slog.Error("power: could not schedule", "action", req.Action, "error", err.Error(), "requested_by", who)

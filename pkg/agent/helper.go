@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/http"
 	"slices"
 	"sync"
 	"time"
@@ -87,9 +88,26 @@ type deadliner interface{ SetDeadline(time.Time) error }
 
 // Call sends one request and returns the helper's answer. A broken connection is dialled again once (the
 // helper may have restarted). When the helper does not answer because its service is not running, the error
-// is api.ErrHelperStopped (or api.ErrHelperNotInstalled).
+// is api.ErrHelperStopped (or api.ErrHelperNotInstalled). A request that changes something and was written to
+// the helper whole without an answer coming back is a *HelperUnanswered: it may have been carried out.
 func (c *HelperClient) Call(ctx context.Context, req proto.Request) (proto.Response, error) {
 	return c.call(ctx, req, c.Timeout)
+}
+
+// HelperUnanswered is the error of a request that changes something (proto.Control), was written to the
+// helper whole, and got no answer in its time (or one that cannot be read). The helper reads what is in its
+// pipe and carries it out whether or not anybody still waits for the answer, so such a request may have been
+// carried out: it is not a refusal, and nobody may say "not done" because of it. It is not sent a second time.
+type HelperUnanswered struct{ Err error }
+
+func (e *HelperUnanswered) Error() string {
+	return "the helper was sent the request and did not answer in time; it may have carried it out all the same (" + safeErr(e.Err) + ")"
+}
+
+// unanswered reports whether err is a *HelperUnanswered.
+func unanswered(err error) bool {
+	var un *HelperUnanswered
+	return errors.As(err, &un)
 }
 
 func (c *HelperClient) call(ctx context.Context, req proto.Request, timeout time.Duration) (proto.Response, error) {
@@ -101,10 +119,18 @@ func (c *HelperClient) call(ctx context.Context, req proto.Request, timeout time
 	if timeout <= 0 {
 		timeout = 5 * time.Second
 	}
-	ctx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
 	c.callMu.Lock()
 	defer c.callMu.Unlock()
+	// The time limit starts here, with the connection in hand, not before the wait for it. It started before
+	// (audit 6, r4-a1-01): a request that had waited behind another call (a fan change may take 25 s) went out
+	// with little or nothing of its 5 s left. The helper carried it out all the same, and the agent, which read
+	// no answer in the time left, said the request had failed. A caller that gave up during the wait (its own
+	// context) sends nothing.
+	if err := ctx.Err(); err != nil {
+		return proto.Response{}, c.notRunning(err)
+	}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
 	var lastErr error
 	for attempt := 0; attempt < 2; attempt++ {
 		if c.conn == nil {
@@ -114,12 +140,18 @@ func (c *HelperClient) call(ctx context.Context, req proto.Request, timeout time
 			}
 			c.conn = conn
 		}
-		r, err := c.roundTrip(ctx, b, version)
+		r, sent, err := c.roundTrip(ctx, b, version)
 		if err == nil {
 			return r, nil
 		}
 		_ = c.conn.Close()
 		c.conn = nil
+		if sent && proto.Control(req.Verb) {
+			// The helper has the request. Whether it carried it out nobody knows here; its next status may tell
+			// (a pending shutdown), so the copy /metrics is answered from is not used again.
+			c.invalidate()
+			return proto.Response{}, &HelperUnanswered{Err: err}
+		}
 		lastErr = err
 		if ctx.Err() != nil {
 			break
@@ -128,19 +160,27 @@ func (c *HelperClient) call(ctx context.Context, req proto.Request, timeout time
 	return proto.Response{}, c.notRunning(lastErr)
 }
 
-func (c *HelperClient) roundTrip(ctx context.Context, b []byte, version int) (proto.Response, error) {
+// roundTrip writes the request and reads the answer. sent reports whether the whole request was written: from
+// then on the helper may carry it out, whatever becomes of the answer.
+func (c *HelperClient) roundTrip(ctx context.Context, b []byte, version int) (r proto.Response, sent bool, err error) {
+	// Nothing is written once the time is over: a pipe takes a small write at once and never looks at the
+	// deadline (winpipe.Conn.do), so the request would go out with nobody left to read its answer.
+	if err := ctx.Err(); err != nil {
+		return proto.Response{}, false, err
+	}
 	if d, ok := c.conn.(deadliner); ok {
 		dl, _ := ctx.Deadline()
 		_ = d.SetDeadline(dl)
 	}
 	if err := proto.WriteRequest(c.conn, b, version); err != nil {
-		return proto.Response{}, err
+		return proto.Response{}, false, err
 	}
 	f, err := proto.ReadFrame(c.conn, proto.MaxResponse)
 	if err != nil {
-		return proto.Response{}, err
+		return proto.Response{}, true, err
 	}
-	return proto.DecodeResponse(f)
+	r, err = proto.DecodeResponse(f)
+	return r, true, err
 }
 
 // notRunning turns a connection error into api.ErrHelperStopped / ErrHelperNotInstalled when the service
@@ -428,6 +468,15 @@ type HelperFan struct {
 	cfg FanConfig
 }
 
+// helperUnanswered is the HTTP answer to a request the helper was sent and did not answer (*HelperUnanswered):
+// 504, the status of a gateway whose other side did not answer in time, which is what the agent is to the
+// helper here. It is not one of the agent's refusals (4xx, 500, 503 with a code): a panel reads 504 as "no
+// answer, the request may have arrived", never as "refused" or "not done". what names the request, maybe what
+// may have happened.
+func helperUnanswered(what, maybe string) (int, map[string]any) {
+	return http.StatusGatewayTimeout, map[string]any{"error": "the helper was sent " + what + " and did not answer in time: " + maybe}
+}
+
 func helperReason(err error) string {
 	if errors.Is(err, api.ErrHelperStopped) || errors.Is(err, api.ErrHelperNotInstalled) {
 		return api.ReasonHelperStopped
@@ -458,6 +507,9 @@ func (f *HelperFan) Status(ctx context.Context) map[string]any {
 
 func (f *HelperFan) change(ctx context.Context, req proto.Request) (int, map[string]any) {
 	r, err := f.c.callWithTimeout(ctx, req, 25*time.Second)
+	if unanswered(err) {
+		return helperUnanswered("the fan change", "the fans may have been changed all the same: look at the fan status")
+	}
 	if err != nil {
 		reason := helperReason(err)
 		msg := "helper stopped: start fairy-agent-helper to change the fans"
@@ -685,6 +737,12 @@ func (c *HelperClient) approvalCall(ctx context.Context, req proto.Request) (int
 	var bad *proto.Error
 	if errors.As(err, &bad) { // the request itself is not one the helper takes (a value outside its limits): not sent
 		return 400, map[string]any{"error": bad.Msg}
+	}
+	if unanswered(err) {
+		if req.Verb == proto.VerbTrustInit {
+			return helperUnanswered("the trust", "it may be written all the same: look at the machine's approval state before anything else")
+		}
+		return helperUnanswered("the question about an approval", "nothing was done; ask again")
 	}
 	if err != nil {
 		reason := helperReason(err)
