@@ -223,13 +223,19 @@ func Parse(data []byte, path string) (*Config, error) {
 		return nil, fmt.Errorf("%s: %w", path, err)
 	}
 	c.path = path
-	gone := power.RemovedSecretEnv(c.PowerSources)
-	c.PowerSources, c.ignored = power.DropRemoved(c.PowerSources)
+	all := c.PowerSources
+	gone := power.RemovedSecretEnv(all)
+	c.PowerSources, _ = power.DropRemoved(all)
 	c.defaults()
 	if err := c.Validate(); err != nil {
 		return nil, err
 	}
 	c.unusedEnv = c.notNamedElsewhere(gone)
+	// The notes are made last, when it is known which variables nothing else names: a note says "remove the
+	// line X=... from the env file" only for those. A variable that a kept entry, a UPS, the BMC or a BMC relay
+	// target names too, or one of the agent's own, is still loaded, and its note says to leave the line
+	// (audit 5, r2-a2-03: the note told the owner to delete a line a kept Shelly entry still needed).
+	_, c.ignored = power.DropRemovedNotes(all, func(env string) bool { return !c.UnusedSecret(env) })
 	return c, nil
 }
 

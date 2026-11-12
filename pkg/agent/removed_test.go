@@ -257,6 +257,20 @@ power_sources:
 		cfg.UnusedSecret("FAIRY_AGENT_TOKEN_TEST") || cfg.UnusedSecret("") {
 		t.Fatal("which secrets count as unused is wrong")
 	}
+	// the notes say the same as what is done: "remove the line" only for a variable that is not loaded any
+	// more (audit 5, r2-a2-03: the note for second-plug told the owner to delete the Shelly's password)
+	const remove, leave = "remove the entry from config.yaml, and the line %s=... from the env file: the plug's key is not used any more)", "remove the entry from config.yaml; leave the line %s=... in the env file: it is still in use)"
+	notes := cfg.Ignored()
+	for i, c := range []struct{ id, env, text string }{
+		{"desk-plug", "OLD_PLUG_KEY", remove}, {"second-plug", "SHARED_PW", leave}, {"third-plug", "INHERITED_KEY", remove}, {"odd-plug", "FAIRY_AGENT_TOKEN_TEST", leave},
+	} {
+		if len(notes) != 4 || !strings.HasPrefix(notes[i], `power source "`+c.id+`": tuya is no longer supported and is ignored (`) || !strings.HasSuffix(notes[i], fmt.Sprintf(c.text, c.env)) {
+			t.Fatalf("note %d: %q", i, notes)
+		}
+		if said, done := strings.Contains(notes[i], "; leave the line"), !cfg.UnusedSecret(c.env); said != done {
+			t.Errorf("%s: the note says the line is still in use: %v; the agent loads it: %v", c.id, said, done)
+		}
+	}
 	if err := loadSecrets(cfg); err != nil {
 		t.Fatal(err)
 	}
@@ -284,5 +298,30 @@ power_sources:
 	}
 	if err := loadSecrets(cfg); err == nil {
 		t.Error("a broken line of an unused secret was not reported")
+	}
+}
+
+// TestTuyaNoteKnowsEveryPlaceThatNamesAVariable (audit 5, r2-a2-03): a variable that a removed Tuya entry named
+// is still in use when anything else in config.yaml names it: a power source that stays, a UPS, the BMC's
+// password, a BMC relay target. The note then says to leave its line in the env file.
+func TestTuyaNoteKnowsEveryPlaceThatNamesAVariable(t *testing.T) {
+	for name, rest := range map[string]string{
+		"a power source that stays": "  - {id: shelly-1, type: shelly, url: \"http://192.0.2.70\", password_env: SHARED_PW}\n",
+		"a UPS":                     "ups:\n  - {id: rack, host: 192.0.2.71, password_env: shared_pw}\n",
+		"the BMC's password":        "ipmi: {enabled: true, host: 192.0.2.72, username: admin, password_env: SHARED_PW}\n",
+		"a BMC relay target":        "bmc_relay:\n  enabled: true\n  targets:\n    - {id: nas, backend: ipmitool, host: 192.168.1.50, username: admin, password_env: SHARED_PW, cipher_suite: 17}\n",
+		"":                          "",
+	} {
+		cfg, err := Parse([]byte("power_sources:\n  - {id: plug-3, type: tuya, local_key_env: SHARED_PW}\n"+rest), filepath.Join(t.TempDir(), "config.yaml"))
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		want := `power source "plug-3": tuya is no longer supported and is ignored (remove the entry from config.yaml; leave the line SHARED_PW=... in the env file: it is still in use)`
+		if name == "" { // nothing else names it
+			want = `power source "plug-3": tuya is no longer supported and is ignored (remove the entry from config.yaml, and the line SHARED_PW=... from the env file: the plug's key is not used any more)`
+		}
+		if notes := cfg.Ignored(); len(notes) != 1 || notes[0] != want || cfg.UnusedSecret("SHARED_PW") != (name == "") {
+			t.Errorf("%s: %q (unused: %v)\nwant %q", name, notes, cfg.UnusedSecret("SHARED_PW"), want)
+		}
 	}
 }

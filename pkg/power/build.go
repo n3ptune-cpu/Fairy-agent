@@ -85,25 +85,61 @@ func RemovedSecretEnv(raws []map[string]any) []string {
 // environment variable's). Such an entry is not checked in any other way: whatever else it holds, it is only
 // ignored. An entry without an id is named by its place in the list. Without such an entry, raws comes back as
 // it is.
+//
+// The line says to remove the variable's line only when nothing else uses the variable. Here that is: no entry
+// that stays in raws names it (in a member that ends in "_env"; names are compared without regard to case, as
+// Windows does). For such a variable the line reads
+//
+//	power source "plug-3": tuya is no longer supported and is ignored (remove the entry from config.yaml; leave the line SHARED_PW=... in the env file: it is still in use)
+//
+// A caller whose config can name a variable in other places than this list uses DropRemovedNotes.
 func DropRemoved(raws []map[string]any) (kept []map[string]any, notes []string) {
+	return DropRemovedNotes(raws, nil)
+}
+
+// DropRemovedNotes is DropRemoved with the caller's word on which variables are still in use: inUse(name) is
+// true for a variable whose line must stay in the env file (nil: DropRemoved's own rule).
+func DropRemovedNotes(raws []map[string]any, inUse func(env string) bool) (kept []map[string]any, notes []string) {
+	type gone struct {
+		i   int
+		raw map[string]any
+	}
+	var out []gone
 	for i, raw := range raws {
-		typ, _ := raw["type"].(string)
-		if !slices.Contains(Removed, typ) {
-			kept = append(kept, raw)
+		if typ, _ := raw["type"].(string); slices.Contains(Removed, typ) {
+			out = append(out, gone{i, raw})
 			continue
 		}
-		name := fmt.Sprintf("#%d", i+1)
-		if id, ok := raw["id"].(string); ok && id != "" {
+		kept = append(kept, raw)
+	}
+	if out == nil {
+		return raws, nil
+	}
+	if inUse == nil {
+		inUse = func(env string) bool {
+			for _, raw := range kept {
+				for k, v := range raw {
+					if s, ok := v.(string); ok && strings.HasSuffix(k, "_env") && strings.EqualFold(s, env) {
+						return true
+					}
+				}
+			}
+			return false
+		}
+	}
+	for _, g := range out {
+		typ, _ := g.raw["type"].(string)
+		name := fmt.Sprintf("#%d", g.i+1)
+		if id, ok := g.raw["id"].(string); ok && id != "" {
 			name = fmt.Sprintf("%q", id)
 		}
 		also := ""
-		if env := secretEnvOf(raw); env != "" {
+		if env := secretEnvOf(g.raw); env != "" && inUse(env) {
+			also = "; leave the line " + env + "=... in the env file: it is still in use"
+		} else if env != "" {
 			also = ", and the line " + env + "=... from the env file: the plug's key is not used any more"
 		}
 		notes = append(notes, fmt.Sprintf("power source %s: %s is no longer supported and is ignored (remove the entry from config.yaml%s)", name, typ, also))
-	}
-	if notes == nil {
-		return raws, nil
 	}
 	return kept, notes
 }

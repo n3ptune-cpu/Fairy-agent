@@ -120,3 +120,54 @@ func TestDropRemovedNamesTheKeyVariable(t *testing.T) {
 		t.Error("names for a list without a removed entry")
 	}
 }
+
+// TestDropRemovedLeavesALineThatIsStillInUse (audit 5, r2-a2-03): the note told the owner to delete the env
+// file's line of a variable that an entry which stays still uses (a Shelly's password under the same name).
+// It says "remove the line" only for a variable nothing else names, and "leave the line" otherwise.
+func TestDropRemovedLeavesALineThatIsStillInUse(t *testing.T) {
+	const remove, leave = ", and the line %s=... from the env file: the plug's key is not used any more)", "; leave the line %s=... in the env file: it is still in use)"
+	raws := []map[string]any{
+		{"id": "desk-plug", "type": "tuya", "local_key_env": "TUYA_KEY_DESK"},
+		{"id": "plug-3", "type": "tuya", "local_key_env": "SHARED_PW"},
+		{"id": "plug-4", "type": "tuya", "local_key_env": "shared_pw"}, // the same variable where names have no case
+		{"id": "plug-5", "type": "tuya", "local_key_env": "TOKEN_OF_TASMOTA"},
+		{"id": "plug-6", "type": "tuya", "local_key_env": "http://192.0.2.9"}, // not a name: nothing is said about it
+		{"id": "plug-7", "type": "tuya", "local_key_env": "ONLY_AMONG_REMOVED"},
+		{"id": "plug-8", "type": "tuya", "local_key_env": "ONLY_AMONG_REMOVED"}, // named by removed entries only
+		{"id": "plug-9", "type": "tuya", "local_key_env": "A_URL"},              // a kept entry holds this text, but not as a variable's name
+		{"id": "shelly-1", "type": "shelly", "url": "http://192.0.2.1", "password_env": "SHARED_PW"},
+		{"id": "tasmota-1", "type": "tasmota", "url": "A_URL", "token_env": "Token_Of_Tasmota"},
+	}
+	want := []string{remove, leave, leave, leave, "", remove, remove, remove}
+	check := func(what string, notes []string, want []string) {
+		t.Helper()
+		if len(notes) != len(want) {
+			t.Fatalf("%s: notes: %q", what, notes)
+		}
+		for i, w := range want {
+			env, _ := raws[i]["local_key_env"].(string)
+			end := "(remove the entry from config.yaml)"
+			if w != "" {
+				end = "(remove the entry from config.yaml" + strings.Replace(w, "%s", env, 1)
+			}
+			if !strings.HasSuffix(notes[i], end) || strings.Count(notes[i], "env file") > 1 {
+				t.Errorf("%s: note %d: %q, want it to end %q", what, i, notes[i], end)
+			}
+		}
+	}
+	kept, notes := DropRemoved(raws)
+	if len(kept) != 2 {
+		t.Fatalf("kept: %v", kept)
+	}
+	check("the list alone", notes, want)
+	// a caller that knows more says so itself, name by name
+	asked := map[string]int{}
+	_, notes = DropRemovedNotes(raws, func(env string) bool { asked[env]++; return env == "TUYA_KEY_DESK" || env == "ONLY_AMONG_REMOVED" })
+	check("the caller's word", notes, []string{leave, remove, remove, remove, "", leave, leave, remove})
+	if asked["http://192.0.2.9"] != 0 || asked["SHARED_PW"] != 1 {
+		t.Errorf("asked about: %v", asked)
+	}
+	if kept, notes := DropRemovedNotes(raws[8:], func(string) bool { t.Error("asked without a removed entry"); return true }); notes != nil || len(kept) != 2 {
+		t.Errorf("a list without a removed entry: %v %q", kept, notes)
+	}
+}

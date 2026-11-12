@@ -953,7 +953,10 @@ is not used any more)`). That line names the variable the entry kept the plug's 
 `local_key_env`), never the key. Remove both when you next edit the files: the entry from `config.yaml`, and
 that variable's line from the `env_file` (the key is a secret of the plug and still works on your network).
 Until you do, the agent leaves that line alone and does not load it: a secret that only an ignored entry names
-is not put into the agent's environment. (If another entry names the same variable, it is loaded as before.) A Tasmota plug with a web password gets it the one way Tasmota
+is not put into the agent's environment. If something else in `config.yaml` names the same variable (a plug
+or UPS that stays, the BMC's password, a BMC relay target), it is loaded as before, and the line for the
+ignored entry says so instead: `(remove the entry from config.yaml; leave the line SHARED_PW=... in the env
+file: it is still in use)`. Then remove only the entry. A Tasmota plug with a web password gets it the one way Tasmota
 documents, in the address of the request (`/cm?user=...&password=...`), exactly as in earlier releases. That
 address is never logged and never part of an error message. It crosses the local network unencrypted:
 Tasmota speaks plain HTTP. One answer of a plug or a BMC is read up to 256 KiB of JSON with at most 8192 values,

@@ -63,3 +63,33 @@ ups:
 		t.Fatalf("exit %d\nstdout: %s\nstderr: %s", code, out.String(), errb.String())
 	}
 }
+
+// TestCheckConfigDoesNotSayToRemoveALineThatIsStillUsed (audit 5, r2-a2-03, the auditor's config): two old Tuya
+// entries, one of whose variables a Shelly entry that stays uses as its password. check-config tells the owner
+// to remove the first variable's line and to leave the second.
+func TestCheckConfigDoesNotSayToRemoveALineThatIsStillUsed(t *testing.T) {
+	t.Setenv("FAIRY_AGENT_TOKEN", "")
+	t.Setenv("FAIRY_AGENT_CONTROL_TOKEN", "")
+	dir := t.TempDir()
+	p := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(p, []byte(`power_sources:
+  - {id: desk-plug, type: tuya, name: "Desk plug", device_id: bf0123456789abcdef, ip: 192.168.1.60, local_key_env: TUYA_KEY_DESK, version: "3.4", system_hint: self}
+  - {type: tuya, local_key_env: "BAD NAME; rm -rf", device_id: x}
+  - {id: plug-3, type: tuya, local_key_env: SHARED_PW}
+  - {id: shelly-1, type: shelly, url: "http://127.0.0.1:1", password_env: SHARED_PW}
+`), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "token"), []byte(strings.Repeat("r", 30)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var out, errb bytes.Buffer
+	code := checkConfigCmd(p, &out, &errb)
+	want := "config OK: " + p + "\n" +
+		`note: power source "desk-plug": tuya is no longer supported and is ignored (remove the entry from config.yaml, and the line TUYA_KEY_DESK=... from the env file: the plug's key is not used any more)` + "\n" +
+		`note: power source #2: tuya is no longer supported and is ignored (remove the entry from config.yaml)` + "\n" +
+		`note: power source "plug-3": tuya is no longer supported and is ignored (remove the entry from config.yaml; leave the line SHARED_PW=... in the env file: it is still in use)` + "\n"
+	if code != 0 || out.String() != want || errb.Len() != 0 {
+		t.Fatalf("exit %d\nstdout: %s\nwant:   %s\nstderr: %s", code, out.String(), want, errb.String())
+	}
+}
