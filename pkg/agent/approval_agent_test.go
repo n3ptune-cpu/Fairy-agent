@@ -36,6 +36,7 @@ type lrig struct {
 	trust  string // the trust file
 	log    *logBuf
 	gated  bool
+	wakes  wakes
 }
 
 func newLinuxRig(t *testing.T, withGate bool) *lrig {
@@ -79,7 +80,7 @@ func newLinuxRigWith(t *testing.T, o lrigOpts) *lrig {
 	}
 	r.upd = agent.NewUpdater(uo)
 	d := agent.Deps{Collector: agenttest.NewCollector(), Version: "test", BMC: b, Fan: agent.NewFan(r.bmc, b, cfg.FanControl, nil),
-		Power: agent.NewPower(r.power, cfg.PowerControl.MinDelayS), Updater: r.upd, WOL: agent.NewWOL(nil)}
+		Power: agent.NewPower(r.power, cfg.PowerControl.MinDelayS), Updater: r.upd, WOL: r.wakes.relay()}
 	if withGate {
 		gopts := approval.Options{Files: approval.Files{Path: r.trust}, EnforcedBy: api.EnforcedByAgent,
 			Log: slog.New(slog.NewTextHandler(r.log, nil))}
@@ -252,8 +253,8 @@ func TestLinuxAgentEnforcesApproval(t *testing.T) {
 	if st, b := r.post(t, "/power", map[string]any{"action": "cancel"}); st != 200 {
 		t.Errorf("cancel: %d %v", st, b)
 	}
-	if st, b := r.post(t, "/wol", map[string]any{"mac": "aa:bb:cc:dd:ee:ff", "broadcast": "10.255.255.255"}); st == 403 || st == 503 || b["code"] == api.CodeApprovalRequired {
-		t.Errorf("wake-on-LAN asked for an approval: %d %v", st, b)
+	if st, b := r.post(t, "/wol", map[string]any{"mac": "aa:bb:cc:dd:ee:ff", "broadcast": "10.255.255.255"}); st != 200 || len(r.wakes.list()) != 1 || r.wakes.list()[0] != "10.255.255.255:9 102 bytes" {
+		t.Errorf("wake-on-LAN (it needs no approval): %d %v, sent %v", st, b, r.wakes.list())
 	}
 
 	// approved shutdown

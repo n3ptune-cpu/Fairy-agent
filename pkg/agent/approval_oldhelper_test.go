@@ -132,6 +132,7 @@ type oldHelperRig struct {
 	stage       string
 	helperPower *agenttest.PowerExec
 	ownStarts   atomic.Int32
+	wakes       wakes
 }
 
 // newOldHelperRig: the agent wired as Run wires it on Windows with the helper (fans, power and approved updates
@@ -187,7 +188,7 @@ func newOldHelperRig(t *testing.T, blind bool) *oldHelperRig {
 		own.CheckDir = func(string) error { return errors.New("access is denied") }
 	}
 	d := agent.Deps{Collector: agenttest.NewCollector(), Version: "test", Helper: client, Updater: r.upd,
-		Fan: client.Fan(cfg.FanControl), Power: agent.NewPower(client.Power(), cfg.PowerControl.MinDelayS), WOL: agent.NewWOL(nil),
+		Fan: client.Fan(cfg.FanControl), Power: agent.NewPower(client.Power(), cfg.PowerControl.MinDelayS), WOL: r.wakes.relay(),
 		HelperSources: []string{api.FeaturePower, api.FeatureFans},
 		// exactly as Run builds it on Windows: the agent's own gate only reads the helper's file
 		Approval: approval.NewGate(approval.Options{Files: own, EnforcedBy: api.EnforcedByAgent, ReadOnly: true, Log: hlog})}
@@ -296,8 +297,8 @@ func TestOldRunningHelperWithATrustFile(t *testing.T) {
 	if st, b := r.post(t, "/power", map[string]any{"action": "cancel"}); st != 200 {
 		t.Fatalf("cancel: %d %v", st, b)
 	}
-	if st, b := r.post(t, "/wol", map[string]any{"mac": "aa:bb:cc:dd:ee:ff"}); st != 200 {
-		t.Fatalf("wake: %d %v", st, b)
+	if st, b := r.post(t, "/wol", map[string]any{"mac": "aa:bb:cc:dd:ee:ff"}); st != 200 || len(r.wakes.list()) != 1 || r.wakes.list()[0] != "255.255.255.255:9 102 bytes" {
+		t.Fatalf("wake: %d %v, sent %v", st, b, r.wakes.list())
 	}
 	st, b := r.post(t, api.PathApprovalChallenge, map[string]any{"verb": "power", "action": "shutdown", "delay_s": 60})
 	wantRefusal(t, "challenge", st, b, 409, api.CodeHelperTooOld)

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
@@ -34,6 +35,30 @@ type logBuf struct {
 
 func (l *logBuf) Write(p []byte) (int, error) { l.mu.Lock(); defer l.mu.Unlock(); return l.b.Write(p) }
 func (l *logBuf) String() string              { l.mu.Lock(); defer l.mu.Unlock(); return l.b.String() }
+
+// wakes is the Wake-on-LAN relay of a test agent: it writes down where a magic packet would have gone and
+// sends nothing. No test of the approval rigs puts a datagram on the network.
+type wakes struct {
+	mu   sync.Mutex
+	sent []string
+}
+
+func (w *wakes) relay() *agent.WOL {
+	wol := agent.NewWOL(nil)
+	wol.Send = func(addr string, pkt []byte) error {
+		w.mu.Lock()
+		defer w.mu.Unlock()
+		w.sent = append(w.sent, fmt.Sprintf("%s %d bytes", addr, len(pkt)))
+		return nil
+	}
+	return wol
+}
+
+func (w *wakes) list() []string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return append([]string(nil), w.sent...)
+}
 
 // aprig is a Windows agent as the panel sees it: the agent's HTTP API in front of a helper that checks
 // approvals (the real helper code on an in-memory pipe), with fans, power and self-update.
