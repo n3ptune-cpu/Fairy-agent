@@ -55,9 +55,16 @@ type Power struct {
 	exec     PowerExec
 	minDelay int
 	now      func() time.Time
+	// steady is the clock the pending action's countdown is read from: time.Now, whose readings carry Go's
+	// steady (monotonic) clock, so the time between two of them does not move when the machine's time of day
+	// is set. The exec counts the same way (Linux: a timer in this process). Tests put their own in.
+	steady func() time.Time
 
 	mu      sync.Mutex
 	pending *Pending
+	// since is steady's reading when the pending action was scheduled, kept as it was read (no .UTC(), no unix
+	// seconds: either would drop the steady part). pending.At is the time of day it was scheduled for.
+	since time.Time
 	// dropped is the time (Pending.At) of the action this process cancelled last: what the exec still reports
 	// for a moment afterwards (the helper's status is cached for a few seconds) is not shown again. Compared
 	// within two seconds.
@@ -87,7 +94,7 @@ const defaultPowerDelayS = 60
 
 // NewPower returns the power controller.
 func NewPower(exec PowerExec, minDelayS int) *Power {
-	return &Power{exec: exec, minDelay: minDelayS, now: time.Now}
+	return &Power{exec: exec, minDelay: minDelayS, now: time.Now, steady: time.Now}
 }
 
 var whoClean = regexp.MustCompile(`[^A-Za-z0-9 ._@-]`)
@@ -108,13 +115,34 @@ func cleanWho(v any) string {
 // current returns the pending action, dropping it once its time has passed. When this process has none of
 // its own (it restarted since), it is the one the exec still remembers: a Windows shutdown goes on counting
 // down while the agent restarts, and must stay visible and cancellable. Caller holds p.mu.
+//
+// The action this process scheduled ends by the steady clock, as the exec's countdown does, never by the time
+// of day: it was compared with the time of day before, so a clock set forward by more than the rest of the
+// countdown plus the minute of grace (the first time synchronisation after weeks without power, an empty
+// clock battery) made the agent show nothing pending, and Cancel answer ok without stopping anything, while
+// the timer went on and switched the machine off. The time shown (At) is the time of day the action happens
+// by today's clock: the one on record, or, when the clock was set since, now plus what is left.
+//
+// One thing the time of day still decides, and only after the countdown is over by the steady clock: a sleep
+// is on record for the minute of grace or until the time of day is a minute past its time, whichever comes
+// first. A machine that slept wakes up with this process still running and with a steady clock that stood
+// still meanwhile (Linux); the time of day is what tells that the sleep is over, as it did before.
 func (p *Power) current() *Pending {
-	now := float64(p.now().Unix())
-	if p.pending != nil && now > p.pending.At+60 {
-		p.pending = nil
-	}
+	wall := p.now()
+	now := float64(wall.Unix())
 	if p.pending != nil {
-		return p.pending
+		// over: how long ago the action's time was by the steady clock (negative: still to come)
+		over := p.steady().Sub(p.since) - time.Duration(p.pending.DelayS)*time.Second
+		woke := p.pending.Action == "sleep" && over >= 0 && now > p.pending.At+powerRecordGrace.Seconds()
+		if over > powerRecordGrace || woke {
+			p.pending = nil
+		} else {
+			c := *p.pending
+			if at := float64(wall.UnixMilli())/1000 - over.Seconds(); math.Abs(at-c.At) > atSlack.Seconds() {
+				c.At = collect.Round(at, 3)
+			}
+			return &c
+		}
 	}
 	if src, ok := p.exec.(pendingSource); ok {
 		// the exec's clock reading for the same action differs from this process's by a few milliseconds
@@ -243,7 +271,7 @@ func (p *Power) Handle(req PowerRequest) (int, map[string]any) {
 		return 500, map[string]any{"error": "could not schedule the " + req.Action + ": " + safeErr(err)}
 	}
 	at := collect.Round(float64(p.now().UnixMilli())/1000+float64(delay), 3)
-	p.pending, p.dropped = &Pending{Action: req.Action, At: at, DelayS: delay, RequestedBy: who}, 0
+	p.pending, p.dropped, p.since = &Pending{Action: req.Action, At: at, DelayS: delay, RequestedBy: who}, 0, p.steady()
 	slog.Warn("power: scheduled", "action", req.Action, "delay_s", delay, "requested_by", who)
 	return 200, map[string]any{"action": req.Action, "pending": *p.pending}
 }
