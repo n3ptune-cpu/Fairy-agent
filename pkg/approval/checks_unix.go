@@ -85,10 +85,59 @@ func UnixAdminPrepare(dir string) func(tmp string) error {
 	}
 }
 
+// Who this process is, and the one call that changes a file's owner. Variables so that a test can stand in
+// for them and count: nothing else in this package may change an owner on the service's path.
+var (
+	keepEuid   = os.Geteuid
+	keepEgid   = os.Getegid
+	keepLchown = os.Lchown
+)
+
+// errNotOurs is why a process that is not root cannot write a file that stays (uid, gid)'s: a file it makes is
+// (mine, group)'s, and only root can change that. The words are part of the "broken" reason the owner reads.
+func errNotOurs(uid, gid, mine, group uint32) error {
+	return fmt.Errorf("the trust file belongs to user %d, group %d, but this service is user %d, group %d: only root can keep the owner",
+		uid, gid, mine, group)
+}
+
+// UnixCanKeep is Files.CanKeep: it says, before anything is written, whether a file this process makes in dir
+// can be given the owner and group of the trust file as it is now (old). Root can always. Any other user can
+// only when a new file is that user's and that group's anyway: its own file (the agent wrote it at the
+// first-time set). For root's file under an agent that runs as another user (after `helper-trust set` as
+// root) it fails with the reason, and nothing is written and no owner is touched.
+//
+// A process that is not root never asks the system to change an owner here, not even to learn that it may
+// not: under the shipped unit (deploy/fairy-agent.service: SystemCallFilter=~@privileged, which holds the
+// chown family, and no SystemCallErrorNumber) the answer to that call is not an error, the process is killed.
+func UnixCanKeep(dir string, old os.FileInfo) error {
+	was, ok := old.Sys().(*syscall.Stat_t)
+	if !ok {
+		return fmt.Errorf("%s: cannot read its owner", old.Name())
+	}
+	uid := uint32(keepEuid())
+	if uid == 0 {
+		return nil
+	}
+	// a new file's group: the process's, or the folder's when the folder hands its group on (setgid)
+	gid := uint32(keepEgid())
+	if st, err := os.Lstat(dir); err != nil {
+		return err
+	} else if sys, ok := st.Sys().(*syscall.Stat_t); ok && st.Mode()&os.ModeSetgid != 0 {
+		gid = sys.Gid
+	}
+	if was.Uid != uid || was.Gid != gid {
+		return errNotOurs(was.Uid, was.Gid, uid, gid)
+	}
+	return nil
+}
+
 // UnixKeep is Files.Keep: it gives the temporary file tmp the owner, the group and the mode of the file it is
 // about to replace (old), and fails when it cannot. So a trust file that gets its machine id added (Files.
-// AddMachineID) is afterwards whose it was, with the rights it had: root's file stays root's (only root can
-// do that; an agent that runs as another user cannot, and the file then stays as it was, without an id).
+// AddMachineID) is afterwards whose it was, with the rights it had: root's file stays root's.
+//
+// The owner is compared first. It is changed only when it really differs and this process is root; a process
+// that is not root fails here without the call (UnixCanKeep has refused that case before the temporary file
+// was made; this is the same rule for a file that came out otherwise than foreseen).
 func UnixKeep(tmp string, old os.FileInfo) error {
 	was, ok := old.Sys().(*syscall.Stat_t)
 	if !ok {
@@ -103,7 +152,10 @@ func UnixKeep(tmp string, old os.FileInfo) error {
 		return fmt.Errorf("%s: cannot read its owner", tmp)
 	}
 	if is.Uid != was.Uid || is.Gid != was.Gid {
-		if err := os.Lchown(tmp, int(was.Uid), int(was.Gid)); err != nil {
+		if keepEuid() != 0 {
+			return errNotOurs(was.Uid, was.Gid, is.Uid, is.Gid)
+		}
+		if err := keepLchown(tmp, int(was.Uid), int(was.Gid)); err != nil {
 			return fmt.Errorf("the trust file belongs to user %d, group %d, and the file that would replace it cannot be given to them: %w", was.Uid, was.Gid, err)
 		}
 	}
@@ -112,5 +164,5 @@ func UnixKeep(tmp string, old os.FileInfo) error {
 
 // UnixFiles is the trust file at path with the checks above.
 func UnixFiles(path string) Files {
-	return Files{Path: path, CheckDir: UnixCheckDir, CheckFile: UnixCheckFile, Keep: UnixKeep}
+	return Files{Path: path, CheckDir: UnixCheckDir, CheckFile: UnixCheckFile, CanKeep: UnixCanKeep, Keep: UnixKeep}
 }

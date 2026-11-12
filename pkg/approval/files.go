@@ -30,10 +30,14 @@ type Files struct {
 	// Prepare, when set, is called with the temporary file before it gets its final name (the administrator's
 	// command on Linux gives the file to root, readable by the agent's group).
 	Prepare func(tmp string) error
+	// CanKeep, when set, is called by AddMachineID with the trust file's folder and what the trust file is now,
+	// before anything is written: an error means that a file made here could not be given the old one's owner
+	// and group, and then no temporary file is made and nothing is tried (UnixCanKeep).
+	CanKeep func(dir string, old os.FileInfo) error
 	// Keep, when set, is called by AddMachineID with the temporary file and what the trust file is now, before
 	// the one takes the other's name: it gives the new file the old one's owner, group and mode, or fails
-	// (UnixKeep). Windows has none: a file made in the helper's folder inherits that folder's permissions, as
-	// the trust file itself did when it was written.
+	// (UnixKeep). Windows has neither: a file made in the helper's folder inherits that folder's permissions,
+	// as the trust file itself did when it was written.
 	Keep func(tmp string, old os.FileInfo) error
 }
 
@@ -109,10 +113,11 @@ func (f Files) read() (state string, raw []byte, st os.FileInfo, err error) {
 // Nothing else in the file changes, not a byte: the member is put in right behind the opening brace, and what
 // comes out is read back and compared with what went in before it is written. The new content goes into a
 // temporary file in the same folder, which gets the old file's owner, group and mode (Keep) and then the old
-// file's name, in one step: at every moment the name is either the old file or the complete new one. If the
-// file was changed by somebody else in between (the administrator's command), nothing is written. Any failure
-// leaves the file as it was, without an id, and so the state broken: nothing is approved, and nothing runs
-// unapproved.
+// file's name, in one step: at every moment the name is either the old file or the complete new one. Where the
+// owner could not be kept (CanKeep: root's file, and this process is not root), no temporary file is made at
+// all. If the file was changed by somebody else in between (the administrator's command), nothing is written.
+// Any failure leaves the file as it was, without an id, and no temporary file behind, and so the state broken:
+// nothing is approved, and nothing runs unapproved.
 func (f Files) AddMachineID(rnd io.Reader) (string, error) {
 	state, raw, st, err := f.read()
 	if state != api.ApprovalRequired {
@@ -150,10 +155,21 @@ func (f Files) AddMachineID(rnd io.Reader) (string, error) {
 		return "", errors.New("the trust file with a machine id does not read back as the same trust")
 	}
 	dir := filepath.Dir(f.Path)
+	if f.CanKeep != nil { // before the temporary file: where the owner cannot be kept, nothing is written
+		if err := f.CanKeep(dir, st); err != nil {
+			return "", err
+		}
+	}
 	tmp, err := os.CreateTemp(dir, ".approval-trust-*.tmp")
 	if err != nil {
 		return "", err
 	}
+	renamed := false
+	defer func() { // whatever goes wrong from here on, the temporary file does not stay
+		if !renamed {
+			_ = os.Remove(tmp.Name())
+		}
+	}()
 	_, err = tmp.Write(out)
 	if err == nil {
 		err = tmp.Sync()
@@ -175,9 +191,9 @@ func (f Files) AddMachineID(rnd io.Reader) (string, error) {
 		err = os.Rename(tmp.Name(), f.Path) // takes the place of the old file under its name, in one step
 	}
 	if err != nil {
-		_ = os.Remove(tmp.Name())
 		return "", err
 	}
+	renamed = true
 	syncDir(dir)
 	return id, nil
 }

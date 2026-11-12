@@ -179,9 +179,13 @@ func (g *Gate) reload(force bool) {
 			g.o.Log.Warn("approval: the trust file had no machine id (it is from before approvals were bound to the machine); one was added, nothing else in it changed",
 				"enforced_by", g.o.EnforcedBy, "machine_id", id)
 			state, t, raw, err = g.o.Files.Load()
-		} else { // the reason first: the answer's text is cut after 300 characters
-			err = fmt.Errorf("%s: the trust file has no machine_id, and adding one failed: %s (the file is as it was; repair on the machine: fairy-agent helper-trust set)",
-				g.o.Files.Path, firstLine(aerr.Error()))
+		} else { // the answer's text is cut after 300 characters: a long reason gives way, what to do stays
+			const pre, post = ": the trust file has no machine_id, and adding one failed: ", " (the file is as it was; repair on the machine: fairy-agent helper-trust set)"
+			why := firstLine(aerr.Error())
+			if room := 300 - len(g.o.Files.Path) - len(pre) - len(post); len(why) > room && room > 3 {
+				why = why[:room-3] + "..."
+			}
+			err = fmt.Errorf("%s%s%s%s", g.o.Files.Path, pre, why, post)
 		}
 	}
 	if state != api.ApprovalRequired {

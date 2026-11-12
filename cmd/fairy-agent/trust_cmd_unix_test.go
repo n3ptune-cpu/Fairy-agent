@@ -475,9 +475,10 @@ func TestTrustFileFromBeforeMachineIDsOnAnInstall(t *testing.T) {
 	t.Run("root's file in the agent's folder, readable by the agent's group", func(t *testing.T) {
 		r := newInstallRig(t, 4242)
 		put(r, 0, 4242, 0o640)
-		st := r.agentSees() // the agent is not root: it cannot make the new file root's
+		st := r.agentSees() // the agent is not root: it cannot make the new file root's, and does not try
 		if st.State != api.ApprovalBroken || st.MachineID != "" || !strings.Contains(st.Error, "has no machine_id, and adding one failed") ||
-			!strings.Contains(st.Error, "cannot be given to them") {
+			!strings.Contains(st.Error, "the trust file belongs to user 0, group 4242, but this service is user 4242, group 4242") || // cut here: the test folder has a long name
+			!strings.HasSuffix(st.Error, "repair on the machine: fairy-agent helper-trust set)") {
 			t.Fatalf("the agent: %+v", st)
 		}
 		if uid, mode, _ := r.owner(r.path); uid != 0 || group(r.path) != 4242 || mode.Perm() != 0o640 {

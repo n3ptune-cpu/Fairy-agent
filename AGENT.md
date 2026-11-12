@@ -1136,6 +1136,14 @@ with the reason: fan, power and update requests are refused until `fairy-agent h
 the machine (it keeps the file's values and writes it with an id) or the right service starts.
 `helper-trust show` only looks: it never adds the id itself.
 
+On Linux "cannot" is decided by looking, not by trying. The agent compares the file's owner and group with
+its own before it writes anything. Its own file (the one it wrote at the panel's first-time set) gets the id.
+A file of another owner or group (root's, after `helper-trust set` as root) is left alone: no temporary file
+is made, and the agent does not ask the system to change an owner, because under the unit's system call
+filter (`SystemCallFilter=~@privileged` in `fairy-agent.service`) that request would not be answered with
+"no": it would end the agent, at every start. The reason then reads `the trust file belongs to user 0,
+group N, but this service is user N, group N: only root can keep the owner`.
+
 **Linux: whose file it is.** `/var/lib/fairy-agent/approval-trust.json`, in the agent's state folder, because
 the agent itself writes it at the first-time set. That folder belongs to the agent's service user
 (`fairy-agent`, mode 0700; `root` when the agent runs as root), and whoever owns a folder can replace any file
