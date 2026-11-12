@@ -6,8 +6,11 @@ package api
 // in pkg/approval; nothing here trusts its input.
 //
 // One approval is one ID token of the Pocket ID client "Fairy PC actions" whose nonce is ApprovalNonce of a list
-// of entries, one entry per (machine challenge, exact request). Each machine checks the token offline against
-// the key it has pinned and finds its own entry in the list.
+// of entries, one entry per (machine id, machine challenge, exact request). Each machine checks the token
+// offline against the key it has pinned and finds its own entry in the list: the one with a challenge it has
+// open, for the request it is about to carry out, hashed with ITS OWN machine id (the one in its trust file),
+// whatever the entry says. So an approval that was asked for one machine is not accepted by another, also when
+// somebody handed the panel the other machine's challenge.
 
 import (
 	"crypto/sha256"
@@ -17,6 +20,7 @@ import (
 	"fmt"
 	"slices"
 	"strconv"
+	"strings"
 )
 
 // Approval routes (POST, control token). PathApprovalChallenge has a request budget of its own
@@ -33,7 +37,11 @@ const (
 
 // ApprovalProto is the version of the scheme below (canonical text, nonce, token checks). It is the "proto" of
 // the "approval" block of GET /metrics; a panel that reads another number does not know this machine's rules.
-const ApprovalProto = 1
+//
+// 2 (2026-11-12): every entry names the machine it is for, and the nonce is made of that too (MachineEntry,
+// ApprovalNonce). 1 was the scheme of the test build of 2026-11-11, never released: its nonce had no machine in
+// it, and no nonce of 1 equals a nonce of 2.
+const ApprovalProto = 2
 
 // Limits. A machine refuses anything beyond them before it looks at the content.
 const (
@@ -43,6 +51,8 @@ const (
 	ChallengeLen       = 43   // characters of a challenge: 32 bytes, base64url without padding
 	MaxTrustKeys       = 4    // pinned keys
 	MaxTrustUsers      = 32   // allowed users
+	MinMachineID       = 22   // characters of a machine id: 16 random bytes in base64url (32 in hex)
+	MaxMachineID       = 64
 )
 
 // Error codes ("code" of a refused request).
@@ -178,8 +188,19 @@ func (r ApprovalRequest) Canonical() (string, error) {
 	return "", errors.New("verb must be fan_set, fan_mode, power, apply_update or trust_set")
 }
 
-// ApprovalEntry is one (challenge, request) pair of an approval.
-type ApprovalEntry struct {
+// MachineEntry is one (machine, challenge, request) triple of an approval: this request, on this machine, for
+// this challenge of that machine.
+//
+// MachineID is the "machine_id" of the machine the entry is for: the id that machine keeps in its trust file
+// and shows in its "approval" block. Whoever builds the list (the panel) writes the id it has on record for the
+// machine it MEANS, never one that came with the challenge: the challenge is asked over the network and may be
+// another machine's, and the id is what ties the approval to the machine the person saw on the screen. The
+// machine that checks does not read this member of its own entry: it hashes its own id in its place.
+//
+// The one entry whose MachineID may be empty is the proof of a first-time set ("trust_set hash=...") that
+// proposes no machine id (TrustInit.MachineID absent: the machine picks one).
+type MachineEntry struct {
+	MachineID string `json:"machine_id"`
 	Challenge string `json:"challenge"` // as the machine gave it: 43 characters
 	Request   string `json:"request"`   // ApprovalRequest.Canonical
 }
@@ -187,12 +208,33 @@ type ApprovalEntry struct {
 // Approval is the "approval" field of POST /fan/mode, /fan/duty, /power and /update: the ID token and the whole
 // list its nonce was made from, in the same order.
 type Approval struct {
-	Token   string          `json:"token"`
-	Entries []ApprovalEntry `json:"entries"`
+	Token   string         `json:"token"`
+	Entries []MachineEntry `json:"entries"`
 }
 
-// nonceDomain starts every nonce input: nothing else Fairy hashes begins with it.
-const nonceDomain = "fairy-approval-v1"
+// nonceDomain starts every nonce input: nothing else Fairy hashes begins with it. "v1" was the nonce without a
+// machine id (the test build of 2026-11-11); the two differ in this text, so no input of one is an input of the
+// other.
+const nonceDomain = "fairy-approval-v2"
+
+// trustSetPrefix starts the canonical text of the first-time set of the trust, and of nothing else.
+const trustSetPrefix = ApproveTrustSet + " "
+
+// CheckMachineID says whether s can be a machine id: MinMachineID to MaxMachineID characters of the base64url
+// alphabet (A-Z a-z 0-9 - _), which hex is a part of. 16 random bytes are 22 characters in base64url and 32 in
+// hex. The id is a name, not a secret, and it is compared and hashed as the text it is.
+func CheckMachineID(s string) error {
+	if len(s) < MinMachineID || len(s) > MaxMachineID {
+		return fmt.Errorf("a machine id is %d-%d characters (at least 16 random bytes, in base64url or hex)", MinMachineID, MaxMachineID)
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if !(c >= 'A' && c <= 'Z' || c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || c == '-' || c == '_') {
+			return errors.New("a machine id is made of A-Z a-z 0-9 - _ only")
+		}
+	}
+	return nil
+}
 
 // DecodeChallenge returns the 32 bytes of a challenge. Exactly 43 characters of the URL-safe alphabet, no
 // padding, no stray bits.
@@ -225,47 +267,69 @@ func decode32(s string) ([]byte, error) {
 
 // ApprovalNonce is the nonce of the one Pocket ID request that approves entries:
 //
-//	base64url_nopad( SHA-256( "fairy-approval-v1" || 0x00 || be32(len(entries)) ||
-//	                          for each entry, in order: challenge (its 32 bytes) || be32(len(request)) || request ) )
+//	base64url_nopad( SHA-256( "fairy-approval-v2" || 0x00 || be32(len(entries)) ||
+//	    for each entry, in order: challenge (its 32 bytes) || be32(len(request)) || request ||
+//	                              be32(len(machine_id)) || machine_id ) )
 //
-// be32 is a 4-byte big-endian number; request is the canonical text as bytes. Every part has a fixed length or
-// its length in front, so two different lists never give the same input. It refuses a list that is empty or
-// longer than MaxApprovalEntries, a malformed challenge, a challenge that is in the list twice, and a request
-// that is empty, longer than MaxApprovalRequest or not printable ASCII.
-func ApprovalNonce(entries []ApprovalEntry) (string, error) {
-	if len(entries) == 0 || len(entries) > MaxApprovalEntries {
-		return "", fmt.Errorf("an approval has 1-%d entries", MaxApprovalEntries)
+// be32 is a 4-byte big-endian number; request is the canonical text as bytes, machine_id the id as the text it
+// is. Every part has a fixed length or its length in front, so two different lists never give the same input.
+// It refuses a list that is empty or longer than MaxApprovalEntries, a malformed challenge, a challenge that is
+// in the list twice, a request that is empty, longer than MaxApprovalRequest or not printable ASCII, and a
+// machine id that is not one (CheckMachineID). A machine id may be empty in one place only: an entry whose
+// request is the first-time set of the trust ("trust_set hash=..."), for a set that proposes no id.
+//
+// The panel and the machine both call this one function. The panel passes, for each entry, the machine id it
+// has on record for the machine it means. The machine passes the list it was sent with its own id written into
+// its own entry.
+func ApprovalNonce(entries []MachineEntry) (string, error) {
+	in, err := nonceInput(entries)
+	if err != nil {
+		return "", err
 	}
-	h := sha256.New()
-	h.Write([]byte(nonceDomain))
-	h.Write([]byte{0})
-	var n [4]byte
-	binary.BigEndian.PutUint32(n[:], uint32(len(entries)))
-	h.Write(n[:])
+	sum := sha256.Sum256(in)
+	return base64.RawURLEncoding.EncodeToString(sum[:]), nil
+}
+
+// nonceInput is what ApprovalNonce hashes: the checks of the list, and the bytes.
+func nonceInput(entries []MachineEntry) ([]byte, error) {
+	if len(entries) == 0 || len(entries) > MaxApprovalEntries {
+		return nil, fmt.Errorf("an approval has 1-%d entries", MaxApprovalEntries)
+	}
+	in := make([]byte, 0, len(nonceDomain)+5+len(entries)*(32+4+MaxApprovalRequest+4+MaxMachineID))
+	in = append(in, nonceDomain...)
+	in = append(in, 0)
+	in = binary.BigEndian.AppendUint32(in, uint32(len(entries)))
 	seen := make(map[[32]byte]bool, len(entries))
 	for _, e := range entries {
 		c, err := DecodeChallenge(e.Challenge)
 		if err != nil {
-			return "", err
+			return nil, err
 		}
 		if seen[[32]byte(c)] {
-			return "", errors.New("a challenge is in the list twice")
+			return nil, errors.New("a challenge is in the list twice")
 		}
 		seen[[32]byte(c)] = true
 		if len(e.Request) == 0 || len(e.Request) > MaxApprovalRequest {
-			return "", fmt.Errorf("a request is 1-%d bytes", MaxApprovalRequest)
+			return nil, fmt.Errorf("a request is 1-%d bytes", MaxApprovalRequest)
 		}
 		for i := 0; i < len(e.Request); i++ {
 			if e.Request[i] < 0x20 || e.Request[i] > 0x7e {
-				return "", errors.New("a request is printable ASCII")
+				return nil, errors.New("a request is printable ASCII")
 			}
 		}
-		h.Write(c)
-		binary.BigEndian.PutUint32(n[:], uint32(len(e.Request)))
-		h.Write(n[:])
-		h.Write([]byte(e.Request))
+		// every entry names its machine; only the proof of a first-time set that proposes no id has none
+		if e.MachineID != "" || !strings.HasPrefix(e.Request, trustSetPrefix) {
+			if err := CheckMachineID(e.MachineID); err != nil {
+				return nil, err
+			}
+		}
+		in = append(in, c...)
+		in = binary.BigEndian.AppendUint32(in, uint32(len(e.Request)))
+		in = append(in, e.Request...)
+		in = binary.BigEndian.AppendUint32(in, uint32(len(e.MachineID)))
+		in = append(in, e.MachineID...)
 	}
-	return base64.RawURLEncoding.EncodeToString(h.Sum(nil)), nil
+	return in, nil
 }
 
 // ChallengeResponse is the 200 answer of POST /approval/challenge.
@@ -305,14 +369,21 @@ type TrustKey struct {
 // A first-time set must prove that it works: Approval is an approval of the request "trust_set hash=<TrustHash
 // of these four values>" (a challenge of this machine for exactly that request, POST /approval/challenge with
 // the verb trust_set), and its token is checked like every approval, against the PROPOSED values: signed by a
-// proposed key, "iss" the proposed issuer, "aud" the proposed client, "sub" one of the proposed users. Only
-// then is the trust written. So a wrong issuer spelling, client id, user id or key, or a machine whose clock
-// is off, is found out before the machine locks, not after.
+// proposed key, "iss" the proposed issuer, "aud" the proposed client, "sub" one of the proposed users, and the
+// nonce made with the proposed machine id in this machine's entry. Only then is the trust written. So a wrong
+// issuer spelling, client id, user id or key, or a machine whose clock is off, is found out before the machine
+// locks, not after; and a proof that was given for one machine id does not set another.
 type TrustInit struct {
 	Issuer   string     `json:"issuer"`    // https://..., exactly the "iss" of the tokens
 	ClientID string     `json:"client_id"` // the Pocket ID client "Fairy PC actions"
 	Keys     []TrustKey `json:"keys"`      // 1-MaxTrustKeys
 	Users    []string   `json:"users"`     // 1-MaxTrustUsers "sub" values that may approve
+	// MachineID is the machine id this machine is to have from now on (CheckMachineID): the panel makes it up,
+	// from at least 16 random bytes, and keeps it on record for this machine. Absent or "": the machine makes
+	// one up itself and says which in its answer. Either way it is written into the trust file with the first
+	// trust and stays as long as that file does. It is not part of TrustHash; what binds it to the proof is the
+	// proof's own entry, whose MachineID must be exactly this value (also when it is empty).
+	MachineID string `json:"machine_id,omitempty"`
 	// Approval is the proof (see above). Without it the set is refused with proof_required.
 	Approval *Approval `json:"approval,omitempty"`
 }
@@ -331,7 +402,8 @@ const trustDomain = "fairy-trust-v1"
 // str(x) is be32(len(x)) || x, the bytes of the string as it is in the JSON body (n and e stay base64url text);
 // be32 is a 4-byte big-endian number. A key's "use" is not part of it. The order of keys and users counts: the
 // body that is sent must list them in the order that was hashed. Every part has its length in front, so two
-// different proposals never give the same input. The values are not checked here.
+// different proposals never give the same input. The values are not checked here. The machine id is not part
+// of it (TrustInit.MachineID): two machines that trust the same Pocket ID have the same hash.
 func TrustHash(in TrustInit) string {
 	h := sha256.New()
 	h.Write([]byte(trustDomain))
@@ -384,10 +456,18 @@ type ApprovalStatus struct {
 	EnforcedBy string `json:"enforced_by"`
 	Proto      int    `json:"proto"`
 	// The rest is set while State is required.
-	Issuer   string        `json:"issuer,omitempty"`
-	ClientID string        `json:"client_id,omitempty"`
-	Keys     []ApprovalKey `json:"keys,omitempty"`
-	Users    int           `json:"users,omitempty"` // how many users may approve
+	//
+	// MachineID is this machine's id: made up when the trust was set for the first time, kept in the trust
+	// file, and part of every approval's nonce (MachineEntry). It is a name, not a secret. It is the same
+	// until the trust file is removed or an administrator on the machine asks for a new one. What it is worth
+	// rests on the panel: the panel keeps each machine's id on record from the first-time set (or from the
+	// first time it sees one), builds every entry with the id on record, and treats two machines that show the
+	// same id, or a machine whose id is suddenly another, as an alarm. A machine cannot see either by itself.
+	MachineID string        `json:"machine_id,omitempty"`
+	Issuer    string        `json:"issuer,omitempty"`
+	ClientID  string        `json:"client_id,omitempty"`
+	Keys      []ApprovalKey `json:"keys,omitempty"`
+	Users     int           `json:"users,omitempty"` // how many users may approve
 	// TrustHash is TrustHash of what this machine trusts: issuer, client id, keys and users, in the file's
 	// order. The user ids themselves are not sent; with the hash a panel can still tell whether the machine
 	// trusts exactly what the panel would set (the hash it computed for its own first-time set), users

@@ -117,7 +117,7 @@ func (r *lrig) setTrustOnTheMachine(t *testing.T, change func(*approval.Trust)) 
 	t.Helper()
 	in := r.iss.Init()
 	w := approval.DefaultFanWindowS
-	tr := approval.Trust{Issuer: in.Issuer, ClientID: in.ClientID, Keys: in.Keys, Users: in.Users, FanWindowS: &w, SetBy: "admin"}
+	tr := approval.Trust{MachineID: in.MachineID, Issuer: in.Issuer, ClientID: in.ClientID, Keys: in.Keys, Users: in.Users, FanWindowS: &w, SetBy: "admin"}
 	if change != nil {
 		change(&tr)
 	}
@@ -432,5 +432,5 @@ func provenTrustOrPlain(t *testing.T, r *lrig, in api.TrustInit) api.TrustInit {
 	if st != 200 {
 		return in
 	}
-	return r.iss.Prove(time.Now(), in, api.ApprovalEntry{Challenge: c["challenge"].(string), Request: c["request"].(string)})
+	return r.iss.Prove(time.Now(), in, api.MachineEntry{MachineID: in.MachineID, Challenge: c["challenge"].(string), Request: c["request"].(string)})
 }

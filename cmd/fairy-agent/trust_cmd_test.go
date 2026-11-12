@@ -244,15 +244,17 @@ func TestHelperTrustRefusals(t *testing.T) {
 }
 
 func TestHelperStatusApprovalLines(t *testing.T) {
-	tr, err := approval.FromInit(approvaltest.New().Init("a", "b", "c"), approvalTestTime)
+	tr, err := approval.FromInit(approvaltest.New().Init("a", "b", "c"), approvalTestTime, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	st := tr.Status()
 	st.EnforcedBy = api.EnforcedByHelper
-	b, _ := json.Marshal(map[string]any{"version": "x", "proto": 2, "approval": st})
+	b, _ := json.Marshal(map[string]any{"version": "x", "proto": 3, "approval": st})
 	got := strings.Join(helperApprovalLines(b), "\n")
-	for _, want := range []string{"pipe protocol:   2", "approval:        required (checked by the helper)", "issuer:          " + approvaltest.IssuerURL,
+	for _, want := range []string{"pipe protocol:   3", "approval:        required (checked by the helper)", "issuer:          " + approvaltest.IssuerURL,
+		"machine id:      " + approvaltest.MachineID + " (names this machine in every approval", "A machine made from a copy of this disk has the SAME id",
+		"until the copy's trust is set anew: fairy-agent helper-trust set --new-machine-id",
 		"client id:       " + approvaltest.ClientID, "kid " + approvaltest.Kid + ", RS256, thumbprint ", "allowed users:   3", "fan window:      30 s", "shutdown after boot: off"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("helper-status lacks %q:\n%s", want, got)
@@ -263,16 +265,23 @@ func TestHelperStatusApprovalLines(t *testing.T) {
 			t.Errorf("helper-status shows a user or a whole key:\n%s", got)
 		}
 	}
-	off, _ := json.Marshal(map[string]any{"proto": 2, "approval": api.ApprovalStatus{State: api.ApprovalOff, EnforcedBy: api.EnforcedByHelper, Proto: 1}})
+	off, _ := json.Marshal(map[string]any{"proto": 3, "approval": api.ApprovalStatus{State: api.ApprovalOff, EnforcedBy: api.EnforcedByHelper, Proto: api.ApprovalProto}})
 	if got := strings.Join(helperApprovalLines(off), "\n"); !strings.Contains(got, "approval:        off (checked by the helper)") {
 		t.Errorf("off:\n%s", got)
 	}
-	broken, _ := json.Marshal(map[string]any{"proto": 2, "approval": api.ApprovalStatus{State: api.ApprovalBroken, EnforcedBy: api.EnforcedByHelper, Error: "not a trust file"}})
+	broken, _ := json.Marshal(map[string]any{"proto": 3, "approval": api.ApprovalStatus{State: api.ApprovalBroken, EnforcedBy: api.EnforcedByHelper, Error: "not a trust file"}})
 	if got := strings.Join(helperApprovalLines(broken), "\n"); !strings.Contains(got, "approval:        broken") || !strings.Contains(got, "not a trust file") {
 		t.Errorf("broken:\n%s", got)
 	}
 	if got := strings.Join(helperApprovalLines([]byte(`{"version":"0.6.0"}`)), "\n"); !strings.Contains(got, "from before passkey approvals") {
 		t.Errorf("old helper:\n%s", got)
+	}
+	// the helper of the test build of 2026-11-11 (pipe protocol 2): what it says about approvals is not shown as
+	// if it counted
+	b2, _ := json.Marshal(map[string]any{"version": "x", "proto": 2, "approval": st})
+	if got := strings.Join(helperApprovalLines(b2), "\n"); !strings.Contains(got, "pipe protocol:   2 (the test build of 2026-11-11; this agent needs 3)") ||
+		!strings.Contains(got, "Install this version of both services") || strings.Contains(got, "required") {
+		t.Errorf("the test build's helper:\n%s", got)
 	}
 }
 
@@ -321,7 +330,8 @@ func TestHelperTrustSetWarnsAboutTheClock(t *testing.T) {
 // runs next to the file.
 func TestHelperTrustSetSaysWhatIsInEffect(t *testing.T) {
 	status := func(v map[string]any) []byte { b, _ := json.Marshal(v); return b }
-	newHelper := status(map[string]any{"version": "x", "proto": 2, "approval": map[string]any{"state": "off", "enforced_by": "helper", "proto": 1}})
+	newHelper := status(map[string]any{"version": "x", "proto": 3, "approval": map[string]any{"state": "off", "enforced_by": "helper", "proto": 2}})
+	testBuild := status(map[string]any{"version": "x", "proto": 2, "approval": map[string]any{"state": "off", "enforced_by": "helper", "proto": 1}})
 	oldHelper := status(map[string]any{"version": "0.6.0", "features": []string{"power"}, "sleep_ok": true})
 	for _, c := range []struct {
 		name, state string
@@ -330,14 +340,16 @@ func TestHelperTrustSetSaysWhatIsInEffect(t *testing.T) {
 		want, never []string
 	}{
 		{"not Windows", trustNoHelperHere, nil, nil, []string{"In effect within 5 seconds, if the fairy-agent service runs this version", "An older fairy-agent", "Until then what was in effect before still counts"}, []string{"NOT IN EFFECT"}},
-		{"the new helper runs", trustHelperAsked, newHelper, nil, []string{"In effect within 5 seconds: the running helper (pipe protocol 2)", "a user or key you just removed can still approve"}, []string{"NOT"}},
+		{"the new helper runs", trustHelperAsked, newHelper, nil, []string{"In effect within 5 seconds: the running helper (pipe protocol 3)", "a user or key you just removed can still approve"}, []string{"NOT"}},
+		{"the helper of the test build of 2026-11-11 runs (pipe protocol 2)", trustHelperAsked, testBuild, nil,
+			[]string{"NOT IN EFFECT IN THE HELPER: the fairy-agent-helper that is running is the test build of 2026-11-11", "(pipe protocol 2)", "503 approval_unavailable", "Install this version of both services"}, []string{"In effect within"}},
 		{"the old helper still runs", trustHelperAsked, oldHelper, nil,
 			[]string{"NOT IN EFFECT IN THE HELPER YET", "from before passkey approvals", "503 approval_unavailable", "Restart-Service fairy-agent-helper"}, []string{"In effect within"}},
-		{"a helper that says proto 2 but reports no approval state", trustHelperAsked, status(map[string]any{"proto": 2}), nil, []string{"NOT IN EFFECT IN THE HELPER YET"}, []string{"In effect within"}},
+		{"a helper that says proto 3 but reports no approval state", trustHelperAsked, status(map[string]any{"proto": 3}), nil, []string{"NOT IN EFFECT IN THE HELPER YET"}, []string{"In effect within"}},
 		{"an answer that is not JSON", trustHelperAsked, []byte("?"), nil, []string{"NOT IN EFFECT IN THE HELPER YET"}, []string{"In effect within"}},
 		{"the helper is stopped", api.HelperStopped, nil, nil, []string{"is not running (stopped)", "reads the trust file when it starts"}, []string{"In effect within"}},
 		{"no helper installed", api.HelperNotInstalled, nil, nil, []string{"In effect within 5 seconds for what the agent carries out itself"}, []string{"NOT"}},
-		{"the helper cannot be asked", "", nil, errors.New("the helper's pipe: access is denied"), []string{"NOT KNOWN whether it is in effect", "access is denied", "pipe protocol:   2"}, []string{"In effect within"}},
+		{"the helper cannot be asked", "", nil, errors.New("the helper's pipe: access is denied"), []string{"NOT KNOWN whether it is in effect", "access is denied", "pipe protocol:   3"}, []string{"In effect within"}},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			r := newTrustRig(t)
@@ -393,4 +405,143 @@ func TestHelperTrustShowsWhoseTrustItIs(t *testing.T) {
 	if code != 0 || !strings.Contains(out, "removed. Approval is off") || !strings.Contains(out, "whoever holds the control token") {
 		t.Fatalf("clear: %d\n%s", code, out)
 	}
+}
+
+// TestHelperTrustMachineID (audit 5, r1-x1-01): the machine id is made up by the first set, shown by show
+// together with what a copied disk means, kept by every later set, never taken from another machine's file,
+// and replaced only when asked (--new-machine-id) or when the trust is cleared and set anew.
+func TestHelperTrustMachineID(t *testing.T) {
+	r := newTrustRig(t)
+	set := func(args ...string) string {
+		t.Helper()
+		code, out, errs := r.run("", append([]string{"set", "--yes"}, args...)...)
+		if code != 0 {
+			t.Fatalf("set %v: %d\n%s\n%s", args, code, out, errs)
+		}
+		return out
+	}
+	out := set("--issuer", r.issuer.URL, "--client-id", "c", "--user", "user-a")
+	id := r.trust().MachineID
+	if api.CheckMachineID(id) != nil || len(id) != 22 {
+		t.Fatalf("the first set made up the id %q", id)
+	}
+	if !strings.Contains(out, "machine id:      "+id) || !strings.Contains(out, "the machine id:   new, made up just now") {
+		t.Errorf("the first set does not show the id it made up:\n%s", out)
+	}
+	// show: the id, and what a copied disk means, and what to do on the copy
+	code, out, _ := r.run("", "show")
+	for _, want := range []string{"machine id:      " + id + " (names this machine in every approval; the panel keeps it on record)",
+		"A machine made from a copy of this disk has the SAME id", "accept each other's", "until the copy's trust is set anew: fairy-agent helper-trust set --new-machine-id"} {
+		if code != 0 || !strings.Contains(out, want) {
+			t.Errorf("show lacks %q:\n%s", want, out)
+		}
+	}
+	// every later set keeps it: other users, other keys, other settings
+	for _, args := range [][]string{{"--user", "user-b"}, {"--fetch-keys"}, {"--fan-window", "10", "--boot-shutdown", "120"}, {"--client-id", "other"}} {
+		out := set(args...)
+		if got := r.trust().MachineID; got != id || !strings.Contains(out, "the machine id:   kept as it was") {
+			t.Fatalf("set %v: the id is %q, was %q\n%s", args, got, id, out)
+		}
+	}
+	// --from another machine's trust file: its values, not its id
+	other, err := approval.FromInit(approvaltest.New().Init("someone-else"), approvalTestTime, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	from := filepath.Join(t.TempDir(), "other-machine.json")
+	if err := os.WriteFile(from, other.Marshal(), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	set("--from", from)
+	if tr := r.trust(); tr.MachineID != id || tr.MachineID == other.MachineID || tr.Issuer != approvaltest.IssuerURL || tr.Users[0] != "someone-else" {
+		t.Fatalf("set --from: %+v", tr)
+	}
+	// ... also when that file is one from before machine ids
+	other.MachineID = ""
+	if err := os.WriteFile(from, other.Marshal(), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	set("--from", from)
+	if tr := r.trust(); tr.MachineID != id {
+		t.Fatalf("set --from an old file: %+v", tr)
+	}
+	// --new-machine-id: another one, said loudly, everything else kept
+	before := r.trust()
+	out = set("--new-machine-id")
+	after := r.trust()
+	if after.MachineID == id || api.CheckMachineID(after.MachineID) != nil || !strings.Contains(out, "the machine id:   NEW, it was "+id) ||
+		!strings.Contains(out, "until the panel is told the new one") {
+		t.Fatalf("set --new-machine-id: %q -> %q\n%s", id, after.MachineID, out)
+	}
+	if after.Issuer != before.Issuer || after.ClientID != before.ClientID || strings.Join(after.Users, ",") != strings.Join(before.Users, ",") ||
+		after.Keys[0].N != before.Keys[0].N || after.FanWindow() != before.FanWindow() || after.BootShutdownS != before.BootShutdownS {
+		t.Errorf("set --new-machine-id changed more than the id:\n%+v\n%+v", before, after)
+	}
+	// clear, then set: the trust is set anew, with a new id
+	if code, _, _ := r.run("", "clear", "--yes"); code != 0 {
+		t.Fatal("clear")
+	}
+	set("--issuer", r.issuer.URL, "--client-id", "c", "--user", "user-a")
+	if got := r.trust().MachineID; got == id || got == after.MachineID || api.CheckMachineID(got) != nil {
+		t.Fatalf("after clear and set: %q", got)
+	}
+	// no random numbers: nothing is written
+	if code, _, _ := r.run("", "clear", "--yes"); code != 0 {
+		t.Fatal("clear")
+	}
+	oldNew := trustNewID
+	trustNewID = func() (string, error) { return "", errors.New("no random numbers for a machine id") }
+	t.Cleanup(func() { trustNewID = oldNew })
+	if code, _, errs := r.run("", "set", "--yes", "--issuer", r.issuer.URL, "--client-id", "c", "--user", "user-a"); code != 1 || !strings.Contains(errs, "no random numbers") || r.trust() != nil {
+		t.Fatalf("set without random numbers: %d %s", code, errs)
+	}
+}
+
+// TestHelperTrustWithAFileFromBeforeMachineIDs: the command does not add the id by itself when it only looks
+// (show says what is wrong, and that the service adds it at its start); set keeps the file's values and
+// writes it with an id.
+func TestHelperTrustWithAFileFromBeforeMachineIDs(t *testing.T) {
+	r := newTrustRig(t)
+	old, err := approval.FromInit(approvaltest.New().Init("user-a", "user-b"), approvalTestTime, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	old.MachineID = ""
+	raw := old.Marshal()
+	if err := os.WriteFile(r.files.Path, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	code, out, _ := r.run("", "show")
+	if code != 0 || !strings.Contains(out, "BROKEN") || !strings.Contains(out, "has no machine_id") || !strings.Contains(out, "adds one when it starts") ||
+		!strings.Contains(out, "fairy-agent helper-trust set") {
+		t.Fatalf("show: %d\n%s", code, out)
+	}
+	if now, _ := os.ReadFile(r.files.Path); !bytes.Equal(now, raw) {
+		t.Fatal("show wrote the file")
+	}
+	code, out, errs := r.run("", "set", "--yes", "--jwks", writeJWKS(t, old.Keys))
+	if code != 0 || !strings.Contains(out, "the existing trust file has no machine id; its values are kept and it gets one now") ||
+		!strings.Contains(out, "the machine id:   new, made up just now") || strings.Contains(out, "will be replaced") {
+		t.Fatalf("set: %d\n%s\n%s", code, out, errs)
+	}
+	tr := r.trust()
+	if tr == nil || api.CheckMachineID(tr.MachineID) != nil || tr.Issuer != old.Issuer || tr.ClientID != old.ClientID || strings.Join(tr.Users, ",") != "user-a,user-b" ||
+		tr.Keys[0].N != old.Keys[0].N {
+		t.Fatalf("after set: %+v", tr)
+	}
+}
+
+// writeJWKS writes keys as a JWKS file and returns its name.
+func writeJWKS(t *testing.T, keys []api.TrustKey) string {
+	t.Helper()
+	var list []any
+	for _, k := range keys {
+		list = append(list, map[string]any{"kty": k.Kty, "kid": k.Kid, "alg": k.Alg, "n": k.N, "e": k.E})
+	}
+	b, _ := json.Marshal(map[string]any{"keys": list})
+	name := filepath.Join(t.TempDir(), "jwks.json")
+	if err := os.WriteFile(name, b, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return name
 }

@@ -22,7 +22,7 @@ func TestUnixFileChecks(t *testing.T) {
 	if state() != api.ApprovalOff {
 		t.Fatalf("empty folder: %s", state())
 	}
-	tr, err := approval.FromInit(approvaltest.New().Init(), nowForTests)
+	tr, err := approval.FromInit(approvaltest.New().Init(), nowForTests, nil)
 	must(t, err)
 	must(t, f.Create(tr))
 	if st, _ := os.Stat(f.Path); st.Mode().Perm() != 0o600 {

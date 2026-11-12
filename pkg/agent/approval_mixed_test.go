@@ -142,7 +142,7 @@ func newMixedRig(t *testing.T, o mixedOpts) *mixedRig {
 // setTrustOnTheMachine writes the trust file the way an administrator's helper-trust set does.
 func (r *mixedRig) setTrustOnTheMachine(t *testing.T) {
 	t.Helper()
-	tr, err := approval.FromInit(r.iss.Init(), time.Now())
+	tr, err := approval.FromInit(r.iss.Init(), time.Now(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -178,7 +178,7 @@ func (r *mixedRig) approve(t *testing.T, req map[string]any) *api.Approval {
 	if st != 200 || c["needed"] != true || c["issuer"] != r.iss.URL {
 		t.Fatalf("challenge for %v: %d %v", req, st, c)
 	}
-	return r.iss.Approve(time.Now(), api.ApprovalEntry{Challenge: c["challenge"].(string), Request: c["request"].(string)})
+	return r.iss.Approve(time.Now(), api.MachineEntry{MachineID: approvaltest.MachineID, Challenge: c["challenge"].(string), Request: c["request"].(string)})
 }
 
 func (r *mixedRig) waitUpdate(t *testing.T) agent.UpdateStatus {
@@ -520,7 +520,7 @@ func TestUpdateRightAfterTrustWasSetOnTheMachine(t *testing.T) {
 func TestRefusedUpdateApprovalLeavesNoStage(t *testing.T) {
 	r := newMixedRig(t, mixedOpts{helper: api.HelperRunning, trust: true})
 	r.block(t, api.ApprovalRequired)
-	junk := &api.Approval{Token: "a.b.c", Entries: []api.ApprovalEntry{{Challenge: strings.Repeat("A", 43), Request: "apply_update"}}}
+	junk := &api.Approval{Token: "a.b.c", Entries: []api.MachineEntry{{MachineID: approvaltest.MachineID, Challenge: strings.Repeat("A", 43), Request: "apply_update"}}}
 	if st, b := r.post(t, "/update", map[string]any{"approval": junk}); st != 202 {
 		t.Fatalf("update with a made-up approval: %d %v", st, b)
 	}

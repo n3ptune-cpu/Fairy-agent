@@ -56,23 +56,23 @@ func (a *arig) server() *Server {
 	return srv
 }
 
-// v2 sends a protocol version 2 request the way the agent does.
-func (a *arig) v2(t *testing.T, req proto.Request) proto.Response {
+// v3 sends a protocol version 3 request the way the agent does.
+func (a *arig) v3(t *testing.T, req proto.Request) proto.Response {
 	t.Helper()
 	b, err := proto.EncodeRequest(req)
 	if err != nil {
 		t.Fatalf("encode %+v: %v", req, err)
 	}
-	if proto.FrameVersion(req) != proto.Version2 {
+	if proto.FrameVersion(req) != proto.Version3 {
 		t.Fatalf("%s is not a version 2 request", req.Verb)
 	}
-	return a.srv.HandleV2(context.Background(), "test-client", b)
+	return a.srv.HandleV3(context.Background(), "test-client", b)
 }
 
 func (a *arig) trust(t *testing.T) {
 	t.Helper()
 	in := a.proven(t, a.iss, a.iss.Init())
-	if resp := a.v2(t, proto.Request{Verb: proto.VerbTrustInit, Trust: &in}); resp.Status != 200 {
+	if resp := a.v3(t, proto.Request{Verb: proto.VerbTrustInit, Trust: &in}); resp.Status != 200 {
 		t.Fatalf("trust_init: %+v", resp)
 	}
 }
@@ -82,12 +82,12 @@ func (a *arig) trust(t *testing.T) {
 func (a *arig) proven(t *testing.T, iss *approvaltest.Issuer, in api.TrustInit) api.TrustInit {
 	t.Helper()
 	hash := api.TrustHash(in)
-	resp := a.v2(t, proto.Request{Verb: proto.VerbChallenge, For: ptr(proto.ForTrustSet), TrustHash: &hash})
+	resp := a.v3(t, proto.Request{Verb: proto.VerbChallenge, For: ptr(proto.ForTrustSet), TrustHash: &hash})
 	var c api.ChallengeResponse
 	if resp.Status != 200 || json.Unmarshal(resp.Data, &c) != nil || !c.Needed || c.Request != "trust_set hash="+hash || c.Issuer != "" {
 		t.Fatalf("challenge for trust_set: %+v", resp)
 	}
-	return iss.Prove(time.Now(), in, api.ApprovalEntry{Challenge: c.Challenge, Request: c.Request})
+	return iss.Prove(time.Now(), in, api.MachineEntry{MachineID: in.MachineID, Challenge: c.Challenge, Request: c.Request})
 }
 
 func (a *arig) status(t *testing.T) proto.StatusData {
@@ -105,12 +105,12 @@ func (a *arig) approvalFor(t *testing.T, req proto.Request) *api.Approval {
 	t.Helper()
 	ch := req
 	ch.For, ch.Verb, ch.By, ch.Approval = &req.Verb, proto.VerbChallenge, nil, nil
-	resp := a.v2(t, ch)
+	resp := a.v3(t, ch)
 	var c api.ChallengeResponse
 	if resp.Status != 200 || json.Unmarshal(resp.Data, &c) != nil || !c.Needed {
 		t.Fatalf("challenge for %s: %+v", req.Verb, resp)
 	}
-	return a.iss.Approve(time.Now(), api.ApprovalEntry{Challenge: c.Challenge, Request: c.Request})
+	return a.iss.Approve(time.Now(), api.MachineEntry{MachineID: approvaltest.MachineID, Challenge: c.Challenge, Request: c.Request})
 }
 
 func ptr[T any](v T) *T { return &v }
@@ -137,7 +137,7 @@ func wantCode(t *testing.T, what string, resp proto.Response, status int, code s
 func TestNoTrustBehavesAsBefore(t *testing.T) {
 	a := newApprovalRig(t)
 	sd := a.status(t)
-	if sd.Proto != 2 || sd.Approval == nil || sd.Approval.State != api.ApprovalOff || sd.Approval.EnforcedBy != api.EnforcedByHelper {
+	if sd.Proto != 3 || sd.Approval == nil || sd.Approval.State != api.ApprovalOff || sd.Approval.EnforcedBy != api.EnforcedByHelper || sd.Approval.Proto != 2 {
 		t.Fatalf("status: proto %d, approval %+v", sd.Proto, sd.Approval)
 	}
 	a.setManual(t, 50)
@@ -155,12 +155,12 @@ func TestNoTrustBehavesAsBefore(t *testing.T) {
 	ch := fanSetReq(0, 60)
 	ch.Verb, ch.For, ch.By = proto.VerbChallenge, ptr(proto.VerbFanSet), nil
 	var c api.ChallengeResponse
-	if resp := a.v2(t, ch); resp.Status != 200 || json.Unmarshal(resp.Data, &c) != nil || c.Needed || c.Reason != "off" {
+	if resp := a.v3(t, ch); resp.Status != 200 || json.Unmarshal(resp.Data, &c) != nil || c.Needed || c.Reason != "off" {
 		t.Errorf("challenge without trust: %+v", resp)
 	}
 	req := powerReq("reboot", 60)
-	req.Approval = &api.Approval{Token: "a.b.c", Entries: []api.ApprovalEntry{{Challenge: strings.Repeat("A", 43), Request: "x"}}}
-	if resp := a.v2(t, req); resp.Status != 200 {
+	req.Approval = &api.Approval{Token: "a.b.c", Entries: []api.MachineEntry{{MachineID: approvaltest.MachineID, Challenge: strings.Repeat("A", 43), Request: "x"}}}
+	if resp := a.v3(t, req); resp.Status != 200 {
 		t.Errorf("approval sent without trust: %+v", resp)
 	}
 }
@@ -170,12 +170,12 @@ func TestNoTrustBehavesAsBefore(t *testing.T) {
 func TestHelperFirstTimeSetNeedsProof(t *testing.T) {
 	a := newApprovalRig(t)
 	in := a.iss.Init()
-	wantCode(t, "trust_init without a proof", a.v2(t, proto.Request{Verb: proto.VerbTrustInit, Trust: &in}), 403, api.CodeTrustProofRequired)
+	wantCode(t, "trust_init without a proof", a.v3(t, proto.Request{Verb: proto.VerbTrustInit, Trust: &in}), 403, api.CodeTrustProofRequired)
 	// the proposal has the issuer's address with a slash too many: Pocket ID's token does not fit it
 	typo := in
 	typo.Issuer += "/"
 	bad := a.proven(t, a.iss, typo)
-	resp := a.v2(t, proto.Request{Verb: proto.VerbTrustInit, Trust: &bad})
+	resp := a.v3(t, proto.Request{Verb: proto.VerbTrustInit, Trust: &bad})
 	wantCode(t, "trust_init with a proof that does not fit the proposal", resp, 403, api.CodeTrustProofRefused)
 	if !strings.HasPrefix(resp.Error, "proof refused (issuer)") {
 		t.Errorf("refusal text: %q", resp.Error)
@@ -183,7 +183,7 @@ func TestHelperFirstTimeSetNeedsProof(t *testing.T) {
 	// a proof for other values than the ones sent
 	other := a.proven(t, a.iss, in)
 	other.Users = []string{approvaltest.User, "attacker"}
-	wantCode(t, "trust_init with values the proof is not for", a.v2(t, proto.Request{Verb: proto.VerbTrustInit, Trust: &other}), 403, api.CodeTrustProofRefused)
+	wantCode(t, "trust_init with values the proof is not for", a.v3(t, proto.Request{Verb: proto.VerbTrustInit, Trust: &other}), 403, api.CodeTrustProofRefused)
 	if sd := a.status(t); sd.Approval.State != api.ApprovalOff {
 		t.Fatalf("after three refused sets: %+v", sd.Approval)
 	}
@@ -199,7 +199,7 @@ func TestHelperFirstTimeSetNeedsProof(t *testing.T) {
 	}
 	// with trust set there is no challenge for another set
 	hash := api.TrustHash(in)
-	wantCode(t, "challenge for trust_set with trust set", a.v2(t, proto.Request{Verb: proto.VerbChallenge, For: ptr(proto.ForTrustSet), TrustHash: &hash}),
+	wantCode(t, "challenge for trust_set with trust set", a.v3(t, proto.Request{Verb: proto.VerbChallenge, For: ptr(proto.ForTrustSet), TrustHash: &hash}),
 		409, api.CodeTrustAlreadySet)
 	log := a.audit.String()
 	for _, want := range []string{"reason=proof_required", "reason=issuer", "reason=no_challenge", "proven by a passkey approval"} {
@@ -224,7 +224,7 @@ func TestHelperEnforcesApproval(t *testing.T) {
 	}
 	// trust is locked
 	in := a.iss.Init("someone-else")
-	wantCode(t, "second trust_init", a.v2(t, proto.Request{Verb: proto.VerbTrustInit, Trust: &in}), 409, api.CodeTrustAlreadySet)
+	wantCode(t, "second trust_init", a.v3(t, proto.Request{Verb: proto.VerbTrustInit, Trust: &in}), 409, api.CodeTrustAlreadySet)
 
 	// an agent from before approvals (plain frames, no approval): refused, nothing runs
 	wantCode(t, "v1 fan_mode", a.call(t, `{"v":1,"verb":"fan_mode","mode":"full","by":"test"}`), 403, api.CodeApprovalRequired)
@@ -246,42 +246,42 @@ func TestHelperEnforcesApproval(t *testing.T) {
 	// approved shutdown
 	req := powerReq("shutdown", 60)
 	req.Approval = a.approvalFor(t, req)
-	if resp := a.v2(t, req); resp.Status != 200 {
+	if resp := a.v3(t, req); resp.Status != 200 {
 		t.Fatalf("approved shutdown: %+v", resp)
 	}
 	if len(a.power.Scheduled) != 1 || a.power.Scheduled[0] != "shutdown@1m0s" {
 		t.Fatalf("scheduled: %v", a.power.Scheduled)
 	}
-	wantCode(t, "replay", a.v2(t, req), 403, api.CodeApprovalRefused)
+	wantCode(t, "replay", a.v3(t, req), 403, api.CodeApprovalRefused)
 	// the approval of one action for another
 	fan := fanSetReq(0, 50)
 	fan.Approval = a.approvalFor(t, fan)
 	swap := powerReq("reboot", 60)
 	swap.Approval = fan.Approval
-	wantCode(t, "fan approval for a reboot", a.v2(t, swap), 403, api.CodeApprovalRefused)
+	wantCode(t, "fan approval for a reboot", a.v3(t, swap), 403, api.CodeApprovalRefused)
 	if len(a.power.Scheduled) != 1 {
 		t.Fatalf("scheduled: %v", a.power.Scheduled)
 	}
 	// A request that the helper refuses for a reason of its own does not use the approval up (audit 5,
 	// r1-a2-01): the fans are not in "full" mode, so a duty changes nothing (409, the fan controller's own
 	// answer), and the approval is still good afterwards.
-	if resp := a.v2(t, fan); resp.Status != 409 || resp.Code == api.CodeApprovalRefused {
+	if resp := a.v3(t, fan); resp.Status != 409 || resp.Code == api.CodeApprovalRefused {
 		t.Fatalf("approved fan_set while the mode is not full: %+v", resp)
 	}
 	wantCode(t, "a refused fan_set opens no fan window", a.call(t, `{"v":1,"verb":"fan_mode","mode":"full","by":"test"}`), 403, api.CodeApprovalRequired)
 	// mode full (also approved); then the fan approval for another duty is refused, and for its own it works
 	mode := proto.Request{Verb: proto.VerbFanMode, Mode: ptr("full"), By: ptr("test")}
 	mode.Approval = a.approvalFor(t, mode)
-	if resp := a.v2(t, mode); resp.Status != 200 {
+	if resp := a.v3(t, mode); resp.Status != 200 {
 		t.Fatalf("approved fan_mode: %+v", resp)
 	}
 	other := fanSetReq(0, 100)
 	other.Approval = fan.Approval
-	wantCode(t, "fan approval for another duty", a.v2(t, other), 403, api.CodeApprovalRefused)
-	if resp := a.v2(t, fan); resp.Status != 200 || a.duty(t, 0) != 50 {
+	wantCode(t, "fan approval for another duty", a.v3(t, other), 403, api.CodeApprovalRefused)
+	if resp := a.v3(t, fan); resp.Status != 200 || a.duty(t, 0) != 50 {
 		t.Fatalf("approved fan_set, after the request that changed nothing: %+v, duty %d", resp, a.duty(t, 0))
 	}
-	wantCode(t, "fan_set replay", a.v2(t, fan), 403, api.CodeApprovalRefused)
+	wantCode(t, "fan_set replay", a.v3(t, fan), 403, api.CodeApprovalRefused)
 	if resp := a.call(t, `{"v":1,"verb":"fan_set","zone":1,"percent":70,"by":"test"}`); resp.Status != 200 || a.duty(t, 1) != 70 {
 		t.Errorf("fan change in the fan window: %+v", resp)
 	}
@@ -290,10 +290,10 @@ func TestHelperEnforcesApproval(t *testing.T) {
 	// approved update
 	up := proto.Request{Verb: proto.VerbApplyUpdate, By: ptr("self-update")}
 	up.Approval = a.approvalFor(t, up)
-	if resp := a.v2(t, up); resp.Status != 200 || a.updates != 1 {
+	if resp := a.v3(t, up); resp.Status != 200 || a.updates != 1 {
 		t.Fatalf("approved update: %+v, %d", resp, a.updates)
 	}
-	wantCode(t, "update replay", a.v2(t, up), 403, api.CodeApprovalRefused)
+	wantCode(t, "update replay", a.v3(t, up), 403, api.CodeApprovalRefused)
 	if a.updates != 1 {
 		t.Fatal("the updater was started twice")
 	}
@@ -302,8 +302,8 @@ func TestHelperEnforcesApproval(t *testing.T) {
 	// approval is never looked at: nothing is used up for a request that cannot run
 	short := powerReq("reboot", 10) // below this machine's min_delay_s (30)
 	short.Approval = a.approvalFor(t, short)
-	wantCode(t, "delay below the minimum", a.v2(t, short), 400, proto.CodeBadRequest)
-	wantCode(t, "the same request again", a.v2(t, short), 400, proto.CodeBadRequest)
+	wantCode(t, "delay below the minimum", a.v3(t, short), 400, proto.CodeBadRequest)
+	wantCode(t, "the same request again", a.v3(t, short), 400, proto.CodeBadRequest)
 	// without an approval the answer is approval_required whatever else is wrong with the request
 	wantCode(t, "delay below the minimum, no approval", a.call(t, `{"v":1,"verb":"power","action":"reboot","delay_s":10,"by":"test"}`), 403, api.CodeApprovalRequired)
 
@@ -314,8 +314,8 @@ func TestHelperEnforcesApproval(t *testing.T) {
 	if st := a.status(t).Approval; st.State != api.ApprovalRequired {
 		t.Fatalf("after a restart: %+v", st)
 	}
-	wantCode(t, "approval from before the restart", a.v2(t, pending), 403, api.CodeApprovalRefused)
-	wantCode(t, "trust_init after a restart", a.v2(t, proto.Request{Verb: proto.VerbTrustInit, Trust: &in}), 409, api.CodeTrustAlreadySet)
+	wantCode(t, "approval from before the restart", a.v3(t, pending), 403, api.CodeApprovalRefused)
+	wantCode(t, "trust_init after a restart", a.v3(t, proto.Request{Verb: proto.VerbTrustInit, Trust: &in}), 409, api.CodeTrustAlreadySet)
 
 	log := a.audit.String()
 	for _, want := range []string{"approval: accepted", "approval: refused", "approval: required, none sent", "sub=" + approvaltest.User,
@@ -347,9 +347,9 @@ func TestBrokenTrustRefusesControlVerbs(t *testing.T) {
 	wantCode(t, "apply_update", a.call(t, `{"v":1,"verb":"apply_update","by":"x"}`), 503, api.CodeApprovalUnavailable)
 	ch := powerReq("shutdown", 60)
 	ch.Verb, ch.For, ch.By = proto.VerbChallenge, ptr(proto.VerbPower), nil
-	wantCode(t, "challenge", a.v2(t, ch), 503, api.CodeApprovalUnavailable)
+	wantCode(t, "challenge", a.v3(t, ch), 503, api.CodeApprovalUnavailable)
 	in := a.iss.Init()
-	wantCode(t, "trust_init", a.v2(t, proto.Request{Verb: proto.VerbTrustInit, Trust: &in}), 409, api.CodeTrustAlreadySet)
+	wantCode(t, "trust_init", a.v3(t, proto.Request{Verb: proto.VerbTrustInit, Trust: &in}), 409, api.CodeTrustAlreadySet)
 	// the safe direction still works
 	for _, req := range []string{`{"v":1,"verb":"fan_auto","by":"x"}`, `{"v":1,"verb":"power","action":"cancel","by":"x"}`} {
 		if resp := a.call(t, req); resp.Status != 200 {
@@ -369,7 +369,7 @@ func TestChallengeForSwitchedOffPart(t *testing.T) {
 		ch := req
 		ch.Verb, ch.For, ch.By = proto.VerbChallenge, &req.Verb, nil
 		b, _ := proto.EncodeRequest(ch)
-		if resp := srv.HandleV2(context.Background(), "c", b); resp.Status != 404 || resp.Code != proto.CodeDisabled {
+		if resp := srv.HandleV3(context.Background(), "c", b); resp.Status != 404 || resp.Code != proto.CodeDisabled {
 			t.Errorf("challenge for %s: %+v", req.Verb, resp)
 		}
 	}
@@ -380,61 +380,67 @@ func TestRequestVersions(t *testing.T) {
 	a := newApprovalRig(t)
 	a.trust(t)
 	ctx := context.Background()
-	challenge := `{"v":2,"verb":"challenge","for":"power","action":"shutdown","delay_s":60}`
+	challenge := `{"v":3,"verb":"challenge","for":"power","action":"shutdown","delay_s":60}`
 	for name, c := range map[string]struct {
-		v2    bool
+		v3    bool
 		frame string
 		code  string
 	}{
-		"v2 request in a plain frame":         {false, challenge, proto.CodeBadRequest},
-		"challenge marked v1":                 {false, strings.Replace(challenge, `"v":2`, `"v":1`, 1), proto.CodeBadRequest},
-		"challenge marked v1 in a v2 frame":   {true, strings.Replace(challenge, `"v":2`, `"v":1`, 1), proto.CodeBadRequest},
-		"plain request in a v2 frame":         {true, `{"v":1,"verb":"ping"}`, proto.CodeBadRequest},
-		"plain request marked v2":             {true, `{"v":2,"verb":"ping"}`, proto.CodeBadRequest},
-		"control request marked v2, no token": {true, `{"v":2,"verb":"fan_set","zone":0,"percent":50}`, proto.CodeBadRequest},
+		"v3 request in a plain frame":         {false, challenge, proto.CodeBadRequest},
+		"challenge marked v1":                 {false, strings.Replace(challenge, `"v":3`, `"v":1`, 1), proto.CodeBadRequest},
+		"challenge marked v1 in a v3 frame":   {true, strings.Replace(challenge, `"v":3`, `"v":1`, 1), proto.CodeBadRequest},
+		"plain request in a v3 frame":         {true, `{"v":1,"verb":"ping"}`, proto.CodeBadRequest},
+		"plain request marked v3":             {true, `{"v":3,"verb":"ping"}`, proto.CodeBadRequest},
+		"control request marked v3, no token": {true, `{"v":3,"verb":"fan_set","zone":0,"percent":50}`, proto.CodeBadRequest},
 		"approval in a plain frame":           {false, `{"v":1,"verb":"apply_update","approval":{"token":"a.b.c","entries":[]}}`, proto.CodeBadRequest},
-		"v3":                                  {true, `{"v":3,"verb":"ping"}`, proto.CodeBadRequest},
-		"challenge for a read":                {true, `{"v":2,"verb":"challenge","for":"status"}`, proto.CodeBadRequest},
-		"challenge for fan_auto":              {true, `{"v":2,"verb":"challenge","for":"fan_auto"}`, proto.CodeBadRequest},
-		"challenge for cancel":                {true, `{"v":2,"verb":"challenge","for":"power","action":"cancel"}`, proto.CodeBadRequest},
-		"challenge for a challenge":           {true, `{"v":2,"verb":"challenge","for":"challenge"}`, proto.CodeBadRequest},
-		"challenge without for":               {true, `{"v":2,"verb":"challenge","action":"shutdown","delay_s":60}`, proto.CodeBadRequest},
-		"challenge with a bad value":          {true, `{"v":2,"verb":"challenge","for":"fan_set","zone":7,"percent":50}`, proto.CodeBadRequest},
-		"challenge with an extra field":       {true, `{"v":2,"verb":"challenge","for":"fan_mode","mode":"full","zone":0}`, proto.CodeBadRequest},
-		"approval on cancel":                  {true, `{"v":2,"verb":"power","action":"cancel","approval":{"token":"a","entries":[]}}`, proto.CodeBadRequest},
-		"approval on fan_auto":                {true, `{"v":2,"verb":"fan_auto","approval":{"token":"a","entries":[]}}`, proto.CodeBadRequest},
-		"approval on a read":                  {true, `{"v":2,"verb":"status","approval":{"token":"a","entries":[]}}`, proto.CodeBadRequest},
-		"trust_init without trust":            {true, `{"v":2,"verb":"trust_init"}`, proto.CodeBadRequest},
-		"challenge for trust_set, no hash":    {true, `{"v":2,"verb":"challenge","for":"trust_set"}`, proto.CodeBadRequest},
-		"challenge for trust_set, short hash": {true, `{"v":2,"verb":"challenge","for":"trust_set","trust_hash":"abc"}`, proto.CodeBadRequest},
-		"challenge for trust_set and a delay": {true, `{"v":2,"verb":"challenge","for":"trust_set","trust_hash":"` + strings.Repeat("A", 43) + `","delay_s":60}`, proto.CodeBadRequest},
-		"challenge for power with a hash":     {true, `{"v":2,"verb":"challenge","for":"power","action":"shutdown","delay_s":60,"trust_hash":"` + strings.Repeat("A", 43) + `"}`, proto.CodeBadRequest},
-		"challenge for trust_init":            {true, `{"v":2,"verb":"challenge","for":"trust_init","trust_hash":"` + strings.Repeat("A", 43) + `"}`, proto.CodeBadRequest},
-		"trust_hash on a shutdown":            {true, `{"v":2,"verb":"power","action":"shutdown","delay_s":60,"trust_hash":"` + strings.Repeat("A", 43) + `","approval":{"token":"a","entries":[]}}`, proto.CodeBadRequest},
+		"v4":                                  {true, `{"v":4,"verb":"ping"}`, proto.CodeBadRequest},
+		// version 2, the test build of 2026-11-11: nothing of it is taken, in either kind of frame
+		"v2 challenge":                        {true, strings.Replace(challenge, `"v":3`, `"v":2`, 1), proto.CodeBadRequest},
+		"v2 challenge, plain":                 {false, strings.Replace(challenge, `"v":3`, `"v":2`, 1), proto.CodeBadRequest},
+		"v2 request, an approval":             {true, `{"v":2,"verb":"apply_update","approval":{"token":"a.b.c","entries":[]}}`, proto.CodeBadRequest},
+		"v2 trust_init":                       {true, `{"v":2,"verb":"trust_init","trust":{"issuer":"https://a"}}`, proto.CodeBadRequest},
+		"v2 ping":                             {false, `{"v":2,"verb":"ping"}`, proto.CodeBadRequest},
+		"challenge for a read":                {true, `{"v":3,"verb":"challenge","for":"status"}`, proto.CodeBadRequest},
+		"challenge for fan_auto":              {true, `{"v":3,"verb":"challenge","for":"fan_auto"}`, proto.CodeBadRequest},
+		"challenge for cancel":                {true, `{"v":3,"verb":"challenge","for":"power","action":"cancel"}`, proto.CodeBadRequest},
+		"challenge for a challenge":           {true, `{"v":3,"verb":"challenge","for":"challenge"}`, proto.CodeBadRequest},
+		"challenge without for":               {true, `{"v":3,"verb":"challenge","action":"shutdown","delay_s":60}`, proto.CodeBadRequest},
+		"challenge with a bad value":          {true, `{"v":3,"verb":"challenge","for":"fan_set","zone":7,"percent":50}`, proto.CodeBadRequest},
+		"challenge with an extra field":       {true, `{"v":3,"verb":"challenge","for":"fan_mode","mode":"full","zone":0}`, proto.CodeBadRequest},
+		"approval on cancel":                  {true, `{"v":3,"verb":"power","action":"cancel","approval":{"token":"a","entries":[]}}`, proto.CodeBadRequest},
+		"approval on fan_auto":                {true, `{"v":3,"verb":"fan_auto","approval":{"token":"a","entries":[]}}`, proto.CodeBadRequest},
+		"approval on a read":                  {true, `{"v":3,"verb":"status","approval":{"token":"a","entries":[]}}`, proto.CodeBadRequest},
+		"trust_init without trust":            {true, `{"v":3,"verb":"trust_init"}`, proto.CodeBadRequest},
+		"challenge for trust_set, no hash":    {true, `{"v":3,"verb":"challenge","for":"trust_set"}`, proto.CodeBadRequest},
+		"challenge for trust_set, short hash": {true, `{"v":3,"verb":"challenge","for":"trust_set","trust_hash":"abc"}`, proto.CodeBadRequest},
+		"challenge for trust_set and a delay": {true, `{"v":3,"verb":"challenge","for":"trust_set","trust_hash":"` + strings.Repeat("A", 43) + `","delay_s":60}`, proto.CodeBadRequest},
+		"challenge for power with a hash":     {true, `{"v":3,"verb":"challenge","for":"power","action":"shutdown","delay_s":60,"trust_hash":"` + strings.Repeat("A", 43) + `"}`, proto.CodeBadRequest},
+		"challenge for trust_init":            {true, `{"v":3,"verb":"challenge","for":"trust_init","trust_hash":"` + strings.Repeat("A", 43) + `"}`, proto.CodeBadRequest},
+		"trust_hash on a shutdown":            {true, `{"v":3,"verb":"power","action":"shutdown","delay_s":60,"trust_hash":"` + strings.Repeat("A", 43) + `","approval":{"token":"a","entries":[]}}`, proto.CodeBadRequest},
 		"challenge for trust_set, plain":      {false, `{"v":1,"verb":"challenge","for":"trust_set","trust_hash":"` + strings.Repeat("A", 43) + `"}`, proto.CodeBadRequest},
-		"proof token over the limit":          {true, `{"v":2,"verb":"trust_init","trust":{"issuer":"https://a","approval":{"token":"` + strings.Repeat("a", api.MaxApprovalToken+1) + `","entries":[]}}}`, proto.CodeTooLarge},
-		"unknown member in the approval":      {true, `{"v":2,"verb":"apply_update","approval":{"token":"a","entries":[],"x":1}}`, proto.CodeBadRequest},
-		"unknown member in the trust":         {true, `{"v":2,"verb":"trust_init","trust":{"issuer":"https://a","fan_window_s":60}}`, proto.CodeBadRequest},
-		"token over the limit":                {true, `{"v":2,"verb":"apply_update","approval":{"token":"` + strings.Repeat("a", api.MaxApprovalToken+1) + `","entries":[]}}`, proto.CodeTooLarge},
+		"proof token over the limit":          {true, `{"v":3,"verb":"trust_init","trust":{"issuer":"https://a","approval":{"token":"` + strings.Repeat("a", api.MaxApprovalToken+1) + `","entries":[]}}}`, proto.CodeTooLarge},
+		"unknown member in the approval":      {true, `{"v":3,"verb":"apply_update","approval":{"token":"a","entries":[],"x":1}}`, proto.CodeBadRequest},
+		"unknown member in the trust":         {true, `{"v":3,"verb":"trust_init","trust":{"issuer":"https://a","fan_window_s":60}}`, proto.CodeBadRequest},
+		"token over the limit":                {true, `{"v":3,"verb":"apply_update","approval":{"token":"` + strings.Repeat("a", api.MaxApprovalToken+1) + `","entries":[]}}`, proto.CodeTooLarge},
 		"plain frame over 512 bytes":          {false, `{"v":1,"verb":"ping","by":"` + strings.Repeat("a", 600) + `"}`, proto.CodeTooLarge},
-		"v2 frame over 32 KiB":                {true, `{"v":2,"verb":"trust_init","trust":{"issuer":"` + strings.Repeat("a", proto.MaxRequestV2) + `"}}`, proto.CodeTooLarge},
+		"v3 frame over 32 KiB":                {true, `{"v":3,"verb":"trust_init","trust":{"issuer":"` + strings.Repeat("a", proto.MaxRequestV3) + `"}}`, proto.CodeTooLarge},
 	} {
 		handle := a.srv.Handle
-		if c.v2 {
-			handle = a.srv.HandleV2
+		if c.v3 {
+			handle = a.srv.HandleV3
 		}
 		if resp := handle(ctx, "c", []byte(c.frame)); resp.Code != c.code {
 			t.Errorf("%s: %d %s %q, want %s", name, resp.Status, resp.Code, resp.Error, c.code)
 		}
 	}
-	if resp := a.srv.HandleV2(ctx, "c", []byte(challenge)); resp.Status != 200 {
+	if resp := a.srv.HandleV3(ctx, "c", []byte(challenge)); resp.Status != 200 {
 		t.Errorf("a good challenge request: %+v", resp)
 	}
 }
 
-// TestVersion2Frames: the frame's own mark decides how long a request may be; a helper from before version 2
+// TestVersion3Frames: the frame's own mark decides how long a request may be; a helper from before approvals
 // (which reads the mark as a length of over 2 GiB) refuses such a frame without reading it.
-func TestVersion2Frames(t *testing.T) {
+func TestVersion3Frames(t *testing.T) {
 	a := newApprovalRig(t)
 	a.trust(t)
 	client, server := net.Pipe()
@@ -459,23 +465,23 @@ func TestVersion2Frames(t *testing.T) {
 	if resp := ask(proto.Request{Verb: proto.VerbPing}); resp.Status != 200 {
 		t.Fatal(resp)
 	}
-	// a full-size approval: a token of 8192 bytes and 64 entries, in one version 2 frame, on the same connection
+	// a full-size approval: a token of 8192 bytes and 64 entries, in one version 3 frame, on the same connection
 	big := powerReq("shutdown", 60)
 	big.Approval = &api.Approval{Token: strings.Repeat("a", api.MaxApprovalToken)}
 	for i := 0; i < api.MaxApprovalEntries; i++ {
 		c := make([]byte, 32)
 		c[0] = byte(i)
-		big.Approval.Entries = append(big.Approval.Entries, api.ApprovalEntry{Challenge: approvaltest.B64(c), Request: strings.Repeat("r", api.MaxApprovalRequest)})
+		big.Approval.Entries = append(big.Approval.Entries, api.MachineEntry{MachineID: approvaltest.MachineID, Challenge: approvaltest.B64(c), Request: strings.Repeat("r", api.MaxApprovalRequest)})
 	}
 	if resp := ask(big); resp.Status != 403 || resp.Code != api.CodeApprovalRefused {
 		t.Fatalf("full-size approval: %+v", resp)
 	}
 	if resp := ask(proto.Request{Verb: proto.VerbPing}); resp.Status != 200 {
-		t.Fatal("the connection is out of step after a version 2 frame:", resp)
+		t.Fatal("the connection is out of step after a version 3 frame:", resp)
 	}
-	// a version 2 frame that announces more than 32 KiB: too_large, nothing read, connection closed
+	// a version 3 frame that announces more than 32 KiB: too_large, nothing read, connection closed
 	var hdr [4]byte
-	binary.BigEndian.PutUint32(hdr[:], proto.FrameV2|(proto.MaxRequestV2+1))
+	binary.BigEndian.PutUint32(hdr[:], proto.FrameV3|(proto.MaxRequestV3+1))
 	if _, err := client.Write(hdr[:]); err != nil {
 		t.Fatal(err)
 	}
@@ -488,18 +494,28 @@ func TestVersion2Frames(t *testing.T) {
 	}
 	<-done
 
-	// what a helper from before version 2 does with a version 2 frame: it reads frames with the old limit
+	// what a helper from before approvals does with a version 3 frame: it reads frames with the old limit
 	var buf bytes.Buffer
 	b, _ := proto.EncodeRequest(proto.Request{Verb: proto.VerbChallenge, For: ptr(proto.VerbApplyUpdate)})
-	if err := proto.WriteRequest(&buf, b, proto.Version2); err != nil {
+	if err := proto.WriteRequest(&buf, b, proto.Version3); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := proto.ReadFrame(&buf, proto.MaxRequest); !errors.Is(err, proto.ErrFrameTooLarge) {
-		t.Fatalf("an old helper would read a version 2 frame: %v", err)
+		t.Fatalf("an old helper would read a version 3 frame: %v", err)
 	}
 	// and with the JSON alone, had it arrived in a frame it accepts
-	if string(b) != `{"v":2,"verb":"challenge","for":"apply_update"}` {
+	if string(b) != `{"v":3,"verb":"challenge","for":"apply_update"}` {
 		t.Fatalf("encoded: %s", b)
+	}
+	// What the helper of the test build of 2026-11-11 (version 2) does with it: it reads the frame, and its
+	// version check ("want 1 or 2") refuses the request. That build is not here to be run; what is checked is
+	// what its check looked at: the version number in the JSON is 3, on every request this agent marks so.
+	for _, r := range []proto.Request{{Verb: proto.VerbChallenge, For: ptr(proto.VerbApplyUpdate)}, {Verb: proto.VerbTrustInit, Trust: &api.TrustInit{}},
+		{Verb: proto.VerbApplyUpdate, By: ptr("x"), Approval: &api.Approval{Token: "a.b.c"}}} {
+		b, err := proto.EncodeRequest(r)
+		if err != nil || !bytes.HasPrefix(b, []byte(`{"v":3,`)) || proto.FrameVersion(r) != proto.Version3 {
+			t.Fatalf("%s is not sent as version 3: %s, %v", r.Verb, b, err)
+		}
 	}
 	// a plain request is encoded exactly as before
 	if b, _ := proto.EncodeRequest(fanSetReq(0, 50)); string(b) != `{"v":1,"verb":"fan_set","zone":0,"percent":50,"by":"test"}` {

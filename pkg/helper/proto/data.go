@@ -18,7 +18,8 @@ type StatusData struct {
 	// Older agents ignore the field; older helpers never send it.
 	Power *PowerPending `json:"power_pending,omitempty"`
 	// Proto is the highest protocol version this helper speaks (MaxVersion). Absent: a helper from before
-	// Version2, which knows no challenge, no approval and no trust.
+	// approvals, which knows no challenge, no approval and no trust. 2: the test build of 2026-11-11, whose
+	// approvals were not bound to a machine; an agent of this version relies on neither (Version3).
 	Proto int `json:"proto,omitempty"`
 	// Approval is the helper's approval check: off, required or broken, and what it trusts. Absent: an older
 	// helper.

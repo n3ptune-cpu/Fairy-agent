@@ -252,7 +252,7 @@ func TestChallengeStoreNeverDropsAYoungChallenge(t *testing.T) {
 
 	// what a panel does: sixteen entries for one machine in one confirmation, asked for at once, all used
 	p := newRig(t, true)
-	var entries []api.ApprovalEntry
+	var entries []api.MachineEntry
 	var reqs []api.ApprovalRequest
 	for i := 0; i < approval.MaxChallenges; i++ {
 		q := fanSet(i%2, 30+i)

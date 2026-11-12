@@ -38,7 +38,7 @@ func TestTokenChecks(t *testing.T) {
 	r := newRig(t, true)
 	req := power("shutdown", 60)
 	e := r.entry(req)
-	entries := []api.ApprovalEntry{e}
+	entries := []api.MachineEntry{e}
 	nonce, _ := api.ApprovalNonce(entries)
 	iss, now := r.iss, r.Now()
 	good := func() map[string]any { return iss.Claims(nonce, now) }
@@ -188,7 +188,7 @@ func TestTokenChecks(t *testing.T) {
 		}},
 		{"passkey among other methods", claim("amr", []string{"mfa", "phr"})},
 	} {
-		list := []api.ApprovalEntry{r.entry(req)}
+		list := []api.MachineEntry{r.entry(req)}
 		n, _ := api.ApprovalNonce(list)
 		accepted(t, c.name, r.g.Check(req, &api.Approval{Token: c.token(n), Entries: list}))
 	}
@@ -204,13 +204,13 @@ func TestOldTokenForNewChallenge(t *testing.T) {
 	accepted(t, "first", r.g.Check(req, old))
 	r.wait(10 * time.Minute)
 	e := r.entry(req)
-	refused(t, "old token, new challenge", r.g.Check(req, &api.Approval{Token: old.Token, Entries: []api.ApprovalEntry{e}}),
+	refused(t, "old token, new challenge", r.g.Check(req, &api.Approval{Token: old.Token, Entries: []api.MachineEntry{e}}),
 		api.CodeApprovalRefused, approval.ReasonNonce)
 	// Pocket ID answering without a re-authentication: the right nonce, auth_time of the old sign-in
-	n, _ := api.ApprovalNonce([]api.ApprovalEntry{e})
+	n, _ := api.ApprovalNonce([]api.MachineEntry{e})
 	cl := r.iss.Claims(n, r.Now())
 	cl["auth_time"] = r.Now().Add(-10 * time.Minute).Unix()
-	refused(t, "no fresh passkey check", r.g.Check(req, &api.Approval{Token: r.iss.Token(cl), Entries: []api.ApprovalEntry{e}}),
+	refused(t, "no fresh passkey check", r.g.Check(req, &api.Approval{Token: r.iss.Token(cl), Entries: []api.MachineEntry{e}}),
 		api.CodeApprovalRefused, approval.ReasonAuthTime)
 }
 

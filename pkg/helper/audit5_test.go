@@ -24,7 +24,7 @@ func TestHelperRefusedShutdownDoesNotSpendTheOneAfterBoot(t *testing.T) {
 	a := newApprovalRig(t)
 	in := a.iss.Init()
 	w := approval.DefaultFanWindowS
-	nt, err := approval.NewTrust(approval.Trust{Issuer: in.Issuer, ClientID: in.ClientID, Keys: in.Keys, Users: in.Users,
+	nt, err := approval.NewTrust(approval.Trust{MachineID: in.MachineID, Issuer: in.Issuer, ClientID: in.ClientID, Keys: in.Keys, Users: in.Users,
 		FanWindowS: &w, BootShutdownS: 900, SetBy: "admin"})
 	if err != nil {
 		t.Fatal(err)
@@ -69,7 +69,7 @@ func TestHelperRefusedSleepCostsNoApproval(t *testing.T) {
 	req := powerReq("sleep", 60)
 	req.Approval = a.approvalFor(t, req)
 	for i := 0; i < 2; i++ {
-		resp := a.v2(t, req)
+		resp := a.v3(t, req)
 		if resp.Status != 409 || resp.Code == api.CodeApprovalRefused {
 			t.Fatalf("approved sleep on a machine that cannot sleep, try %d: %+v", i+1, resp)
 		}
@@ -91,7 +91,7 @@ func TestHelperChallengesCannotStarveCancel(t *testing.T) {
 	a.srv.limit = proto.NewLimiter(proto.ReadsPerMinute, proto.ChangesPerMinute, time.Minute) // the helper's own limits
 	a.srv.limit.Now = func() time.Time { return now }
 	challenge := func() proto.Response {
-		return a.v2(t, proto.Request{Verb: proto.VerbChallenge, For: ptr(proto.VerbApplyUpdate)})
+		return a.v3(t, proto.Request{Verb: proto.VerbChallenge, For: ptr(proto.VerbApplyUpdate)})
 	}
 	for i := 0; i < proto.ChallengesPerMinute; i++ {
 		if resp := challenge(); resp.Status == 429 && resp.Code == proto.CodeRateLimited {

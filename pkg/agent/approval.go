@@ -152,7 +152,7 @@ func (a *Agent) helperUnchecked(ctx context.Context) string {
 func uncheckedText(seen bool, own string) string {
 	why := "the fairy-agent-helper has not answered since this agent started, so it is not known whether it checks passkey approvals"
 	if seen {
-		why = "the running fairy-agent-helper is older than this agent: it knows no passkey approvals and carries out what it is sent unchecked"
+		why = "the running fairy-agent-helper is older than this agent: it does not know this version's passkey approvals, and what it is sent it may carry out unchecked"
 	}
 	switch own {
 	case api.ApprovalRequired:
@@ -162,7 +162,7 @@ func uncheckedText(seen bool, own string) string {
 	default:
 		why += ", and this agent cannot tell whether this machine has an approval trust file"
 	}
-	return why + " (restart the helper: POST " + api.PathHelperStop + ", then " + api.PathHelperStart + ", or Restart-Service fairy-agent-helper on the machine)"
+	return why + " (restart the helper: POST " + api.PathHelperStop + ", then " + api.PathHelperStart + ", or Restart-Service fairy-agent-helper on the machine; if it is still older after that, install this version of both services)"
 }
 
 // Gated is the passkey check of one request, handed to the part that carries the request out (Fan, Power,

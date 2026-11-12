@@ -31,7 +31,8 @@ const helperTrustUsage = `fairy-agent helper-trust: which Pocket ID this machine
   fairy-agent helper-trust show  [--config PATH]
   fairy-agent helper-trust set   [--config PATH] [--issuer URL] [--client-id ID] [--user SUB]...
                                  [--fetch-keys | --jwks FILE] [--keep-old-keys]
-                                 [--fan-window SECONDS] [--boot-shutdown SECONDS] [--from FILE] [--yes]
+                                 [--fan-window SECONDS] [--boot-shutdown SECONDS] [--from FILE]
+                                 [--new-machine-id] [--yes]
   fairy-agent helper-trust clear [--config PATH] [--yes]
 
 set (root / Administrator) writes the trust file. What is not given stays as it is in the existing file.
@@ -49,7 +50,12 @@ set (root / Administrator) writes the trust file. What is not given stays as it 
   --boot-shutdown N     accept ONE shutdown without approval while the machine has been up for less than N
                         seconds (default 0 = off, at most 900): for machines that are switched on only to be
                         updated and switched off again
-  --from FILE           start from a complete trust file instead of the existing one
+  --from FILE           start from a complete trust file instead of the existing one (its machine id is not
+                        taken: that is another machine's)
+  --new-machine-id      give this machine a new machine id. For a machine that was made from a copy of
+                        another one's disk: the copy has the same id, and an approval for one of the two is
+                        then accepted by the other. The panel must be told the new id (it has the old one
+                        on record)
   --yes                 do not ask before writing
 show prints the trust file and whether it can be used. clear removes it: nothing needs an approval any more,
 and the panel can set the trust again (once). Whoever holds the control token can do that first-time set,
@@ -59,6 +65,11 @@ The panel's first-time set is accepted only with a passkey approval that proves 
 here, proves nothing: it writes what it is given. A wrong issuer spelling, client id or user id, or a clock
 that is off, then shows at the first approval ("approval refused"). So approve one action from the panel
 while you are still at the machine; clear undoes the set.
+
+The machine id: every approval is made for one machine, named by the id in this machine's trust file. set
+makes one up when the file has none and keeps it afterwards; the panel keeps it on record. This machine cannot
+see whether another machine has the same id. That happens when a disk with a trust file is copied: on the
+copy, run "set --new-machine-id" (or clear, and set the trust anew).
 Linux: run it as root. In the agent's own state folder it works as the agent's user (see AGENT.md).
 `
 
@@ -68,6 +79,7 @@ var (
 	trustIsAdmin = isAdmin
 	trustBecome  = trustBecomeOwner
 	trustNow     = time.Now
+	trustNewID   = func() (string, error) { return approval.NewMachineID(nil) }
 	// trustHelper says what runs next to the trust file on this machine (trustEffect): the Windows helper's
 	// service state and, when it runs, its status answer. Other systems have no helper.
 	trustHelper     = helperForTrust
@@ -102,6 +114,7 @@ func helperTrustCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) in
 	fanWindow := fs.Int("fan-window", -1, "")
 	bootShutdown := fs.Int("boot-shutdown", -1, "")
 	from := fs.String("from", "", "")
+	newID := fs.Bool("new-machine-id", false, "")
 	yes := fs.Bool("yes", false, "")
 	if err := fs.Parse(args[1:]); err != nil || fs.NArg() != 0 {
 		if err == nil {
@@ -173,20 +186,34 @@ func helperTrustCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) in
 	}
 
 	// set
+	//
+	// The machine id is the existing file's and stays: the panel has it on record, and a set that changes a key
+	// or a user must not make this another machine. A new one is made up when there is none to keep (no file, a
+	// file that cannot be read, a file from before machine ids) or when it is asked for (--new-machine-id). It
+	// is never taken from --from: that file may be another machine's.
 	var t approval.Trust
-	if old != nil {
-		t = approval.Trust{Issuer: old.Issuer, ClientID: old.ClientID, Keys: old.Keys, Users: old.Users,
+	if old != nil { // also a file that is good but for its missing machine id (Files.Load): its values are kept
+		t = approval.Trust{MachineID: old.MachineID, Issuer: old.Issuer, ClientID: old.ClientID, Keys: old.Keys, Users: old.Users,
 			FanWindowS: old.FanWindowS, BootShutdownS: old.BootShutdownS}
+		if state == api.ApprovalBroken {
+			fmt.Fprintln(stdout, "note: the existing trust file has no machine id; its values are kept and it gets one now")
+		}
 	} else if state == api.ApprovalBroken {
 		fmt.Fprintln(stdout, "note: the existing trust file cannot be used and will be replaced:", loadErr)
 	}
+	oldID := t.MachineID
 	if *from != "" {
 		ft, err := approval.ParseTrust(fromData)
-		if err != nil {
+		if err != nil && !errors.Is(err, approval.ErrNoMachineID) { // its machine id is not taken, so it needs none
 			return fail(fmt.Errorf("%s: %w", *from, err))
 		}
-		t = approval.Trust{Issuer: ft.Issuer, ClientID: ft.ClientID, Keys: ft.Keys, Users: ft.Users,
+		t = approval.Trust{MachineID: oldID, Issuer: ft.Issuer, ClientID: ft.ClientID, Keys: ft.Keys, Users: ft.Users,
 			FanWindowS: ft.FanWindowS, BootShutdownS: ft.BootShutdownS}
+	}
+	if t.MachineID == "" || *newID {
+		if t.MachineID, err = trustNewID(); err != nil {
+			return fail(err)
+		}
 	}
 	oldKeys := t.Keys
 	if *issuer != "" {
@@ -263,6 +290,15 @@ func helperTrustCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) in
 	fmt.Fprintln(stdout, "to be written:")
 	printTrust(stdout, api.ApprovalRequired, nt, nil)
 	fmt.Fprintln(stdout, "signing keys:   ", source)
+	switch {
+	case oldID == "":
+		fmt.Fprintln(stdout, "the machine id:   new, made up just now")
+	case oldID != nt.MachineID:
+		fmt.Fprintln(stdout, "the machine id:   NEW, it was "+oldID+". The panel has the old one on record: approvals made with")
+		fmt.Fprintln(stdout, "                 the old one are refused here from now on, until the panel is told the new one")
+	default:
+		fmt.Fprintln(stdout, "the machine id:   kept as it was")
+	}
 	for _, n := range notes {
 		fmt.Fprintln(stdout, "note:", n)
 	}
@@ -309,7 +345,7 @@ func trustEffect(state string, statusData []byte, err error) []string {
 			"  An older fairy-agent (from before passkey approvals) ignores the file: `fairy-agent version`; if it is older, install this version."}
 	case err != nil:
 		return []string{"NOT KNOWN whether it is in effect: the helper could not be asked (" + clipText(err.Error(), 200) + ").",
-			"  Check: `fairy-agent helper-status` must show `pipe protocol:   2` and `approval:        required`."}
+			"  Check: `fairy-agent helper-status` must show `pipe protocol:   3` and `approval:        required`."}
 	case state == api.HelperNotInstalled:
 		return []string{"In effect within 5 seconds for what the agent carries out itself: no fairy-agent-helper is installed, the agent " + reads + ".", until}
 	case state != trustHelperAsked:
@@ -320,7 +356,13 @@ func trustEffect(state string, statusData []byte, err error) []string {
 		Proto    int                 `json:"proto"`
 		Approval *api.ApprovalStatus `json:"approval"`
 	}
-	if json.Unmarshal(statusData, &sd) != nil || sd.Proto < 2 || sd.Approval == nil {
+	if json.Unmarshal(statusData, &sd) == nil && sd.Proto == 2 {
+		return []string{"NOT IN EFFECT IN THE HELPER: the fairy-agent-helper that is running is the test build of 2026-11-11",
+			"  (pipe protocol 2). Its approvals are not bound to this machine, and it cannot read this trust file",
+			"  (machine_id). The agent hands it no fan, power or update request (503 approval_unavailable).",
+			"  Install this version of both services (the installer does both), then: fairy-agent helper-status"}
+	}
+	if json.Unmarshal(statusData, &sd) != nil || sd.Proto < 3 || sd.Approval == nil {
 		return []string{"NOT IN EFFECT IN THE HELPER YET: the fairy-agent-helper that is running is from before passkey approvals",
 			"  (pipe protocol 1, the program from before the last update). It reads no trust file and checks nothing.",
 			"  Until it is restarted, the agent refuses the fan, power and update requests that go through it",
@@ -403,8 +445,13 @@ func approvalLines(st api.ApprovalStatus) []string {
 	default:
 		return []string{"approval:        " + st.State + by + ": fan, power and update requests are refused", "reason:          " + st.Error}
 	}
-	lines := []string{"approval:        required" + by + ": fan changes, shutdown / reboot / sleep and update need a passkey approval",
-		"issuer:          " + st.Issuer, "client id:       " + st.ClientID}
+	lines := []string{"approval:        required" + by + ": fan changes, shutdown / reboot / sleep and update need a passkey approval"}
+	if st.MachineID != "" {
+		lines = append(lines, "machine id:      "+st.MachineID+" (names this machine in every approval; the panel keeps it on record)",
+			"                 A machine made from a copy of this disk has the SAME id, and the two then accept each other's",
+			"                 approvals, until the copy's trust is set anew: fairy-agent helper-trust set --new-machine-id")
+	}
+	lines = append(lines, "issuer:          "+st.Issuer, "client id:       "+st.ClientID)
 	for _, k := range st.Keys {
 		lines = append(lines, "pinned key:      kid "+k.Kid+", "+k.Alg+", thumbprint "+k.Thumbprint)
 	}
@@ -551,6 +598,11 @@ func helperApprovalLines(statusData []byte) []string {
 	}
 	if json.Unmarshal(statusData, &sd) != nil || sd.Approval == nil {
 		return []string{"approval:        this helper is from before passkey approvals (it checks none)"}
+	}
+	if sd.Proto == 2 {
+		return []string{"pipe protocol:   2 (the test build of 2026-11-11; this agent needs 3)",
+			"approval:        this helper's approvals are not bound to this machine, so the agent hands it nothing that",
+			"                 needs one. Install this version of both services"}
 	}
 	return append([]string{"pipe protocol:   " + strconv.Itoa(sd.Proto)}, approvalLines(*sd.Approval)...)
 }

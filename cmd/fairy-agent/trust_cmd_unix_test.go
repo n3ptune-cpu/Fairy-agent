@@ -47,7 +47,7 @@ func TestMain(m *testing.M) {
 	case "agent":
 		switch os.Args[1] {
 		case "create":
-			tr, err := approval.FromInit(approvaltest.New().Init(), time.Now())
+			tr, err := approval.FromInit(approvaltest.New().Init(), time.Now(), nil)
 			if err == nil {
 				err = files.Create(tr)
 			}
@@ -287,7 +287,7 @@ func TestHelperTrustAsRootOnAStandardInstall(t *testing.T) {
 	}
 	// and a first set typed on the machine, with nothing there yet
 	fresh := filepath.Join(secret, "trust.json")
-	tr, _ := approval.FromInit(approvaltest.New().Init(), time.Now())
+	tr, _ := approval.FromInit(approvaltest.New().Init(), time.Now(), nil)
 	if err := os.WriteFile(fresh, tr.Marshal(), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -304,7 +304,7 @@ func TestHelperTrustAsRootOnAStandardInstall(t *testing.T) {
 // root's (an agent that runs as root).
 func TestHelperTrustAsRootWithARootOwnedFile(t *testing.T) {
 	r := newInstallRig(t, 4242)
-	tr, _ := approval.FromInit(approvaltest.New().Init(), time.Now())
+	tr, _ := approval.FromInit(approvaltest.New().Init(), time.Now(), nil)
 	put := func(mode os.FileMode) {
 		t.Helper()
 		_ = os.Remove(r.path)
@@ -399,4 +399,133 @@ func TestHelperTrustAsRootWithARootOwnedFile(t *testing.T) {
 	if code, out := rr.trust("clear", "--yes"); code != 0 {
 		t.Fatalf("clear in root's folder: %d\n%s", code, out)
 	}
+}
+
+// TestTrustFileFromBeforeMachineIDsOnAnInstall (audit 5, r1-x1-01): what happens to a trust file of the test
+// build of 2026-11-11, which has no machine id, on a machine laid out as the installer does it. The agent adds
+// the id when it starts, and the file is afterwards whose it was, with the mode it had. Where the agent cannot
+// do that (the file is root's and the agent is not root), nothing changes and the state is broken, with the
+// reason, until root runs helper-trust set.
+func TestTrustFileFromBeforeMachineIDsOnAnInstall(t *testing.T) {
+	old, err := approval.FromInit(approvaltest.New().Init(), time.Now(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	old.MachineID = ""
+	raw := old.Marshal()
+	put := func(r *installRig, uid, gid int, mode os.FileMode) {
+		t.Helper()
+		_ = os.Remove(r.path)
+		for _, err := range []error{os.WriteFile(r.path, raw, mode), os.Chown(r.path, uid, gid), os.Chmod(r.path, mode)} {
+			if err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	group := func(path string) uint32 {
+		t.Helper()
+		st, err := os.Lstat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return st.Sys().(*syscall.Stat_t).Gid
+	}
+	only := func(r *installRig) {
+		t.Helper()
+		ents, _ := os.ReadDir(r.dir)
+		if len(ents) != 1 || ents[0].Name() != approval.TrustFileName {
+			t.Errorf("in the state folder: %v", ents)
+		}
+	}
+
+	t.Run("the agent's own file, as the first-time set wrote it", func(t *testing.T) {
+		r := newInstallRig(t, 4242)
+		put(r, 4242, 4242, 0o600)
+		// show, as root, only looks: it says what is wrong and writes nothing
+		code, out := r.trust("show")
+		if code != 0 || !strings.Contains(out, "BROKEN") || !strings.Contains(out, "has no machine_id") {
+			t.Fatalf("show: %d\n%s", code, out)
+		}
+		if now, _ := os.ReadFile(r.path); !bytes.Equal(now, raw) {
+			t.Fatal("show wrote the file")
+		}
+		st := r.agentSees() // the agent starts
+		if st.State != api.ApprovalRequired || api.CheckMachineID(st.MachineID) != nil {
+			t.Fatalf("the agent after its start: %+v", st)
+		}
+		if uid, mode, links := r.owner(r.path); uid != r.agentUID || group(r.path) != 4242 || mode.Perm() != 0o600 || !mode.IsRegular() || links != 1 {
+			t.Errorf("the file after the id was added: uid %d gid %d mode %v links %d", uid, group(r.path), mode, links)
+		}
+		only(r)
+		now, _ := os.ReadFile(r.path)
+		if want := "{\n  \"machine_id\": \"" + st.MachineID + "\"," + string(raw[1:]); string(now) != want {
+			t.Errorf("the file:\n%s\nwant\n%s", now, want)
+		}
+		if again := r.agentSees(); again.MachineID != st.MachineID { // the next start
+			t.Errorf("the id at the next start: %q, was %q", again.MachineID, st.MachineID)
+		}
+		if later, _ := os.ReadFile(r.path); !bytes.Equal(later, now) {
+			t.Error("the file was written again at the next start")
+		}
+		if code, out := r.trust("show"); code != 0 || !strings.Contains(out, "machine id:      "+st.MachineID) {
+			t.Errorf("show afterwards: %d\n%s", code, out)
+		}
+	})
+
+	t.Run("root's file in the agent's folder, readable by the agent's group", func(t *testing.T) {
+		r := newInstallRig(t, 4242)
+		put(r, 0, 4242, 0o640)
+		st := r.agentSees() // the agent is not root: it cannot make the new file root's
+		if st.State != api.ApprovalBroken || st.MachineID != "" || !strings.Contains(st.Error, "has no machine_id, and adding one failed") ||
+			!strings.Contains(st.Error, "cannot be given to them") {
+			t.Fatalf("the agent: %+v", st)
+		}
+		if uid, mode, _ := r.owner(r.path); uid != 0 || group(r.path) != 4242 || mode.Perm() != 0o640 {
+			t.Errorf("the file: uid %d mode %v", uid, mode)
+		}
+		if now, _ := os.ReadFile(r.path); !bytes.Equal(now, raw) {
+			t.Error("the file changed")
+		}
+		only(r)
+		// root repairs it: the values are kept, the file gets an id
+		code, out := r.trust("set", "--yes", "--jwks", writeJWKSFile(t, r.base, old.Keys))
+		if code != 0 || !strings.Contains(out, "its values are kept and it gets one now") {
+			t.Fatalf("set: %d\n%s", code, out)
+		}
+		if st := r.agentSees(); st.State != api.ApprovalRequired || api.CheckMachineID(st.MachineID) != nil || st.Issuer != approvaltest.IssuerURL || st.Users != 1 {
+			t.Fatalf("the agent after root's set: %+v", st)
+		}
+	})
+
+	t.Run("an agent that runs as root", func(t *testing.T) {
+		r := newInstallRig(t, 0)
+		if err := os.Chown(r.dir, 0, 4242); err != nil {
+			t.Fatal(err)
+		}
+		put(r, 0, 4242, 0o640)
+		code, out := r.as(0, "agent", "state")
+		var st api.ApprovalStatus
+		if code != 0 || json.Unmarshal([]byte(out), &st) != nil || st.State != api.ApprovalRequired || api.CheckMachineID(st.MachineID) != nil {
+			t.Fatalf("the agent as root: %d %s", code, out)
+		}
+		if uid, mode, links := r.owner(r.path); uid != 0 || group(r.path) != 4242 || mode.Perm() != 0o640 || links != 1 {
+			t.Errorf("the file after the id was added: uid %d gid %d mode %v links %d", uid, group(r.path), mode, links)
+		}
+		only(r)
+	})
+}
+
+// writeJWKSFile writes keys as a JWKS file in dir (a folder root can read) and returns its name.
+func writeJWKSFile(t *testing.T, dir string, keys []api.TrustKey) string {
+	t.Helper()
+	var list []any
+	for _, k := range keys {
+		list = append(list, map[string]any{"kty": k.Kty, "kid": k.Kid, "alg": k.Alg, "n": k.N, "e": k.E})
+	}
+	b, _ := json.Marshal(map[string]any{"keys": list})
+	name := filepath.Join(dir, "jwks-for-set.json")
+	if err := os.WriteFile(name, b, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return name
 }

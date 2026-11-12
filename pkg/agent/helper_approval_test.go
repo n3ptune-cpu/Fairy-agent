@@ -120,7 +120,7 @@ func (r *aprig) approve(t *testing.T, req map[string]any) *api.Approval {
 	if st != 200 || c["needed"] != true || c["issuer"] != r.iss.URL || c["client_id"] != r.iss.ClientID {
 		t.Fatalf("challenge for %v: %d %v", req, st, c)
 	}
-	return r.iss.Approve(time.Now(), api.ApprovalEntry{Challenge: c["challenge"].(string), Request: c["request"].(string)})
+	return r.iss.Approve(time.Now(), api.MachineEntry{MachineID: approvaltest.MachineID, Challenge: c["challenge"].(string), Request: c["request"].(string)})
 }
 
 func wantRefusal(t *testing.T, what string, st int, body map[string]any, status int, code string) {
@@ -135,10 +135,10 @@ func wantRefusal(t *testing.T, what string, st int, body map[string]any, status 
 func TestApprovalThroughAgentAndHelper(t *testing.T) {
 	r := newApprovalRig(t)
 	m := r.metrics(t, api.HelperRunning)
-	if hs := m["helper"].(map[string]any); hs["proto"] != float64(2) {
+	if hs := m["helper"].(map[string]any); hs["proto"] != float64(3) {
 		t.Fatalf("helper block: %v", hs)
 	}
-	if ap := r.approvalBlock(t, api.ApprovalOff); ap["enforced_by"] != api.EnforcedByHelper || ap["proto"] != float64(1) || ap["issuer"] != nil {
+	if ap := r.approvalBlock(t, api.ApprovalOff); ap["enforced_by"] != api.EnforcedByHelper || ap["proto"] != float64(api.ApprovalProto) || ap["issuer"] != nil {
 		t.Fatalf("approval block: %v", ap)
 	}
 	// trust off: an old panel's requests work as before, and a challenge says none is needed
@@ -305,7 +305,7 @@ func TestUpdateWithHelperApproval(t *testing.T) {
 	st, b := r.post(t, "/update", map[string]any{"requested_by": "neptune"})
 	wantRefusal(t, "update without approval", st, b, 403, api.CodeApprovalRequired)
 	// a made-up approval: accepted for download (202), refused by the helper when the installer should start
-	junk := &api.Approval{Token: "a.b.c", Entries: []api.ApprovalEntry{{Challenge: strings.Repeat("A", 43), Request: "apply_update"}}}
+	junk := &api.Approval{Token: "a.b.c", Entries: []api.MachineEntry{{MachineID: approvaltest.MachineID, Challenge: strings.Repeat("A", 43), Request: "apply_update"}}}
 	if st, b := r.post(t, "/update", map[string]any{"approval": junk}); st != 202 {
 		t.Fatalf("update with a made-up approval: %d %v", st, b)
 	}

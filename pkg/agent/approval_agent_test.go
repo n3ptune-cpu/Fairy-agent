@@ -114,7 +114,7 @@ func (r *lrig) approve(t *testing.T, req map[string]any) *api.Approval {
 	if st != 200 || c["needed"] != true {
 		t.Fatalf("challenge for %v: %d %v", req, st, c)
 	}
-	return r.iss.Approve(time.Now(), api.ApprovalEntry{Challenge: c["challenge"].(string), Request: c["request"].(string)})
+	return r.iss.Approve(time.Now(), api.MachineEntry{MachineID: approvaltest.MachineID, Challenge: c["challenge"].(string), Request: c["request"].(string)})
 }
 
 func (r *lrig) mode(t *testing.T) string {
@@ -183,7 +183,7 @@ func TestOldPanelWithoutTrustBehavesAsBefore(t *testing.T) {
 	if ap := plain.approval(t); ap != nil {
 		t.Errorf("an agent that checks nothing shows an approval block: %v", ap)
 	}
-	if ap := gated.approval(t); ap["state"] != api.ApprovalOff || ap["enforced_by"] != api.EnforcedByAgent || ap["proto"] != float64(1) {
+	if ap := gated.approval(t); ap["state"] != api.ApprovalOff || ap["enforced_by"] != api.EnforcedByAgent || ap["proto"] != float64(api.ApprovalProto) {
 		t.Errorf("approval block: %v", ap)
 	}
 	if gated.log.String() != "" {
@@ -276,7 +276,7 @@ func TestLinuxAgentEnforcesApproval(t *testing.T) {
 	wantRefusal(t, "fan approval for a reboot", st, b, 403, api.CodeApprovalRefused)
 	st, b = r.post(t, "/fan/mode", map[string]any{"mode": "heavyio", "approval": fanOK})
 	wantRefusal(t, "fan approval for another mode", st, b, 403, api.CodeApprovalRefused)
-	rewritten := &api.Approval{Token: fanOK.Token, Entries: []api.ApprovalEntry{{Challenge: fanOK.Entries[0].Challenge, Request: "power action=reboot delay_s=60"}}}
+	rewritten := &api.Approval{Token: fanOK.Token, Entries: []api.MachineEntry{{MachineID: approvaltest.MachineID, Challenge: fanOK.Entries[0].Challenge, Request: "power action=reboot delay_s=60"}}}
 	st, b = r.post(t, "/power", map[string]any{"action": "reboot", "delay_s": 60, "approval": rewritten})
 	wantRefusal(t, "fan approval with the entry rewritten", st, b, 403, api.CodeApprovalRefused)
 	st, b = r.post(t, "/power", map[string]any{"action": "reboot", "approval": r.approve(t, map[string]any{"verb": "power", "action": "reboot", "delay_s": 300})})
@@ -373,5 +373,5 @@ func provenTrust(t *testing.T, base string, iss *approvaltest.Issuer, in api.Tru
 	if st != 200 || c["needed"] != true || c["request"] != "trust_set hash="+hash || c["expires_in_s"] != float64(180) || c["issuer"] != nil {
 		t.Fatalf("challenge for trust_set: %d %v", st, c)
 	}
-	return iss.Prove(time.Now(), in, api.ApprovalEntry{Challenge: c["challenge"].(string), Request: c["request"].(string)})
+	return iss.Prove(time.Now(), in, api.MachineEntry{MachineID: in.MachineID, Challenge: c["challenge"].(string), Request: c["request"].(string)})
 }

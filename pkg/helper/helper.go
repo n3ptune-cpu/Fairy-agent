@@ -150,6 +150,13 @@ func (s *Server) Start(ctx context.Context) {
 		go s.p.Fan.RunWatchdog(ctx)
 	}
 	s.p.Audit.Info("helper started", "version", s.p.Version, "features", strings.Join(s.Features(), ","))
+	if s.p.Approval != nil {
+		// The trust file is read now, not at the first request: the helper owns it, and a file from before
+		// machine ids gets its id here, at the start (approval.Gate.reload), before anybody asks.
+		if st := s.p.Approval.Status(); st.State != api.ApprovalOff {
+			s.p.Audit.Info("passkey approval of fan, power and update requests", "state", st.State, "issuer", st.Issuer, "machine_id", st.MachineID, "error", st.Error)
+		}
+	}
 }
 
 // Shutdown hands the fans back to the BMC's automatic mode if a fixed duty may be in effect (the watchdog
@@ -173,15 +180,15 @@ func (s *Server) Handle(ctx context.Context, client string, frame []byte) proto.
 	return s.handle(ctx, client, frame, proto.Version)
 }
 
-// HandleV2 answers one request frame that arrived as a version 2 frame.
-func (s *Server) HandleV2(ctx context.Context, client string, frame []byte) proto.Response {
-	return s.handle(ctx, client, frame, proto.Version2)
+// HandleV3 answers one request frame that arrived as a version 3 frame.
+func (s *Server) HandleV3(ctx context.Context, client string, frame []byte) proto.Response {
+	return s.handle(ctx, client, frame, proto.Version3)
 }
 
 func (s *Server) handle(ctx context.Context, client string, frame []byte, version int) proto.Response {
 	decode := proto.DecodeRequest
-	if version == proto.Version2 {
-		decode = proto.DecodeRequestV2
+	if version == proto.Version3 {
+		decode = proto.DecodeRequestV3
 	}
 	req, err := decode(frame)
 	if err != nil {

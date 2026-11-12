@@ -23,6 +23,8 @@ const (
 	ClientID  = "fairy-pc-actions-test"
 	User      = "11111111-2222-4333-8444-555555555555" // a "sub" that may approve
 	Kid       = "test-key-1"
+	// MachineID is the machine id Init proposes: the id of every test machine that is set with it.
+	MachineID = "test-machine-AAAAAAAAAAAA"
 )
 
 var (
@@ -57,13 +59,20 @@ type Issuer struct {
 // New is the made-up issuer with key 0.
 func New() *Issuer { return &Issuer{URL: IssuerURL, ClientID: ClientID, Kid: Kid, Key: Key(0)} }
 
-// Init is what the panel would send to set this issuer as a machine's trust, with users allowed to approve.
+// Init is what the panel would send to set this issuer as a machine's trust, with users allowed to approve and
+// MachineID as the machine's id.
 func (i *Issuer) Init(users ...string) api.TrustInit {
 	if len(users) == 0 {
 		users = []string{User}
 	}
-	return api.TrustInit{Issuer: i.URL, ClientID: i.ClientID, Users: users,
+	return api.TrustInit{Issuer: i.URL, ClientID: i.ClientID, Users: users, MachineID: MachineID,
 		Keys: []api.TrustKey{approval.KeyFromRSA(i.Kid, &i.Key.PublicKey)}}
+}
+
+// Entry is the entry of an approval for the machine with the id machineID that answered c to a challenge
+// request.
+func Entry(machineID string, c api.ChallengeResponse) api.MachineEntry {
+	return api.MachineEntry{MachineID: machineID, Challenge: c.Challenge, Request: c.Request}
 }
 
 // Claims are the claims of a good ID token for nonce, authenticated and issued at now.
@@ -110,7 +119,7 @@ func (i *Issuer) Token(claims map[string]any) string {
 }
 
 // Approve is a complete approval of entries: a good token whose nonce is theirs, authenticated at now.
-func (i *Issuer) Approve(now time.Time, entries ...api.ApprovalEntry) *api.Approval {
+func (i *Issuer) Approve(now time.Time, entries ...api.MachineEntry) *api.Approval {
 	nonce, err := api.ApprovalNonce(entries)
 	if err != nil {
 		panic(err)
@@ -120,7 +129,7 @@ func (i *Issuer) Approve(now time.Time, entries ...api.ApprovalEntry) *api.Appro
 
 // Prove is in as the panel sends it for a first-time set: with this issuer's approval of entries, which must
 // hold the machine's challenge for api.TrustSetRequest(in). Authenticated at now.
-func (i *Issuer) Prove(now time.Time, in api.TrustInit, entries ...api.ApprovalEntry) api.TrustInit {
+func (i *Issuer) Prove(now time.Time, in api.TrustInit, entries ...api.MachineEntry) api.TrustInit {
 	in.Approval = i.Approve(now, entries...)
 	return in
 }

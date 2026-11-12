@@ -46,8 +46,9 @@ type HelperStatus struct {
 	Watchdog *bool `json:"watchdog,omitempty"`
 	// Features the running helper serves (FeatureCoreTemp ...).
 	Features []string `json:"features,omitempty"`
-	// Proto: the pipe protocol version the running helper speaks (2: it knows challenges, approvals and the
-	// first-time set of the trust). Absent: an older helper.
+	// Proto: the pipe protocol version the running helper speaks (3: it knows challenges, approvals that are
+	// bound to this machine and the first-time set of the trust). Absent: a helper from before approvals. 2: the
+	// test build of 2026-11-11, which this agent treats like one from before approvals.
 	Proto int `json:"proto,omitempty"`
 	// Error: what went wrong (state error only).
 	Error string `json:"error,omitempty"`

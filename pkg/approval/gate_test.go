@@ -66,7 +66,7 @@ func (r *rig) proven(g *approval.Gate, iss *approvaltest.Issuer, in api.TrustIni
 	if ref != nil {
 		return in
 	}
-	return iss.Prove(r.Now(), in, api.ApprovalEntry{Challenge: c.Challenge, Request: c.Request})
+	return iss.Prove(r.Now(), in, api.MachineEntry{MachineID: in.MachineID, Challenge: c.Challenge, Request: c.Request})
 }
 
 // firstSet is a complete first-time set of in on g: the challenge, iss's approval of it, the set.
@@ -97,7 +97,7 @@ func fanMode(mode string) api.ApprovalRequest {
 var update = api.ApprovalRequest{Verb: api.ApproveApplyUpdate}
 
 // entry asks g for a challenge for req and returns the entry of an approval.
-func (r *rig) entryFrom(g *approval.Gate, req api.ApprovalRequest) api.ApprovalEntry {
+func (r *rig) entryFrom(g *approval.Gate, req api.ApprovalRequest) api.MachineEntry {
 	r.t.Helper()
 	c, ref := g.Challenge(req)
 	if ref != nil || !c.Needed || len(c.Challenge) != api.ChallengeLen {
@@ -106,10 +106,10 @@ func (r *rig) entryFrom(g *approval.Gate, req api.ApprovalRequest) api.ApprovalE
 	if want, _ := req.Canonical(); c.Request != want || c.Issuer != r.iss.URL || c.ClientID != r.iss.ClientID {
 		r.t.Fatalf("challenge answer %+v", c)
 	}
-	return api.ApprovalEntry{Challenge: c.Challenge, Request: c.Request}
+	return approvaltest.Entry(g.Status().MachineID, c) // the id the machine shows: what a panel has on record
 }
 
-func (r *rig) entry(req api.ApprovalRequest) api.ApprovalEntry { return r.entryFrom(r.g, req) }
+func (r *rig) entry(req api.ApprovalRequest) api.MachineEntry { return r.entryFrom(r.g, req) }
 
 // approve is a good approval of req on this machine: challenge, then the issuer's token.
 func (r *rig) approve(req api.ApprovalRequest) *api.Approval {
@@ -198,13 +198,13 @@ func TestSwappedActionIsRefused(t *testing.T) {
 	// ... for another duty
 	refused(t, "other value", r.g.Check(fanSet(0, 100), ap), api.CodeApprovalRefused, approval.ReasonNoChallenge)
 	// ... with the entry rewritten to the request wanted: this machine issued that challenge for something else
-	swapped := &api.Approval{Token: ap.Token, Entries: []api.ApprovalEntry{{Challenge: ap.Entries[0].Challenge, Request: "power action=shutdown delay_s=10"}}}
+	swapped := &api.Approval{Token: ap.Token, Entries: []api.MachineEntry{{MachineID: approvaltest.MachineID, Challenge: ap.Entries[0].Challenge, Request: "power action=shutdown delay_s=10"}}}
 	refused(t, "rewritten entry", r.g.Check(power("shutdown", 10), swapped), api.CodeApprovalRefused, approval.ReasonEntries)
 	// ... with a fresh challenge for the shutdown put next to the approved token: the token's nonce is not this list's
 	fresh := r.entry(power("shutdown", 10))
-	refused(t, "fresh challenge, old token", r.g.Check(power("shutdown", 10), &api.Approval{Token: ap.Token, Entries: []api.ApprovalEntry{fresh}}),
+	refused(t, "fresh challenge, old token", r.g.Check(power("shutdown", 10), &api.Approval{Token: ap.Token, Entries: []api.MachineEntry{fresh}}),
 		api.CodeApprovalRefused, approval.ReasonNonce)
-	refused(t, "fresh challenge added to the list", r.g.Check(power("shutdown", 10), &api.Approval{Token: ap.Token, Entries: []api.ApprovalEntry{ap.Entries[0], fresh}}),
+	refused(t, "fresh challenge added to the list", r.g.Check(power("shutdown", 10), &api.Approval{Token: ap.Token, Entries: []api.MachineEntry{ap.Entries[0], fresh}}),
 		api.CodeApprovalRefused, approval.ReasonNonce)
 	// none of the attempts used the real approval up
 	accepted(t, "the approved request itself", r.g.Check(fanSet(0, 50), ap))
@@ -232,7 +232,7 @@ func TestBatchOneTokenSeveralMachines(t *testing.T) {
 	e1, e2 := a.entry(update), a.entry(update)
 	refused(t, "same request twice", a.g.Check(update, a.iss.Approve(a.Now(), e1, e2)), api.CodeApprovalRefused, approval.ReasonAmbiguous)
 	// a challenge twice in the list
-	dup := &api.Approval{Token: ap.Token, Entries: []api.ApprovalEntry{e1, e1}}
+	dup := &api.Approval{Token: ap.Token, Entries: []api.MachineEntry{e1, e1}}
 	refused(t, "challenge twice", a.g.Check(update, dup), api.CodeApprovalRefused, approval.ReasonEntries)
 }
 
@@ -251,7 +251,7 @@ func TestChallengeExpiresAndStoreIsBounded(t *testing.T) {
 	if c.ExpiresInS != int(approval.UpdateChallengeTTL/time.Second) {
 		t.Errorf("update challenge lives %d s", c.ExpiresInS)
 	}
-	e := api.ApprovalEntry{Challenge: c.Challenge, Request: c.Request}
+	e := api.MachineEntry{MachineID: approvaltest.MachineID, Challenge: c.Challenge, Request: c.Request}
 	r.wait(approval.UpdateChallengeTTL - time.Second)
 	accepted(t, "update just in time", r.g.Check(update, r.iss.Approve(r.Now(), e)))
 
@@ -259,7 +259,7 @@ func TestChallengeExpiresAndStoreIsBounded(t *testing.T) {
 	// (TestChallengeStoreNeverDropsAYoungChallenge is about the time before that)
 	first := r.entry(fanSet(0, 40))
 	r.wait(approval.ChallengeProtect)
-	var last api.ApprovalEntry
+	var last api.MachineEntry
 	for i := 0; i < approval.MaxChallenges; i++ {
 		last = r.entry(fanSet(1, 40+i))
 	}
@@ -283,7 +283,7 @@ func TestFanWindow(t *testing.T) {
 		t.Error("a shutdown needs no approval in the fan window")
 	}
 	// an approval that is sent is checked, window or not
-	bad := &api.Approval{Token: "x.y.z", Entries: []api.ApprovalEntry{{Challenge: strings.Repeat("A", 43), Request: "fan_set zone=0 percent=55"}}}
+	bad := &api.Approval{Token: "x.y.z", Entries: []api.MachineEntry{{MachineID: approvaltest.MachineID, Challenge: strings.Repeat("A", 43), Request: "fan_set zone=0 percent=55"}}}
 	refused(t, "bad approval in the window", r.g.Check(fanSet(0, 55), bad), api.CodeApprovalRefused, approval.ReasonNoChallenge)
 	// further changes do not move the window's end
 	r.wait(29 * time.Second)
@@ -327,7 +327,7 @@ func TestFanWindowSettingAndTrustChange(t *testing.T) {
 	refused(t, "approval from before the change", r.g.Check(power("reboot", 60), pending), api.CodeApprovalRefused, approval.ReasonNoChallenge)
 	accepted(t, "approved fan change", r.g.Check(fanSet(0, 50), r.approve(fanSet(0, 50))))
 	refused(t, "window off", r.g.Check(fanSet(0, 60), nil), api.CodeApprovalRequired, "")
-	if _, err := approval.NewTrust(approval.Trust{Issuer: r.iss.URL, ClientID: r.iss.ClientID, Keys: r.iss.Init().Keys,
+	if _, err := approval.NewTrust(approval.Trust{MachineID: approvaltest.MachineID, Issuer: r.iss.URL, ClientID: r.iss.ClientID, Keys: r.iss.Init().Keys,
 		Users: []string{"u"}, FanWindowS: ip(61)}); err == nil {
 		t.Error("a fan window of 61 s was accepted")
 	}
@@ -369,7 +369,7 @@ func TestShutdownShortlyAfterBoot(t *testing.T) {
 	blind := approval.NewGate(approval.Options{Files: late.files, Now: late.Now, Log: slog.New(slog.NewTextHandler(late.log, nil)),
 		Uptime: func() (time.Duration, error) { return 0, errors.New("no uptime") }})
 	refused(t, "uptime unknown", blind.Check(power("shutdown", 60), nil), api.CodeApprovalRequired, "")
-	if _, err := approval.NewTrust(approval.Trust{Issuer: r.iss.URL, ClientID: r.iss.ClientID, Keys: r.iss.Init().Keys,
+	if _, err := approval.NewTrust(approval.Trust{MachineID: approvaltest.MachineID, Issuer: r.iss.URL, ClientID: r.iss.ClientID, Keys: r.iss.Init().Keys,
 		Users: []string{"u"}, BootShutdownS: 901}); err == nil {
 		t.Error("boot_shutdown_s of 901 was accepted")
 	}
@@ -583,7 +583,7 @@ func TestFirstTimeSetRefusesBadValues(t *testing.T) {
 
 func TestBrokenTrustFailsClosed(t *testing.T) {
 	good := approvaltest.New().Init()
-	gt, _ := approval.FromInit(good, time.Unix(1794000000, 0))
+	gt, _ := approval.FromInit(good, time.Unix(1794000000, 0), nil)
 	unknown := bytes.Replace(gt.Marshal(), []byte(`"version"`), []byte(`"extra": 1, "version"`), 1)
 	twice := bytes.Replace(gt.Marshal(), []byte(`"version": 1`), []byte(`"version": 1, "Version": 1`), 1)
 	for name, damage := range map[string]func(t *testing.T, path string){
@@ -677,9 +677,9 @@ func TestUnsafeFolderOrFileFailsClosed(t *testing.T) {
 // administrator's command, another process), and a failed write leaves no trust file.
 func TestCreateNeverReplaces(t *testing.T) {
 	r := newRig(t, false)
-	admin, _ := approval.NewTrust(approval.Trust{Issuer: "https://admin.test.invalid", ClientID: "admin", Keys: r.iss.Init().Keys, Users: []string{"root"}})
+	admin, _ := approval.NewTrust(approval.Trust{MachineID: approvaltest.MachineID, Issuer: "https://admin.test.invalid", ClientID: "admin", Keys: r.iss.Init().Keys, Users: []string{"root"}})
 	must(t, r.files.Replace(admin))
-	panel, _ := approval.FromInit(r.iss.Init(), r.Now())
+	panel, _ := approval.FromInit(r.iss.Init(), r.Now(), nil)
 	if err := r.files.Create(panel); !errors.Is(err, approval.ErrExists) {
 		t.Fatalf("Create over an existing file: %v", err)
 	}

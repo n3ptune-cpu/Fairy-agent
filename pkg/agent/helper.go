@@ -611,9 +611,10 @@ type HelperApproval interface {
 	ApprovalNow(ctx context.Context) (st api.ApprovalStatus, known bool)
 	// Checks reports what this agent knows of the approval check of the helper it reaches, from the helper's
 	// latest status answer. seen is false while no helper has answered since this agent started. checks is true
-	// when the helper that answered last speaks pipe protocol 2 and reports an approval state; it is false for a
+	// when the helper that answered last speaks pipe protocol 3 and reports an approval state; it is false for a
 	// helper from before approvals (an update that has not restarted the helper yet), which carries out fan and
-	// power requests without looking at any approval.
+	// power requests without looking at any approval, and for the helper of the test build of 2026-11-11 (pipe
+	// protocol 2), whose check does not bind an approval to this machine.
 	Checks(ctx context.Context) (seen, checks bool)
 	// Challenge and TrustInit pass the request to the helper and return the HTTP status and body.
 	Challenge(ctx context.Context, req api.ApprovalRequest) (int, any)
@@ -630,15 +631,24 @@ func (c *HelperClient) ApprovalStatus(ctx context.Context) (api.ApprovalStatus, 
 	case st.State == api.HelperNotInstalled:
 		return api.ApprovalStatus{}, false
 	case !st.Running():
-		if c.hasLast && c.last.Approval == nil {
+		if c.hasLast && !c.checksLocked() {
 			return api.ApprovalStatus{}, false // the helper that ran before was one from before approvals
 		}
 		return api.ApprovalStatus{State: api.ApprovalUnknown, EnforcedBy: api.EnforcedByHelper, Proto: api.ApprovalProto,
 			Error: "the helper is not answering (" + st.State + ")"}, true
-	case !c.hasLast || c.last.Approval == nil:
+	case !c.checksLocked():
 		return api.ApprovalStatus{}, false
 	}
 	return *c.last.Approval, true
+}
+
+// checksLocked reports whether the helper that answered last checks approvals the way this agent relies on:
+// it speaks pipe protocol 3 and reports an approval state. Not one from before approvals (no state, protocol
+// 1), and not the test build of 2026-11-11 (protocol 2), whose check knows no machine id: what such a helper
+// says about approvals is not passed on, and nothing that needs an approval is handed to it. Caller holds
+// c.stMu.
+func (c *HelperClient) checksLocked() bool {
+	return c.hasLast && c.last.Proto >= proto.Version3 && c.last.Approval != nil
 }
 
 // ApprovalNow: see HelperApproval. It asks the helper now and does not use the cached status.
@@ -646,7 +656,7 @@ func (c *HelperClient) ApprovalNow(ctx context.Context) (api.ApprovalStatus, boo
 	st := c.refresh(ctx)
 	c.stMu.Lock()
 	defer c.stMu.Unlock()
-	if !st.Running() || !c.hasLast || c.last.Approval == nil {
+	if !st.Running() || !c.checksLocked() {
 		return api.ApprovalStatus{}, false
 	}
 	return *c.last.Approval, true
@@ -658,18 +668,18 @@ func (c *HelperClient) Checks(ctx context.Context) (seen, checks bool) {
 	c.Status(ctx)
 	c.stMu.Lock()
 	defer c.stMu.Unlock()
-	return c.hasLast, c.hasLast && c.last.Proto >= proto.Version2 && c.last.Approval != nil
+	return c.hasLast, c.checksLocked()
 }
 
-// approvalCall sends a protocol version 2 request and turns the helper's answer into an HTTP answer.
+// approvalCall sends a protocol version 3 request and turns the helper's answer into an HTTP answer.
 func (c *HelperClient) approvalCall(ctx context.Context, req proto.Request) (int, any) {
 	st := c.Status(ctx)
 	c.stMu.Lock()
-	old := st.Running() && c.hasLast && c.last.Proto < proto.Version2
+	old := st.Running() && c.hasLast && c.last.Proto < proto.Version3
 	c.stMu.Unlock()
 	if old {
 		return 409, map[string]any{"code": api.CodeHelperTooOld,
-			"error": "the running fairy-agent-helper is older than this agent and knows no approvals (restart it: Restart-Service fairy-agent-helper)"}
+			"error": "the running fairy-agent-helper is older than this agent and does not know this version's approvals (restart it: Restart-Service fairy-agent-helper; if it is still older after that, install this version of both services)"}
 	}
 	r, err := c.Call(ctx, req)
 	var bad *proto.Error

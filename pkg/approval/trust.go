@@ -1,11 +1,14 @@
 package approval
 
 import (
+	"crypto/rand"
 	"crypto/rsa"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"math/big"
 	"net/url"
 	"regexp"
@@ -35,13 +38,20 @@ const TrustFileName = "approval-trust.json"
 // maxTrustFile bounds the trust file (4 keys of 8192 bits and 32 users are under 16 KiB).
 const maxTrustFile = 64 << 10
 
-// Trust is the trust file: whose tokens this machine accepts.
+// Trust is the trust file: whose tokens this machine accepts, and which machine this is.
 type Trust struct {
-	Version  int            `json:"version"` // 1
-	Issuer   string         `json:"issuer"`
-	ClientID string         `json:"client_id"`
-	Keys     []api.TrustKey `json:"keys"`
-	Users    []string       `json:"users"`
+	Version int `json:"version"` // 1
+	// MachineID is this machine's id (api.CheckMachineID): at least 16 random bytes as text, made up when the
+	// trust is set for the first time and kept as long as the file is. Every approval's nonce is made with the
+	// id of the machine it is for, and this machine checks with this one: an approval that was asked for
+	// another machine does not fit, whoever's challenge it carries. It is in this file, and nowhere else,
+	// because this is the one file only the checker's side can write (Windows: the helper and administrators;
+	// elsewhere the agent's user and root). A usable trust file always has one (ErrNoMachineID).
+	MachineID string         `json:"machine_id,omitempty"`
+	Issuer    string         `json:"issuer"`
+	ClientID  string         `json:"client_id"`
+	Keys      []api.TrustKey `json:"keys"`
+	Users     []string       `json:"users"`
 	// FanWindowS: absent means DefaultFanWindowS.
 	FanWindowS    *int `json:"fan_window_s,omitempty"`
 	BootShutdownS int  `json:"boot_shutdown_s,omitempty"`
@@ -83,11 +93,39 @@ func (t *Trust) FanWindow() int {
 	return *t.FanWindowS
 }
 
+// ErrNoMachineID is a trust file that is good in everything else and has no machine id: one written by the
+// test build of 2026-11-11, before machine ids. It is not used as it is (nothing is ever checked with an empty
+// id). Whoever owns the file gives it an id when it starts (Files.AddMachineID); until then the state is
+// broken.
+var ErrNoMachineID = &ValueError{Code: api.CodeTrustInvalid, Msg: "the trust file has no machine_id (it is from before approvals were bound to the machine). " +
+	"The service that owns the file adds one when it starts: this version of fairy-agent-helper on Windows, of fairy-agent elsewhere"}
+
+// machineIDBytes is how many random bytes a machine id made here has: 128 bits, 22 characters.
+const machineIDBytes = 16
+
+// NewMachineID makes up a machine id: 16 bytes from rnd (nil: crypto/rand) in base64url without padding.
+func NewMachineID(rnd io.Reader) (string, error) {
+	if rnd == nil {
+		rnd = rand.Reader
+	}
+	var b [machineIDBytes]byte
+	if _, err := io.ReadFull(rnd, b[:]); err != nil {
+		return "", errors.New("no random numbers for a machine id")
+	}
+	return base64.RawURLEncoding.EncodeToString(b[:]), nil
+}
+
 // validate checks every value and builds the keys. It is the one set of rules for the first-time set from the
-// panel, the administrator's command and the file read back from disk.
+// panel, the administrator's command and the file read back from disk. A machine id that is there must be one;
+// whether one must be there is the caller's to say (ParseTrust, NewTrust).
 func (t *Trust) validate() error {
 	if t.Version != 1 {
 		return invalid("version must be 1")
+	}
+	if t.MachineID != "" {
+		if err := api.CheckMachineID(t.MachineID); err != nil {
+			return invalid("machine_id: %s", err.Error())
+		}
 	}
 	if err := checkIssuer(t.Issuer); err != nil {
 		return err
@@ -211,7 +249,9 @@ func Thumbprint(k api.TrustKey) string {
 	return base64.RawURLEncoding.EncodeToString(sum[:])
 }
 
-// ParseTrust reads a trust file's content: strict JSON, no unknown member, every value checked.
+// ParseTrust reads a trust file's content: strict JSON, no unknown member, every value checked. A file that is
+// good in everything else and has no machine id is returned together with ErrNoMachineID: it must not be used
+// to check anything, only to keep its values when the id is added or the file is written anew.
 func ParseTrust(b []byte) (*Trust, error) {
 	if len(b) > maxTrustFile {
 		return nil, invalid("the trust file is larger than %d bytes", maxTrustFile)
@@ -223,24 +263,44 @@ func ParseTrust(b []byte) (*Trust, error) {
 	if err := t.validate(); err != nil {
 		return nil, err
 	}
+	if t.MachineID == "" {
+		return &t, ErrNoMachineID
+	}
 	return &t, nil
 }
 
-// NewTrust checks t and returns it ready to use and to write (the administrator's command).
+// NewTrust checks t and returns it ready to use and to write (the administrator's command). It must have a
+// machine id (NewMachineID, or the one of the file it replaces).
 func NewTrust(t Trust) (*Trust, error) {
 	t.Version = 1
 	if err := t.validate(); err != nil {
 		return nil, err
 	}
+	if t.MachineID == "" {
+		return nil, invalid("machine_id is missing")
+	}
 	return &t, nil
 }
 
 // FromInit is the trust a first-time set from the panel asks for: its four values, the default fan window, no
-// shutdown-after-boot.
-func FromInit(in api.TrustInit, now time.Time) (*Trust, error) {
+// shutdown-after-boot, and the machine id it proposes. When it proposes none, one is made up from rnd (nil:
+// crypto/rand). The proof of the set is checked against what was PROPOSED (in.MachineID, empty or not), not
+// against what is made up here.
+func FromInit(in api.TrustInit, now time.Time, rnd io.Reader) (*Trust, error) {
 	w := DefaultFanWindowS
-	return NewTrust(Trust{Issuer: in.Issuer, ClientID: in.ClientID, Keys: in.Keys, Users: in.Users, FanWindowS: &w,
-		SetBy: "panel", SetAt: now.UTC().Format(time.RFC3339)})
+	t := Trust{Version: 1, MachineID: in.MachineID, Issuer: in.Issuer, ClientID: in.ClientID, Keys: in.Keys, Users: in.Users, FanWindowS: &w,
+		SetBy: "panel", SetAt: now.UTC().Format(time.RFC3339)}
+	if err := t.validate(); err != nil { // before anything is made up: a refused proposal costs no random numbers
+		return nil, err
+	}
+	if t.MachineID == "" {
+		id, err := NewMachineID(rnd)
+		if err != nil {
+			return nil, err
+		}
+		t.MachineID = id
+	}
+	return &t, nil
 }
 
 // Marshal is the file's content.
@@ -251,7 +311,7 @@ func (t *Trust) Marshal() []byte {
 
 // Status is the trust as the "approval" block shows it (state required).
 func (t *Trust) Status() api.ApprovalStatus {
-	st := api.ApprovalStatus{State: api.ApprovalRequired, Proto: api.ApprovalProto, Issuer: t.Issuer, ClientID: t.ClientID,
+	st := api.ApprovalStatus{State: api.ApprovalRequired, Proto: api.ApprovalProto, MachineID: t.MachineID, Issuer: t.Issuer, ClientID: t.ClientID,
 		Users: len(t.Users), SetBy: t.SetBy, SetAt: t.SetAt,
 		TrustHash: api.TrustHash(api.TrustInit{Issuer: t.Issuer, ClientID: t.ClientID, Keys: t.Keys, Users: t.Users})}
 	for _, k := range t.Keys {

@@ -208,7 +208,7 @@ func newOldHelperRig(t *testing.T, blind bool) *oldHelperRig {
 // setTrustOnTheMachine is `fairy-agent helper-trust set` of the new program: it writes the file and asks nobody.
 func (r *oldHelperRig) setTrustOnTheMachine(t *testing.T) {
 	t.Helper()
-	tr, err := approval.FromInit(r.iss.Init(), time.Now())
+	tr, err := approval.FromInit(r.iss.Init(), time.Now(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -321,7 +321,7 @@ func TestOldRunningHelperWithATrustFile(t *testing.T) {
 	if st != 200 || c["needed"] != true {
 		t.Fatalf("challenge from the new helper: %d %v", st, c)
 	}
-	good := r.iss.Approve(time.Now(), api.ApprovalEntry{Challenge: c["challenge"].(string), Request: c["request"].(string)})
+	good := r.iss.Approve(time.Now(), api.MachineEntry{MachineID: approvaltest.MachineID, Challenge: c["challenge"].(string), Request: c["request"].(string)})
 	if st, b := r.post(t, "/power", map[string]any{"action": "shutdown", "delay_s": 60, "approval": good}); st != 200 {
 		t.Fatalf("approved shutdown, new helper: %d %v", st, b)
 	}

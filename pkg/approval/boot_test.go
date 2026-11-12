@@ -145,10 +145,10 @@ func TestAuthTimeAllowance(t *testing.T) {
 		r := newRig(t, true)
 		req := power("shutdown", 60)
 		e := r.entry(req)
-		nonce, _ := api.ApprovalNonce([]api.ApprovalEntry{e})
+		nonce, _ := api.ApprovalNonce([]api.MachineEntry{e})
 		cl := r.iss.Claims(nonce, r.Now())
 		cl["auth_time"] = r.Now().Add(-c.before).Unix()
-		ref := r.g.Check(req, &api.Approval{Token: r.iss.Token(cl), Entries: []api.ApprovalEntry{e}})
+		ref := r.g.Check(req, &api.Approval{Token: r.iss.Token(cl), Entries: []api.MachineEntry{e}})
 		if c.reason == "" {
 			accepted(t, "authenticated "+c.before.String()+" before the challenge", ref)
 		} else {

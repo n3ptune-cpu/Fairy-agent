@@ -1,6 +1,7 @@
 package approval
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -29,6 +30,11 @@ type Files struct {
 	// Prepare, when set, is called with the temporary file before it gets its final name (the administrator's
 	// command on Linux gives the file to root, readable by the agent's group).
 	Prepare func(tmp string) error
+	// Keep, when set, is called by AddMachineID with the temporary file and what the trust file is now, before
+	// the one takes the other's name: it gives the new file the old one's owner, group and mode, or fails
+	// (UnixKeep). Windows has none: a file made in the helper's folder inherits that folder's permissions, as
+	// the trust file itself did when it was written.
+	Keep func(tmp string, old os.FileInfo) error
 }
 
 // ErrExists: a trust file is already there.
@@ -36,7 +42,30 @@ var ErrExists = errors.New("a trust file exists")
 
 // Load reads the trust file. It returns the state (api.ApprovalOff, ApprovalRequired or ApprovalBroken), the
 // trust when the state is required, the file's bytes, and for broken the reason.
+//
+// One broken file comes with its content: a file that is good in everything else and has no machine id (the
+// error is ErrNoMachineID, t is what it holds). The state is broken all the same, and t must not be used to
+// check anything; it is there so that the administrator's command can keep its values when it writes the file
+// anew.
 func (f Files) Load() (state string, t *Trust, raw []byte, err error) {
+	state, raw, _, err = f.read()
+	if state != api.ApprovalRequired {
+		return state, nil, nil, err
+	}
+	t, err = ParseTrust(raw)
+	if errors.Is(err, ErrNoMachineID) {
+		return api.ApprovalBroken, t, raw, fmt.Errorf("%s: %w", f.Path, err)
+	}
+	if err != nil {
+		return api.ApprovalBroken, nil, nil, fmt.Errorf("%s: %w", f.Path, err)
+	}
+	return api.ApprovalRequired, t, raw, nil
+}
+
+// read is the first half of Load: the checks of the folder and the file, and the file's bytes. The state is
+// api.ApprovalRequired when there is a file that passed them (what is in it is not looked at here); st is then
+// what the file is.
+func (f Files) read() (state string, raw []byte, st os.FileInfo, err error) {
 	dir := filepath.Dir(f.Path)
 	if _, err := os.Lstat(dir); errors.Is(err, os.ErrNotExist) {
 		return api.ApprovalOff, nil, nil, nil // no folder, so no file
@@ -46,7 +75,7 @@ func (f Files) Load() (state string, t *Trust, raw []byte, err error) {
 			return api.ApprovalBroken, nil, nil, fmt.Errorf("the folder of the trust file is not safe: %w", err)
 		}
 	}
-	st, err := os.Lstat(f.Path)
+	st, err = os.Lstat(f.Path)
 	if errors.Is(err, os.ErrNotExist) {
 		return api.ApprovalOff, nil, nil, nil
 	}
@@ -70,11 +99,87 @@ func (f Files) Load() (state string, t *Trust, raw []byte, err error) {
 	if err != nil {
 		return api.ApprovalBroken, nil, nil, err
 	}
-	t, err = ParseTrust(raw)
-	if err != nil {
-		return api.ApprovalBroken, nil, nil, fmt.Errorf("%s: %w", f.Path, err)
+	return api.ApprovalRequired, raw, st, nil
+}
+
+// AddMachineID gives a trust file from before machine ids its id, once: the file must pass every check, be a
+// good trust file in everything else, and have no machine id. It returns the id it added. Only the program
+// that owns the file calls it (the Windows helper; elsewhere the agent), when it starts or finds such a file.
+//
+// Nothing else in the file changes, not a byte: the member is put in right behind the opening brace, and what
+// comes out is read back and compared with what went in before it is written. The new content goes into a
+// temporary file in the same folder, which gets the old file's owner, group and mode (Keep) and then the old
+// file's name, in one step: at every moment the name is either the old file or the complete new one. If the
+// file was changed by somebody else in between (the administrator's command), nothing is written. Any failure
+// leaves the file as it was, without an id, and so the state broken: nothing is approved, and nothing runs
+// unapproved.
+func (f Files) AddMachineID(rnd io.Reader) (string, error) {
+	state, raw, st, err := f.read()
+	if state != api.ApprovalRequired {
+		if err == nil {
+			err = errors.New("there is no trust file")
+		}
+		return "", err
 	}
-	return api.ApprovalRequired, t, raw, nil
+	old, err := ParseTrust(raw)
+	if !errors.Is(err, ErrNoMachineID) {
+		if err == nil {
+			return "", errors.New("the trust file has a machine id already")
+		}
+		return "", err
+	}
+	id, err := NewMachineID(rnd)
+	if err != nil {
+		return "", err
+	}
+	at := bytes.IndexByte(raw, '{') // the file is one JSON object (ParseTrust), so this is where it opens
+	member, _ := json.Marshal(id)
+	out := make([]byte, 0, len(raw)+len(member)+32)
+	out = append(out, raw[:at+1]...)
+	out = append(out, "\n  \"machine_id\": "...)
+	out = append(out, member...)
+	out = append(out, ',')
+	out = append(out, raw[at+1:]...)
+	// read back: the same trust with this id and nothing else different
+	got, err := ParseTrust(out)
+	if err != nil || got.MachineID != id {
+		return "", fmt.Errorf("the trust file with a machine id does not read back: %v", err)
+	}
+	got.MachineID = ""
+	if !bytes.Equal(got.Marshal(), old.Marshal()) {
+		return "", errors.New("the trust file with a machine id does not read back as the same trust")
+	}
+	dir := filepath.Dir(f.Path)
+	tmp, err := os.CreateTemp(dir, ".approval-trust-*.tmp")
+	if err != nil {
+		return "", err
+	}
+	_, err = tmp.Write(out)
+	if err == nil {
+		err = tmp.Sync()
+	}
+	if cerr := tmp.Close(); err == nil {
+		err = cerr
+	}
+	if err == nil && f.Keep != nil {
+		err = f.Keep(tmp.Name(), st)
+	}
+	if err == nil {
+		// the file must still be the one that was read: the administrator's command may have written another
+		var now []byte
+		if state, now, _, err = f.read(); err == nil && (state != api.ApprovalRequired || !bytes.Equal(now, raw)) {
+			err = errors.New("the trust file was changed in the meantime")
+		}
+	}
+	if err == nil {
+		err = os.Rename(tmp.Name(), f.Path) // takes the place of the old file under its name, in one step
+	}
+	if err != nil {
+		_ = os.Remove(tmp.Name())
+		return "", err
+	}
+	syncDir(dir)
+	return id, nil
 }
 
 // write puts t into a temporary file in the trust file's folder and returns its name.

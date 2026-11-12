@@ -24,23 +24,35 @@ import (
 // Version is the protocol version of every request that existed before approvals. Nothing about those requests
 // or their frames changed, so an agent and a helper of different ages still understand each other for them.
 //
-// Version2 is the version of what is new: the verbs challenge and trust_init, and any request that carries an
-// approval. Such a request says so twice: "v": 2 in the JSON, and the FrameV2 bit in the frame's length prefix
-// (only frames with that bit may be longer than MaxRequest). Each request has exactly one version: a Version2
-// frame holds only requests that need Version2, a plain frame only the others.
+// Version3 is the version of what came with approvals: the verbs challenge and trust_init, and any request
+// that carries an approval. Such a request says so twice: "v": 3 in the JSON, and the FrameV3 bit in the
+// frame's length prefix (only frames with that bit may be longer than MaxRequest). Each request has exactly one
+// version: a Version3 frame holds only requests that need Version3, a plain frame only the others.
 //
-// How the two ages fail: a helper from before Version2 reads a FrameV2 length as a frame of over 2 GiB, answers
-// too_large and closes the connection, having run nothing. A helper of this version refuses, while trust is
+// There is no version 2 any more. It was the same requests in the test build of 2026-11-11, never released,
+// whose approvals were not bound to a machine: its entries had no machine id, its trust file none, and its
+// nonce was another. Nothing of it is spoken, by either side: a helper of this version refuses a request
+// marked 2, and an agent of this version treats a helper that says 2 like one from before approvals (it hands
+// it nothing that needs an approval; the machine's answer is approval_unavailable). A machine with that test
+// build gets this version of both services installed.
+//
+// How the ages fail: a helper from before approvals reads a FrameV3 length as a frame of over 2 GiB, answers
+// too_large and closes the connection, having run nothing. The test build's helper reads the frame and refuses
+// the request for its version number, having run nothing. A helper of this version refuses, while trust is
 // set, every request that needs an approval and carries none, whatever version or age the agent has.
 const (
 	Version  = 1
-	Version2 = 2
+	Version3 = 3
 	// MaxVersion is what this build speaks (StatusData.Proto).
-	MaxVersion = Version2
+	MaxVersion = Version3
 )
 
-// FrameV2 is set in the 4-byte length prefix of a Version2 request frame.
-const FrameV2 = 1 << 31
+// versionRetired is the version number of the test build of 2026-11-11 (see Version3).
+const versionRetired = 2
+
+// FrameV3 is set in the 4-byte length prefix of a Version3 request frame (the same bit the test build's
+// version 2 used: a frame says how long it may be, the request in it says which version it is).
+const FrameV3 = 1 << 31
 
 // ServiceName is the helper's Windows service.
 const ServiceName = "fairy-agent-helper"
@@ -51,9 +63,9 @@ const PipeName = `\\.\pipe\fairy-agent-helper`
 // Size limits of one frame (the 4-byte length prefix not counted).
 const (
 	MaxRequest = 512 // a Version request: the largest valid one is well under 200 bytes
-	// MaxRequestV2 is the limit of a Version2 request: an ID token of at most 8192 bytes, at most 64 entries of
+	// MaxRequestV3 is the limit of a Version3 request: an ID token of at most 8192 bytes, at most 64 entries of
 	// about 200 bytes, or a first trust (4 keys of 8192 bits, 32 users).
-	MaxRequestV2 = 32 << 10
+	MaxRequestV3 = 32 << 10
 	MaxResponse  = 1 << 20 // the BMC's sensor list; Core Temp's block is under 7 KB
 )
 
@@ -69,7 +81,7 @@ const (
 	VerbFanAuto      = "fan_auto"
 	VerbPower        = "power"
 	VerbApplyUpdate  = "apply_update"
-	// Version2 only.
+	// Version3 only.
 	VerbChallenge = "challenge"  // a challenge for one exact fan_set, fan_mode, power or apply_update request, or for trust_init
 	VerbTrustInit = "trust_init" // the first trust, accepted only while the helper has none and with an approval that proves it
 )
@@ -104,7 +116,7 @@ type Request struct {
 	Action  *string `json:"action,omitempty"`
 	DelayS  *int    `json:"delay_s,omitempty"`
 	By      *string `json:"by,omitempty"` // who asked (for the audit log): letters, digits, " ._@-", up to 64
-	// Version2 only.
+	// Version3 only.
 	Approval *api.Approval  `json:"approval,omitempty"` // fan_set, fan_mode, power (not cancel), apply_update
 	For      *string        `json:"for,omitempty"`      // challenge: the verb the challenge is for, with that verb's fields
 	Trust    *api.TrustInit `json:"trust,omitempty"`    // trust_init: the proposed trust with the approval that proves it
@@ -204,8 +216,11 @@ func bad(f string, a ...any) *Error { return &Error{Code: CodeBadRequest, Msg: f
 
 // Validate checks a request against its verb's schema.
 func (r *Request) Validate() error {
-	if r.V != Version && r.V != Version2 {
-		return bad("protocol version %d, want %d or %d", r.V, Version, Version2)
+	if r.V == versionRetired {
+		return bad("protocol version %d was a test build's and is not spoken any more: install the same version of fairy-agent and fairy-agent-helper", r.V)
+	}
+	if r.V != Version && r.V != Version3 {
+		return bad("protocol version %d, want %d or %d", r.V, Version, Version3)
 	}
 	allowed, ok := verbFields[r.Verb]
 	if !ok {
@@ -298,11 +313,11 @@ func trustApproval(t *api.TrustInit) *api.Approval {
 	return t.Approval
 }
 
-// FrameVersion is the one protocol version r is sent in: Version2 for challenge, trust_init and a request with
+// FrameVersion is the one protocol version r is sent in: Version3 for challenge, trust_init and a request with
 // an approval, Version for everything else.
 func FrameVersion(r Request) int {
 	if r.Verb == VerbChallenge || r.Verb == VerbTrustInit || r.Approval != nil {
-		return Version2
+		return Version3
 	}
 	return Version
 }
@@ -311,15 +326,15 @@ func FrameVersion(r Request) int {
 // fields, no duplicate or extra data, at most MaxRequest bytes.
 func DecodeRequest(b []byte) (Request, error) { return decodeRequest(b, Version) }
 
-// DecodeRequestV2 is DecodeRequest for a frame that arrived with FrameV2: at most MaxRequestV2 bytes, and a
-// request that needs Version2.
-func DecodeRequestV2(b []byte) (Request, error) { return decodeRequest(b, Version2) }
+// DecodeRequestV3 is DecodeRequest for a frame that arrived with FrameV3: at most MaxRequestV3 bytes, and a
+// request that needs Version3.
+func DecodeRequestV3(b []byte) (Request, error) { return decodeRequest(b, Version3) }
 
 func decodeRequest(b []byte, version int) (Request, error) {
 	var r Request
 	limit := MaxRequest
-	if version == Version2 {
-		limit = MaxRequestV2
+	if version == Version3 {
+		limit = MaxRequestV3
 	}
 	if len(b) > limit {
 		return r, &Error{Code: CodeTooLarge, Msg: "request too large"}
@@ -365,8 +380,8 @@ func EncodeRequest(r Request) ([]byte, error) {
 		return nil, err
 	}
 	limit := MaxRequest
-	if r.V == Version2 {
-		limit = MaxRequestV2
+	if r.V == Version3 {
+		limit = MaxRequestV3
 	}
 	if len(b) > limit {
 		return nil, &Error{Code: CodeTooLarge, Msg: "request too large"}
@@ -456,12 +471,12 @@ func WriteFrame(w io.Writer, b []byte, limit int) error {
 	return err
 }
 
-// WriteRequest writes one request frame of the given version (FrameVersion): a Version2 frame has FrameV2 set
-// in its length prefix and may be MaxRequestV2 bytes long.
+// WriteRequest writes one request frame of the given version (FrameVersion): a Version3 frame has FrameV3 set
+// in its length prefix and may be MaxRequestV3 bytes long.
 func WriteRequest(w io.Writer, b []byte, version int) error {
 	limit, flag := MaxRequest, uint32(0)
-	if version == Version2 {
-		limit, flag = MaxRequestV2, FrameV2
+	if version == Version3 {
+		limit, flag = MaxRequestV3, FrameV3
 	}
 	if len(b) > limit {
 		return fmt.Errorf("frame of %d bytes exceeds %d", len(b), limit)
@@ -474,7 +489,7 @@ func WriteRequest(w io.Writer, b []byte, version int) error {
 }
 
 // ReadRequest reads one request frame and returns its version: Version for a plain frame (at most MaxRequest
-// bytes, exactly as before Version2), Version2 for one with FrameV2 (at most MaxRequestV2). A longer one is
+// bytes, exactly as before Version3), Version3 for one with FrameV3 (at most MaxRequestV3). A longer one is
 // ErrFrameTooLarge, and nothing of it is read.
 func ReadRequest(r io.Reader) ([]byte, int, error) {
 	var hdr [4]byte
@@ -482,8 +497,8 @@ func ReadRequest(r io.Reader) ([]byte, int, error) {
 		return nil, 0, err
 	}
 	n, version, limit := binary.BigEndian.Uint32(hdr[:]), Version, uint32(MaxRequest)
-	if n&FrameV2 != 0 {
-		n, version, limit = n&^FrameV2, Version2, MaxRequestV2
+	if n&FrameV3 != 0 {
+		n, version, limit = n&^FrameV3, Version3, MaxRequestV3
 	}
 	if n > limit {
 		return nil, version, ErrFrameTooLarge

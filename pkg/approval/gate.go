@@ -6,6 +6,7 @@ import (
 	"crypto/subtle"
 	"encoding/base64"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"strconv"
@@ -53,9 +54,10 @@ type Options struct {
 	BootID func() (string, error)
 	// ReadOnly: this gate reads a trust file it cannot write and does not own (a Windows agent next to the
 	// helper, whose file it is). It checks requests and gives challenges for them; it never sets the trust,
-	// gives no challenge for that, and never accepts the shutdown after boot (it could not record it).
+	// gives no challenge for that, never accepts the shutdown after boot (it could not record it), and never
+	// adds a machine id to a trust file that has none (the owner does).
 	ReadOnly bool
-	// Rand is the source of challenges (nil: crypto/rand).
+	// Rand is the source of challenges and of a machine id that is made up here (nil: crypto/rand).
 	Rand io.Reader
 	// Log gets one line for every accepted and every refused approval (nil: slog.Default()).
 	Log *slog.Logger
@@ -157,13 +159,31 @@ func elapsed(since, now time.Time) time.Duration {
 
 // reload reads the trust file again when the last look is older than reloadEvery (or force). When the file's
 // content changed, open challenges and the fan window are dropped: they were given under the old trust.
-// Caller holds g.mu.
+//
+// A trust file without a machine id (one from the test build of 2026-11-11) gets one here, the first time the
+// gate that owns the file sees it, which is when the service starts (Files.AddMachineID: that one member is
+// added, nothing else changes). A gate that only reads the file, or one that cannot write it, does not use the
+// file: the state is broken, with the reason, until the id is there. Caller holds g.mu.
 func (g *Gate) reload(force bool) {
 	now := g.o.Now()
 	if g.loaded && !force && elapsed(g.loadedAt, now) < reloadEvery && elapsed(g.loadedAt, now) >= 0 {
 		return
 	}
 	state, t, raw, err := g.o.Files.Load()
+	if errors.Is(err, ErrNoMachineID) && !g.o.ReadOnly {
+		id, aerr := g.o.Files.AddMachineID(g.o.Rand)
+		if aerr == nil {
+			g.o.Log.Warn("approval: the trust file had no machine id (it is from before approvals were bound to the machine); one was added, nothing else in it changed",
+				"enforced_by", g.o.EnforcedBy, "machine_id", id)
+			state, t, raw, err = g.o.Files.Load()
+		} else { // the reason first: the answer's text is cut after 300 characters
+			err = fmt.Errorf("%s: the trust file has no machine_id, and adding one failed: %s (the file is as it was; repair on the machine: fairy-agent helper-trust set)",
+				g.o.Files.Path, firstLine(aerr.Error()))
+		}
+	}
+	if state != api.ApprovalRequired {
+		t = nil // also the file without a machine id, which Load hands out for its values: never checked with
+	}
 	sum := sha256.Sum256(raw)
 	msg := ""
 	if err != nil {
@@ -404,6 +424,10 @@ func (g *Gate) enforced(req api.ApprovalRequest) (canon string, on bool, ref *Re
 	case api.ApprovalOff:
 		return "", false, nil
 	case api.ApprovalRequired:
+		if g.trust == nil || g.trust.MachineID == "" { // cannot happen (Files.Load); nothing is ever checked with an empty id
+			g.o.Log.Error("approval: refused", "result", "refused", "reason", "the trust has no machine id", "verb", req.Verb)
+			return "", true, unavailable(ErrNoMachineID.Msg)
+		}
 	default:
 		g.o.Log.Warn("approval: refused", "result", "refused", "reason", "trust file unusable", "verb", req.Verb)
 		return "", true, unavailable(g.loadErr)
@@ -504,10 +528,15 @@ func (g *Gate) Admit(req api.ApprovalRequest, ap *api.Approval) (*Pass, *Refusal
 		g.o.Log.Warn("approval: required, none sent", "result", "refused", "request", canon)
 		return nil, noneSent()
 	}
-	c, cl, reason := g.verify(g.trust, canon, ap, now)
+	c, cl, reason, other := g.verify(g.trust, g.trust.MachineID, canon, ap, now)
 	if reason != "" {
-		g.o.Log.Warn("approval: refused", "result", "refused", "reason", reason, "request", canon, "sub", cl.Sub, "kid", cl.Kid,
-			"challenge", c)
+		attrs := []any{"result", "refused", "reason", reason, "request", canon, "sub", cl.Sub, "kid", cl.Kid, "challenge", c}
+		if other {
+			// The answer says "nonce" like every token that was made for another list. The log says what the
+			// machine saw: this approval was built for another machine and carries this machine's challenge.
+			attrs = append(attrs, "note", "the entry with this machine's challenge names another machine id than this machine's")
+		}
+		g.o.Log.Warn("approval: refused", attrs...)
 		return nil, refuse(reason, refusalText[reason])
 	}
 	g.o.Log.Warn("approval: accepted", "result", "accepted", "request", canon, "sub", cl.Sub, "name", cl.Name, "kid", cl.Kid,
@@ -519,53 +548,70 @@ func (g *Gate) Admit(req api.ApprovalRequest, ap *api.Approval) (*Pass, *Refusal
 }
 
 // verify checks ap for the request canon against the trust t (the machine's own, or for the first-time set the
-// proposed one) and, when everything holds, uses up its challenge. It returns the challenge's log prefix (when
-// one was found), what is known of the token, and the reason of a refusal ("" = accepted). Caller holds g.mu,
-// so finding, checking and using up the challenge are one step: of two requests with the same approval one is
-// accepted.
-func (g *Gate) verify(t *Trust, canon string, ap *api.Approval, now time.Time) (string, claims, string) {
+// proposed one) and, when everything holds, uses up its challenge. machineID is this machine's id: the one in
+// its trust file, or for the first-time set the proposed one (empty when none is proposed). It returns the
+// challenge's log prefix (when one was found), what is known of the token, the reason of a refusal ("" =
+// accepted), and whether the entry with this machine's challenge named another machine id than machineID (for
+// the log). Caller holds g.mu, so finding, checking and using up the challenge are one step: of two requests
+// with the same approval one is accepted.
+//
+// What ties an approval to this machine is the nonce, and the nonce is made here from this machine's own
+// knowledge: its open challenge, the request it is about to carry out, and machineID. The list that was sent
+// says which other entries the token covers; of this machine's own entry only the challenge is believed (it is
+// looked up among the open ones). The machine id is written into that entry here, whatever was sent, and the
+// token must have been issued for the list that results. So a token that was issued for (this machine's
+// challenge, this request, another machine's id), which is what a panel signs when it was handed this
+// machine's challenge in the name of another machine, has another nonce and is refused.
+func (g *Gate) verify(t *Trust, machineID, canon string, ap *api.Approval, now time.Time) (string, claims, string, bool) {
 	if len(ap.Token) > api.MaxApprovalToken {
-		return "", claims{}, ReasonFormat
+		return "", claims{}, ReasonFormat, false
 	}
-	nonce, err := api.ApprovalNonce(ap.Entries) // also bounds the list and refuses a challenge that is in it twice
-	if err != nil {
-		return "", claims{}, ReasonEntries
+	// bounds the list and refuses a malformed entry and a challenge that is in it twice
+	if _, err := api.ApprovalNonce(ap.Entries); err != nil {
+		return "", claims{}, ReasonEntries, false
 	}
-	mine, n := -1, 0
-	for _, e := range ap.Entries {
+	mine, at, n := -1, -1, 0
+	for j, e := range ap.Entries {
 		id, err := api.DecodeChallenge(e.Challenge)
 		if err != nil {
-			return "", claims{}, ReasonEntries
+			return "", claims{}, ReasonEntries, false
 		}
 		i := g.find(id)
 		if i < 0 {
 			continue // another machine's entry
 		}
 		if g.open[i].request != e.Request {
-			return prefix(g.open[i].id), claims{}, ReasonEntries // this machine's challenge, listed with another request
+			return prefix(g.open[i].id), claims{}, ReasonEntries, false // this machine's challenge, listed with another request
 		}
 		if e.Request == canon {
-			mine, n = i, n+1
+			mine, at, n = i, j, n+1
 		}
 	}
 	switch {
 	case n == 0:
-		return "", claims{}, ReasonNoChallenge
+		return "", claims{}, ReasonNoChallenge, false
 	case n > 1:
-		return "", claims{}, ReasonAmbiguous
+		return "", claims{}, ReasonAmbiguous, false
 	}
 	c := g.open[mine]
 	p := prefix(c.id)
 	if e := elapsed(c.issued, now); e < 0 || e >= c.ttl {
 		g.open = append(g.open[:mine], g.open[mine+1:]...)
-		return p, claims{}, ReasonExpired
+		return p, claims{}, ReasonExpired, false
+	}
+	other := ap.Entries[at].MachineID != machineID
+	own := append([]api.MachineEntry(nil), ap.Entries...)
+	own[at] = api.MachineEntry{MachineID: machineID, Challenge: ap.Entries[at].Challenge, Request: canon}
+	nonce, err := api.ApprovalNonce(own)
+	if err != nil { // machineID is not one: cannot happen for a trust that was loaded or a proposal that was checked
+		return p, claims{}, ReasonEntries, other
 	}
 	cl, reason := verifyToken(ap.Token, t, nonce, now, c.issued)
 	if reason != "" {
-		return p, cl, reason
+		return p, cl, reason, other
 	}
 	g.open = append(g.open[:mine], g.open[mine+1:]...) // used up, before anything runs
-	return p, cl, ""
+	return p, cl, "", other
 }
 
 // refusalText says each reason in a sentence (the answer's text; the reason word is in front of it).
@@ -587,7 +633,7 @@ var refusalText = map[string]string{
 	ReasonClock:       "a time in the token does not fit this machine's clock (is the clock right?)",
 	ReasonAuthTime:    "the passkey check is older than the request for approval",
 	ReasonAMR:         "the sign-in was not made with a passkey",
-	ReasonNonce:       "the token was not issued for this list of entries",
+	ReasonNonce:       "the token was not issued for this list of entries on this machine",
 }
 
 // proofText says some reasons differently for the proof of a first-time set, where "this machine's trust" is
@@ -598,11 +644,13 @@ var proofText = map[string]string{
 	ReasonIssuer:      "the token's issuer is not the proposed issuer (use Pocket ID's own spelling, mind a trailing slash)",
 	ReasonAudience:    "the token was issued for another client than the proposed client_id",
 	ReasonUser:        "the user who approved is not in the proposed users",
+	ReasonNonce:       "the token was not issued for this list of entries with the proposed machine_id in this machine's entry (the entry's machine_id is the machine_id that is sent, or empty when none is sent)",
 }
 
 // Init is the first-time set of the trust from the panel. It is accepted only while there is no trust file
 // (once a file exists, usable or not, every call is refused with already_set, also one with a valid
-// approval), and only together with a proof that the proposed trust works: an approval of the request
+// approval and also one that asks for nothing but another machine id), and only together with a proof that the
+// proposed trust works: an approval of the request
 // "trust_set hash=<api.TrustHash of the proposed values>" for a challenge this machine gave for exactly that
 // request, whose token verifies against the PROPOSED values the way every approval verifies against the
 // trust file (verifyToken: signed by a proposed key, iss, aud, a proposed user, amr, auth_time, the times
@@ -625,15 +673,15 @@ func (g *Gate) Init(in api.TrustInit) (api.ApprovalStatus, *Refusal) {
 		return g.status(), notHere()
 	}
 	now := g.o.Now()
-	t, err := FromInit(in, now)
+	t, err := FromInit(in, now, g.o.Rand)
 	if err != nil {
-		code := api.CodeTrustInvalid
 		var ve *ValueError
-		if errors.As(err, &ve) {
-			code = ve.Code
+		if !errors.As(err, &ve) { // no random numbers for a machine id
+			g.o.Log.Error("approval: trust set from the panel failed", "result", "refused", "error", err.Error())
+			return g.status(), &Refusal{Status: 500, Code: "failed", Msg: err.Error()}
 		}
-		g.o.Log.Warn("approval: trust set from the panel refused", "result", "refused", "reason", code, "error", err.Error())
-		return g.status(), &Refusal{Status: 400, Code: code, Msg: err.Error()}
+		g.o.Log.Warn("approval: trust set from the panel refused", "result", "refused", "reason", ve.Code, "error", err.Error())
+		return g.status(), &Refusal{Status: 400, Code: ve.Code, Msg: err.Error()}
 	}
 	if in.Approval == nil {
 		g.o.Log.Warn("approval: trust set from the panel refused", "result", "refused", "reason", api.CodeTrustProofRequired)
@@ -644,7 +692,9 @@ func (g *Gate) Init(in api.TrustInit) (api.ApprovalStatus, *Refusal) {
 	if err != nil { // cannot happen: the hash is 43 characters by construction
 		return g.status(), &Refusal{Status: 500, Code: "failed", Msg: "no request text for this trust"}
 	}
-	c, cl, reason := g.verify(t, canon, in.Approval, now)
+	// The proof is checked against what was proposed, the machine id included: in.MachineID as it was sent,
+	// empty when the panel left the choice to this machine. A proof that was given for one id sets no other.
+	c, cl, reason, _ := g.verify(t, in.MachineID, canon, in.Approval, now)
 	if reason != "" {
 		g.o.Log.Warn("approval: trust set from the panel refused: its proof does not verify against the proposed trust", "result", "refused",
 			"reason", reason, "request", canon, "issuer", t.Issuer, "client_id", t.ClientID, "sub", cl.Sub, "kid", cl.Kid, "challenge", c)
@@ -672,7 +722,7 @@ func (g *Gate) Init(in api.TrustInit) (api.ApprovalStatus, *Refusal) {
 		kids = append(kids, k.Kid)
 	}
 	g.o.Log.Warn("approval: trust set for the first time, from the panel, proven by a passkey approval; it can now be changed only on this machine",
-		"result", "accepted", "issuer", t.Issuer, "client_id", t.ClientID, "kids", strings.Join(kids, ","), "users", len(t.Users),
+		"result", "accepted", "machine_id", t.MachineID, "issuer", t.Issuer, "client_id", t.ClientID, "kids", strings.Join(kids, ","), "users", len(t.Users),
 		"sub", cl.Sub, "name", cl.Name, "kid", cl.Kid, "challenge", c)
 	return g.status(), nil
 }

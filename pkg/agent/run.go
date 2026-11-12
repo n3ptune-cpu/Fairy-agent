@@ -163,8 +163,10 @@ func Run(ctx context.Context, cfg *Config, b Build) error {
 	// was started without the helper).
 	d.Approval = approval.NewGate(approval.Options{Files: ApprovalFiles(cfg), EnforcedBy: api.EnforcedByAgent,
 		Uptime: SystemUptime, BootID: SystemBootID, ReadOnly: helper != nil})
+	// This first look is also where, on systems other than Windows, a trust file from before machine ids gets
+	// its id (approval.Gate.reload): the agent owns the file there. On Windows the helper does (its file).
 	if st := d.Approval.Status(); st.State != api.ApprovalOff {
-		slog.Info("passkey approval of fan, power and update requests", "state", st.State, "issuer", st.Issuer, "error", st.Error)
+		slog.Info("passkey approval of fan, power and update requests", "state", st.State, "issuer", st.Issuer, "machine_id", st.MachineID, "error", st.Error)
 	}
 	if cfg.Sensors.CoreTemp {
 		if viaHelper {

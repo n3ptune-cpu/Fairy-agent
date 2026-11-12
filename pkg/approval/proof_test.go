@@ -15,7 +15,7 @@ import (
 )
 
 // trustEntry asks g for the challenge of a first-time set of in and returns the entry.
-func (r *rig) trustEntry(g *approval.Gate, in api.TrustInit) api.ApprovalEntry {
+func (r *rig) trustEntry(g *approval.Gate, in api.TrustInit) api.MachineEntry {
 	r.t.Helper()
 	c, ref := g.Challenge(api.TrustSetRequest(in))
 	if ref != nil || !c.Needed || len(c.Challenge) != api.ChallengeLen || c.ExpiresInS != int(approval.ChallengeTTL/time.Second) {
@@ -24,7 +24,7 @@ func (r *rig) trustEntry(g *approval.Gate, in api.TrustInit) api.ApprovalEntry {
 	if c.Request != "trust_set hash="+api.TrustHash(in) || c.Issuer != "" || c.ClientID != "" || c.Reason != "" {
 		r.t.Fatalf("trust_set challenge answer %+v", c)
 	}
-	return api.ApprovalEntry{Challenge: c.Challenge, Request: c.Request}
+	return api.MachineEntry{MachineID: in.MachineID, Challenge: c.Challenge, Request: c.Request}
 }
 
 // TestFirstTimeSetMustProveItWorks: a first-time set is accepted only with an approval that verifies against
@@ -41,25 +41,25 @@ func TestFirstTimeSetMustProveItWorks(t *testing.T) {
 		// build returns what is sent; e is this machine's entry for the proposal `in` (the good values unless
 		// propose changes them).
 		propose func(in *api.TrustInit)
-		build   func(r *rig, in api.TrustInit, e api.ApprovalEntry) api.TrustInit
+		build   func(r *rig, in api.TrustInit, e api.MachineEntry) api.TrustInit
 		code    string
 		reason  string
 	}
-	withClaims := func(change func(cl map[string]any, now time.Time)) func(r *rig, in api.TrustInit, e api.ApprovalEntry) api.TrustInit {
-		return func(r *rig, in api.TrustInit, e api.ApprovalEntry) api.TrustInit {
-			nonce, _ := api.ApprovalNonce([]api.ApprovalEntry{e})
+	withClaims := func(change func(cl map[string]any, now time.Time)) func(r *rig, in api.TrustInit, e api.MachineEntry) api.TrustInit {
+		return func(r *rig, in api.TrustInit, e api.MachineEntry) api.TrustInit {
+			nonce, _ := api.ApprovalNonce([]api.MachineEntry{e})
 			cl := r.iss.Claims(nonce, r.Now())
 			change(cl, r.Now())
-			in.Approval = &api.Approval{Token: r.iss.Token(cl), Entries: []api.ApprovalEntry{e}}
+			in.Approval = &api.Approval{Token: r.iss.Token(cl), Entries: []api.MachineEntry{e}}
 			return in
 		}
 	}
-	signedBy := func(iss *approvaltest.Issuer) func(r *rig, in api.TrustInit, e api.ApprovalEntry) api.TrustInit {
-		return func(r *rig, in api.TrustInit, e api.ApprovalEntry) api.TrustInit { return iss.Prove(r.Now(), in, e) }
+	signedBy := func(iss *approvaltest.Issuer) func(r *rig, in api.TrustInit, e api.MachineEntry) api.TrustInit {
+		return func(r *rig, in api.TrustInit, e api.MachineEntry) api.TrustInit { return iss.Prove(r.Now(), in, e) }
 	}
-	honest := func(r *rig, in api.TrustInit, e api.ApprovalEntry) api.TrustInit { return r.iss.Prove(r.Now(), in, e) }
+	honest := func(r *rig, in api.TrustInit, e api.MachineEntry) api.TrustInit { return r.iss.Prove(r.Now(), in, e) }
 	for name, c := range map[string]attempt{
-		"no proof at all": {build: func(_ *rig, in api.TrustInit, _ api.ApprovalEntry) api.TrustInit { return in },
+		"no proof at all": {build: func(_ *rig, in api.TrustInit, _ api.MachineEntry) api.TrustInit { return in },
 			code: api.CodeTrustProofRequired},
 		// the panel's configuration is wrong, Pocket ID and the user are fine: what a typo looks like
 		"issuer with a trailing slash": {propose: func(in *api.TrustInit) { in.Issuer += "/" }, build: honest,
@@ -95,33 +95,33 @@ func TestFirstTimeSetMustProveItWorks(t *testing.T) {
 		// the approval is for something else
 		"token for another nonce": {build: withClaims(func(cl map[string]any, _ time.Time) { cl["nonce"] = strings.Repeat("A", 43) }),
 			code: api.CodeTrustProofRefused, reason: approval.ReasonNonce},
-		"values changed after the challenge (a user added)": {build: func(r *rig, in api.TrustInit, e api.ApprovalEntry) api.TrustInit {
+		"values changed after the challenge (a user added)": {build: func(r *rig, in api.TrustInit, e api.MachineEntry) api.TrustInit {
 			in.Users = append([]string{}, in.Users...)
 			in.Users = append(in.Users, "attacker")
 			return r.iss.Prove(r.Now(), in, e)
 		}, code: api.CodeTrustProofRefused, reason: approval.ReasonNoChallenge},
-		"values changed after the challenge (a key added)": {build: func(r *rig, in api.TrustInit, e api.ApprovalEntry) api.TrustInit {
+		"values changed after the challenge (a key added)": {build: func(r *rig, in api.TrustInit, e api.MachineEntry) api.TrustInit {
 			in.Keys = append([]api.TrustKey{}, in.Keys...)
 			in.Keys = append(in.Keys, approval.KeyFromRSA("extra", &approvaltest.Key(1).PublicKey))
 			return r.iss.Prove(r.Now(), in, e)
 		}, code: api.CodeTrustProofRefused, reason: approval.ReasonNoChallenge},
-		"the entry rewritten to the hash of other values": {build: func(r *rig, in api.TrustInit, e api.ApprovalEntry) api.TrustInit {
+		"the entry rewritten to the hash of other values": {build: func(r *rig, in api.TrustInit, e api.MachineEntry) api.TrustInit {
 			in.Users = []string{approvaltest.User, "attacker"}
 			e.Request = "trust_set hash=" + api.TrustHash(in)
 			return r.iss.Prove(r.Now(), in, e)
 		}, code: api.CodeTrustProofRefused, reason: approval.ReasonEntries},
-		"a challenge this machine never gave": {build: func(r *rig, in api.TrustInit, _ api.ApprovalEntry) api.TrustInit {
-			return r.iss.Prove(r.Now(), in, api.ApprovalEntry{Challenge: strings.Repeat("B", 42) + "A", Request: "trust_set hash=" + api.TrustHash(in)})
+		"a challenge this machine never gave": {build: func(r *rig, in api.TrustInit, _ api.MachineEntry) api.TrustInit {
+			return r.iss.Prove(r.Now(), in, api.MachineEntry{MachineID: in.MachineID, Challenge: strings.Repeat("B", 42) + "A", Request: "trust_set hash=" + api.TrustHash(in)})
 		}, code: api.CodeTrustProofRefused, reason: approval.ReasonNoChallenge},
-		"an empty entry list": {build: func(r *rig, in api.TrustInit, e api.ApprovalEntry) api.TrustInit {
+		"an empty entry list": {build: func(r *rig, in api.TrustInit, e api.MachineEntry) api.TrustInit {
 			in.Approval = &api.Approval{Token: r.iss.Approve(r.Now(), e).Token}
 			return in
 		}, code: api.CodeTrustProofRefused, reason: approval.ReasonEntries},
-		"junk for a token": {build: func(_ *rig, in api.TrustInit, e api.ApprovalEntry) api.TrustInit {
-			in.Approval = &api.Approval{Token: "a.b.c", Entries: []api.ApprovalEntry{e}}
+		"junk for a token": {build: func(_ *rig, in api.TrustInit, e api.MachineEntry) api.TrustInit {
+			in.Approval = &api.Approval{Token: "a.b.c", Entries: []api.MachineEntry{e}}
 			return in
 		}, code: api.CodeTrustProofRefused, reason: approval.ReasonFormat},
-		"the challenge too old": {build: func(r *rig, in api.TrustInit, e api.ApprovalEntry) api.TrustInit {
+		"the challenge too old": {build: func(r *rig, in api.TrustInit, e api.MachineEntry) api.TrustInit {
 			r.wait(approval.ChallengeTTL)
 			return r.iss.Prove(r.Now(), in, e)
 		}, code: api.CodeTrustProofRefused, reason: approval.ReasonExpired},
@@ -278,7 +278,7 @@ func TestTrustHashVectorIsAValidProposal(t *testing.T) {
 	if got := api.TrustHash(in); got != "dRtwOuCOmn_fN8xutDqtllZabcZQcFGbT4ShJzPoXpQ" {
 		t.Fatalf("trust hash %s", got)
 	}
-	if _, err := approval.FromInit(in, nowForTests); err != nil {
+	if _, err := approval.FromInit(in, nowForTests, nil); err != nil {
 		t.Errorf("the vector is not a valid proposal: %v", err)
 	}
 }

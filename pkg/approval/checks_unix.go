@@ -85,7 +85,32 @@ func UnixAdminPrepare(dir string) func(tmp string) error {
 	}
 }
 
+// UnixKeep is Files.Keep: it gives the temporary file tmp the owner, the group and the mode of the file it is
+// about to replace (old), and fails when it cannot. So a trust file that gets its machine id added (Files.
+// AddMachineID) is afterwards whose it was, with the rights it had: root's file stays root's (only root can
+// do that; an agent that runs as another user cannot, and the file then stays as it was, without an id).
+func UnixKeep(tmp string, old os.FileInfo) error {
+	was, ok := old.Sys().(*syscall.Stat_t)
+	if !ok {
+		return fmt.Errorf("%s: cannot read its owner", old.Name())
+	}
+	st, err := os.Lstat(tmp)
+	if err != nil {
+		return err
+	}
+	is, ok := st.Sys().(*syscall.Stat_t)
+	if !ok {
+		return fmt.Errorf("%s: cannot read its owner", tmp)
+	}
+	if is.Uid != was.Uid || is.Gid != was.Gid {
+		if err := os.Lchown(tmp, int(was.Uid), int(was.Gid)); err != nil {
+			return fmt.Errorf("the trust file belongs to user %d, group %d, and the file that would replace it cannot be given to them: %w", was.Uid, was.Gid, err)
+		}
+	}
+	return os.Chmod(tmp, old.Mode().Perm()) // after the owner: a change of owner can clear mode bits
+}
+
 // UnixFiles is the trust file at path with the checks above.
 func UnixFiles(path string) Files {
-	return Files{Path: path, CheckDir: UnixCheckDir, CheckFile: UnixCheckFile}
+	return Files{Path: path, CheckDir: UnixCheckDir, CheckFile: UnixCheckFile, Keep: UnixKeep}
 }
