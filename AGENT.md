@@ -1110,7 +1110,15 @@ only root / Administrators (Linux: or the agent's own user) can remove it.
 
 1. The panel asks the machine for a **challenge** for one exact request (`POST /approval/challenge`, e.g.
    shutdown in 60 s). The machine answers with 32 random bytes and remembers them with that request: single
-   use, 180 s (an update: 900 s), at most 16 open at a time.
+   use, 180 s (an update: 900 s), at most 16 open at a time. When 16 are open and one more is asked for: if
+   the oldest is at least 90 s old it is dropped for the new one (the log names it); if not, the new request
+   is refused (`429 too_many_challenges`, the text says in how many seconds to ask again). So a challenge
+   that somebody is confirming at Pocket ID cannot be pushed out for its first 90 s by a burst of requests
+   for others, and nobody can keep the list shut for longer than that with a few requests. A panel asks for
+   one challenge per machine and action and uses it within seconds; it does not meet this. (What whoever
+   holds the control token can still do: ask for challenges until the request budget is used up, so that
+   nobody gets one for the rest of that minute; and, on Windows, drop the challenge of an update whose
+   download takes longer than 90 s. Either stops approvals, never lets anything through.)
 2. The panel sends the browser to Pocket ID once, as the client "Fairy PC actions", with a nonce made from the
    challenge and the request. Pocket ID asks for the passkey and signs an ID token with that nonce.
 3. The panel sends the request with the token attached. The machine first runs the request's own checks: is
@@ -1166,7 +1174,8 @@ it cannot (those are then refused; only while the helper answers and says there 
 as they do without trust). No `approval` block: an agent from before this, or Windows without the
 helper and without a trust file. Refusals: `403 approval_required` (none sent), `403 approval_refused` (sent,
 not accepted; the text says why), `503 approval_unavailable` (broken trust file, or nothing that could check
-is reachable). For the first-time set: `403 proof_required`, `403 proof_refused`, `409 already_set`.
+is reachable), `429 too_many_challenges` (for a challenge: 16 are open and none is 90 s old yet). For the
+first-time set: `403 proof_required`, `403 proof_refused`, `409 already_set`.
 
 **Updates on Windows.** The Windows agent starts the updater service with its own right, which the helper
 never sees. So while the helper's check is on, the agent refuses `POST /update` without an approval itself,

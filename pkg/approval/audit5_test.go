@@ -188,3 +188,82 @@ func TestPrecheckUsesNothingUp(t *testing.T) {
 	refused(t, "broken, none sent", r.g.Precheck(req, false), api.CodeApprovalUnavailable, "")
 	refused(t, "broken, sent", r.g.Precheck(req, true), api.CodeApprovalUnavailable, "")
 }
+
+// tooMany asks g for a challenge for req and checks that it is refused with too_many_challenges.
+func tooMany(t *testing.T, what string, g *approval.Gate, req api.ApprovalRequest, retry string) {
+	t.Helper()
+	c, ref := g.Challenge(req)
+	if ref == nil || ref.Status != 429 || ref.Code != api.CodeTooManyChallenges || c.Needed || c.Challenge != "" {
+		t.Fatalf("%s: %+v, %v, want 429 %s", what, c, ref, api.CodeTooManyChallenges)
+	}
+	if !strings.Contains(ref.Msg, "Try again in "+retry+" s") {
+		t.Errorf("%s: the answer does not say when to ask again (%s s): %q", what, retry, ref.Msg)
+	}
+}
+
+// TestChallengeStoreNeverDropsAYoungChallenge (r1-a1-03, r1-a2-04). A machine keeps 16 open challenges; the 17th
+// used to drop the oldest without a word. Whoever holds the control token could so make every approval that
+// was in flight fail: the owner confirms with the passkey and gets "no_challenge". Now a challenge is never
+// dropped while it is younger than ChallengeProtect (90 s): the 17th request is refused instead, openly. Past
+// that age the oldest makes room, so the list cannot be kept shut with a few requests either.
+func TestChallengeStoreNeverDropsAYoungChallenge(t *testing.T) {
+	r := newRig(t, true)
+	owner := power("shutdown", 60)
+	e := r.entry(owner) // the owner is at Pocket ID with this one
+
+	// the auditors' run: sixteen more requests for challenges
+	for i := 1; i < approval.MaxChallenges; i++ {
+		r.entry(fanSet(0, 30+i))
+	}
+	tooMany(t, "the 17th at once", r.g, update, "90")
+	r.wait(89 * time.Second)
+	tooMany(t, "the 17th after 89 s", r.g, update, "1")
+	if !strings.Contains(r.log.String(), "no challenge given, too many are open") {
+		t.Errorf("the refusal is not in the log:\n%s", r.log.String())
+	}
+	// the owner's approval, confirmed in the meantime, is good
+	if _, ref := r.g.Admit(owner, r.iss.Approve(r.Now(), e)); ref != nil {
+		t.Fatalf("the approval that was in flight while 16 more challenges were asked for: %v", ref)
+	}
+	// its place is free again: a used challenge is not an open one
+	r.entry(update)
+	tooMany(t, "full again", r.g, fanMode("full"), "1")
+
+	// past the protected time the oldest makes room, and the log says which one went
+	r.wait(time.Second)
+	victim := r.entry(fanMode("full")) // drops fan_set zone=0 percent=31, 90 s old
+	_ = victim
+	if !strings.Contains(r.log.String(), "the oldest open challenge was dropped for a new one") || !strings.Contains(r.log.String(), `request="fan_set zone=0 percent=31"`) {
+		t.Errorf("the log does not say which challenge was dropped:\n%s", r.log.String())
+	}
+
+	// expired challenges take no place: after the life of an ordinary challenge only the update's is left
+	// (it lives 900 s). It is protected for 90 s like every other, not for its whole life: sixteen requests
+	// must not shut the list for 15 minutes. So when the list is full again, it is the one that makes room.
+	r.wait(approval.ChallengeTTL)
+	for i := 1; i < approval.MaxChallenges; i++ {
+		r.entry(fanSet(1, 30+i))
+	}
+	r.entry(power("reboot", 60))
+	if !strings.Contains(r.log.String(), `dropped for a new one" request=apply_update`) {
+		t.Errorf("the update's challenge, 181 s old, did not make room:\n%s", r.log.String())
+	}
+	tooMany(t, "sixteen fresh ones", r.g, power("sleep", 60), "90")
+
+	// what a panel does: sixteen entries for one machine in one confirmation, asked for at once, all used
+	p := newRig(t, true)
+	var entries []api.ApprovalEntry
+	var reqs []api.ApprovalRequest
+	for i := 0; i < approval.MaxChallenges; i++ {
+		q := fanSet(i%2, 30+i)
+		reqs = append(reqs, q)
+		entries = append(entries, p.entry(q))
+	}
+	ap := p.iss.Approve(p.Now(), entries...)
+	for i, q := range reqs {
+		if _, ref := p.g.Admit(q, ap); ref != nil {
+			t.Fatalf("entry %d of a batch of 16 for one machine: %v", i, ref)
+		}
+	}
+	p.entry(update) // and the list is empty again
+}

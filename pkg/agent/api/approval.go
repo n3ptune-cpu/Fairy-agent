@@ -57,6 +57,10 @@ const (
 	CodeTrustProofRequired  = "proof_required"       // 403: a first-time set of the trust without the approval that proves it; nothing was written
 	CodeTrustProofRefused   = "proof_refused"        // 403: the approval sent with a first-time set does not verify against the proposed trust; nothing was written
 	CodeHelperTooOld        = "helper_too_old"       // 409: the Windows helper is older than this protocol
+	// CodeTooManyChallenges: 429 from POST /approval/challenge. The machine holds its sixteen open challenges
+	// and none of them is old enough (90 s) to be dropped for a new one. The text says in how many seconds to
+	// ask again. A panel that asks for one challenge per machine and action and uses it never sees this.
+	CodeTooManyChallenges = "too_many_challenges"
 )
 
 // Approval states (ApprovalStatus.State).

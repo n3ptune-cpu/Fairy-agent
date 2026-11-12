@@ -255,8 +255,10 @@ func TestChallengeExpiresAndStoreIsBounded(t *testing.T) {
 	r.wait(approval.UpdateChallengeTTL - time.Second)
 	accepted(t, "update just in time", r.g.Check(update, r.iss.Approve(r.Now(), e)))
 
-	// 16 open challenges at most: the 17th drops the oldest
+	// 16 open challenges at most. Once the oldest is past its protected time, a 17th takes its place
+	// (TestChallengeStoreNeverDropsAYoungChallenge is about the time before that)
 	first := r.entry(fanSet(0, 40))
+	r.wait(approval.ChallengeProtect)
 	var last api.ApprovalEntry
 	for i := 0; i < approval.MaxChallenges; i++ {
 		last = r.entry(fanSet(1, 40+i))

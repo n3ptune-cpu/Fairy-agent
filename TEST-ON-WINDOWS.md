@@ -664,6 +664,15 @@ must still hold (nothing may have changed for requests without approval):
 `POST /power` with `{"action":"cancel"}` -> **`[200]`** (before this fix: `[429] too many control requests`).
 Step 13's shutdown -> `[403] approval_required`, not `429`: the control budget is untouched.
 
+**G5. Sixteen open challenges, and the 17th.** Needs `control_rate_per_min: 60` for this step only
+(`fairy-agent config set control_rate_per_min 60`, `Restart-Service fairy-agent`; put 12 back afterwards) and
+the trust set. 17 times in a row: `POST /approval/challenge` with
+`{"verb":"power","action":"shutdown","delay_s":60}`
+-> 16 answers `[200]` with `"needed":true`, the 17th **`[429]` with `too_many_challenges`** and `Try again in
+... s` (before this fix: `[200]`, and the first challenge was gone without a word). `helper.log` has
+`approval: no challenge given, too many are open`. After 90 seconds the same request -> `[200]`, and
+`helper.log` has `the oldest open challenge was dropped for a new one`.
+
 ### What to send back
 
 The output of steps 5, 8, 9, 13, 15, 20, 26, 26b, 27, 28, N1, N2 (and 31, 32b if done), of G1.2, G1.4, G1.5,

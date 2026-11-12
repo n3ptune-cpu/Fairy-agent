@@ -333,3 +333,43 @@ func TestChallengesAndCancelHaveBudgetsOfTheirOwn(t *testing.T) {
 	st, b = cancel()
 	tooMany("the 13th cancel", st, b, "too many cancel requests")
 }
+
+// challengeFlood is the auditors' run (r1-a1-03 ChallengeFlood, r1-a2-04 S9) over HTTP: one challenge that the
+// owner is confirming, then sixteen more requests for challenges, then the owner's approval.
+func challengeFlood(t *testing.T, post func(*testing.T, string, any) (int, map[string]any), approve func(*testing.T, map[string]any) *api.Approval) {
+	t.Helper()
+	owner := approve(t, map[string]any{"verb": "power", "action": "reboot", "delay_s": 60})
+	for i := 0; i < approval.MaxChallenges; i++ {
+		st, c := post(t, api.PathApprovalChallenge, map[string]any{"verb": "apply_update"})
+		switch {
+		case i < approval.MaxChallenges-1 && (st != 200 || c["needed"] != true):
+			t.Fatalf("challenge %d of the flood: %d %v", i+1, st, c)
+		case i == approval.MaxChallenges-1:
+			// the one that would have dropped the owner's challenge: refused, and it says so
+			wantRefusal(t, "the 17th open challenge", st, c, 429, api.CodeTooManyChallenges)
+			if msg, _ := c["error"].(string); !strings.Contains(msg, "Try again in") {
+				t.Errorf("the refusal does not say when to ask again: %q", msg)
+			}
+		}
+	}
+	if st, b := post(t, "/power", map[string]any{"action": "reboot", "delay_s": 60, "approval": owner}); st != 200 {
+		t.Fatalf("the owner's approval after sixteen more requests for challenges: %d %v (before the fix: 403 no_challenge)", st, b)
+	}
+	// the place of the used challenge is free at once
+	if st, c := post(t, api.PathApprovalChallenge, map[string]any{"verb": "fan_mode", "mode": "full"}); st != 200 || c["needed"] != true {
+		t.Fatalf("a challenge after one was used: %d %v", st, c)
+	}
+}
+
+// TestChallengeFloodDoesNotKillAnApprovalInFlight: on the Linux agent (its own list of challenges).
+func TestChallengeFloodDoesNotKillAnApprovalInFlight(t *testing.T) {
+	r := newLinuxRig(t, true).trusted(t)
+	challengeFlood(t, r.post, r.approve)
+}
+
+// TestChallengeFloodDoesNotKillAnApprovalInFlightThroughTheHelper: on Windows the list is the helper's; its
+// refusal reaches the panel with its status and code.
+func TestChallengeFloodDoesNotKillAnApprovalInFlightThroughTheHelper(t *testing.T) {
+	r := newApprovalRig(t).trusted(t)
+	challengeFlood(t, r.post, r.approve)
+}

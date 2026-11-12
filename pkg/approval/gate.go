@@ -8,6 +8,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -21,8 +22,12 @@ const (
 	// download happens between the approval and the request the helper sees.
 	ChallengeTTL       = 180 * time.Second
 	UpdateChallengeTTL = 900 * time.Second
-	// MaxChallenges open at a time; one more drops the oldest.
+	// MaxChallenges open at a time. One more is given only when the oldest open one is at least
+	// ChallengeProtect old (that one is then dropped); otherwise it is refused (too_many_challenges).
 	MaxChallenges = 16
+	// ChallengeProtect is how long a challenge is safe from being dropped for a newer one: half the life of an
+	// ordinary challenge. Somebody may be confirming it at Pocket ID at that moment. See Gate.Challenge.
+	ChallengeProtect = ChallengeTTL / 2
 	// reloadEvery: the trust file is looked at again at most this often, so a change made on the machine
 	// (helper-trust set / clear) is in effect within this time.
 	reloadEvery = 5 * time.Second
@@ -341,12 +346,33 @@ func (g *Gate) Challenge(req api.ApprovalRequest) (api.ChallengeResponse, *Refus
 	if req.Verb == api.ApproveApplyUpdate {
 		c.ttl = UpdateChallengeTTL
 	}
-	if _, err := io.ReadFull(g.o.Rand, c.id[:]); err != nil {
-		return out, &Refusal{Status: 500, Code: "failed", Msg: "no random numbers for a challenge"}
-	}
+	// The list is full (expired and used challenges are gone from it already). Whoever holds the control
+	// token can ask for challenges, so a rule that always drops the oldest lets him make every approval that
+	// is in flight worthless with sixteen requests, without anybody being told; and a rule that never drops
+	// one lets him shut everybody out for as long as the longest challenge lives (an update's: 15 minutes)
+	// with sixteen requests. So: a challenge is never dropped while it is younger than ChallengeProtect (90 s,
+	// time enough for the passkey step), and the request that would need its place is refused, openly. Once
+	// the oldest is older than that it makes room, as before. Keeping the list full therefore takes sixteen
+	// requests every 90 s, about what using up the request budget itself takes (twelve a minute by default),
+	// which whoever holds the control token can do anyway. A panel asks for one challenge per machine and
+	// action (at most sixteen for one machine in one confirmation) and uses them within seconds: it never
+	// sees this.
 	g.expire(now)
 	if len(g.open) >= MaxChallenges {
-		g.open = append(g.open[:0], g.open[len(g.open)-MaxChallenges+1:]...)
+		oldest := g.open[0] // the list is in the order of issue
+		if age := elapsed(oldest.issued, now); age < ChallengeProtect {
+			wait := max(1, int((ChallengeProtect-age+time.Second-1)/time.Second))
+			g.o.Log.Warn("approval: no challenge given, too many are open", "result", "refused", "request", canon, "open", len(g.open), "retry_s", wait)
+			return out, &Refusal{Status: 429, Code: api.CodeTooManyChallenges, Msg: "this machine holds " + strconv.Itoa(len(g.open)) +
+				" open challenges, and none of them is dropped for a new one before it is " + strconv.Itoa(int(ChallengeProtect/time.Second)) +
+				" s old (somebody may be confirming it right now). Try again in " + strconv.Itoa(wait) + " s"}
+		}
+		g.o.Log.Warn("approval: the oldest open challenge was dropped for a new one", "request", oldest.request, "challenge", prefix(oldest.id),
+			"age_s", int(elapsed(oldest.issued, now)/time.Second))
+		g.open = append(g.open[:0], g.open[1:]...)
+	}
+	if _, err := io.ReadFull(g.o.Rand, c.id[:]); err != nil {
+		return out, &Refusal{Status: 500, Code: "failed", Msg: "no random numbers for a challenge"}
 	}
 	g.open = append(g.open, c)
 	g.o.Log.Info("approval: challenge issued", "request", canon, "challenge", prefix(c.id))
