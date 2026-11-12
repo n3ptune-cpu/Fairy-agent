@@ -5,6 +5,7 @@ package agent_test
 // of the real helper code (newApprovalRig).
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"os"
@@ -15,6 +16,8 @@ import (
 	"time"
 
 	"github.com/n3ptune-cpu/Fairy-agent/pkg/agent/api"
+	"github.com/n3ptune-cpu/Fairy-agent/pkg/agent/ipmi"
+	"github.com/n3ptune-cpu/Fairy-agent/pkg/agent/ipmi/fakebmc"
 	"github.com/n3ptune-cpu/Fairy-agent/pkg/approval"
 )
 
@@ -478,4 +481,54 @@ func TestTooManyChallengesSaysWhenToAskAgain(t *testing.T) {
 			t.Errorf("%s: a refused challenge request of another kind: %d %v, Retry-After %q", name, resp.StatusCode, out, resp.Header.Get("Retry-After"))
 		}
 	}
+}
+
+// bmcRefusesAfterTheApproval is the case no test of the agent or the helper covered (review of the audit 5
+// fixes): the request passes every check of its own, the approval is accepted, and then the BMC says no. The
+// fan controller must report "applied" only after the BMC's answer: an approved change the BMC refused opens
+// no fan window (and the approval is spent: its challenge was used). A controller that reported "applied"
+// before it asked the BMC would open the window here, and this test would fail at the first fanWindowClosed.
+func bmcRefusesAfterTheApproval(t *testing.T, bmc *fakebmc.BMC, post func(*testing.T, string, any) (int, map[string]any), approve func(*testing.T, map[string]any) *api.Approval) {
+	t.Helper()
+	// a fan mode the board does not have (the BMC's answer: completion code 0xCC)
+	bmc.RefuseMode(0x04, 0xcc)
+	ap := approve(t, map[string]any{"verb": "fan_mode", "mode": "heavyio"})
+	if st, b := post(t, "/fan/mode", map[string]any{"mode": "heavyio", "approval": ap}); st != 422 || b["code"] != "fan_mode_unsupported" {
+		t.Fatalf("an approved fan mode the BMC refuses: %d %v, want 422", st, b)
+	}
+	fanWindowClosed(t, "after an approved fan mode the BMC refused (422)", post)
+	st, b := post(t, "/fan/mode", map[string]any{"mode": "heavyio", "approval": ap})
+	wantRefusal(t, "the same approval again", st, b, 403, api.CodeApprovalRefused)
+
+	// a duty the BMC refuses although the mode is "full" (set here on the BMC itself, so that no approved
+	// change has opened a window)
+	if err := ipmi.SetFanMode(context.Background(), bmc, "full"); err != nil {
+		t.Fatal(err)
+	}
+	bmc.RefuseDuty(0xd5)
+	ap = approve(t, map[string]any{"verb": "fan_set", "zone": 0, "percent": 100})
+	if st, b := post(t, "/fan/duty", map[string]any{"zone": 0, "percent": 100, "approval": ap}); st != 502 {
+		t.Fatalf("an approved fan duty the BMC refuses: %d %v, want 502", st, b)
+	}
+	fanWindowClosed(t, "after an approved fan duty the BMC refused (502)", post)
+	st, b = post(t, "/fan/duty", map[string]any{"zone": 0, "percent": 100, "approval": ap})
+	wantRefusal(t, "the same approval again", st, b, 403, api.CodeApprovalRefused)
+
+	// the BMC takes it again: an approved duty that is applied opens the window, as always
+	bmc.RefuseDuty(0)
+	ap = approve(t, map[string]any{"verb": "fan_set", "zone": 0, "percent": 100})
+	if st, b := post(t, "/fan/duty", map[string]any{"zone": 0, "percent": 100, "approval": ap}); st != 200 {
+		t.Fatalf("an approved fan duty: %d %v", st, b)
+	}
+	if st, c := post(t, api.PathApprovalChallenge, map[string]any{"verb": "fan_mode", "mode": "standard"}); st != 200 || c["needed"] != false || c["reason"] != "fan_window" {
+		t.Errorf("a challenge after an applied change: %d %v", st, c)
+	}
+}
+
+// TestFanWindowNotOpenedWhenTheBMCRefuses: on the Linux agent, and on Windows through the helper.
+func TestFanWindowNotOpenedWhenTheBMCRefuses(t *testing.T) {
+	l := newLinuxRig(t, true).trusted(t)
+	bmcRefusesAfterTheApproval(t, l.bmc, l.post, l.approve)
+	w := newApprovalRig(t).trusted(t)
+	bmcRefusesAfterTheApproval(t, w.bmc, w.post, w.approve)
 }
