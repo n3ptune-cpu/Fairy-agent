@@ -158,6 +158,51 @@ func TestHelperTrustSetShowClear(t *testing.T) {
 	if r.trust().FanWindow() != 0 {
 		t.Fatal("a refused set changed the file")
 	}
+	// A number outside its range is refused with a text that names the flag, the range and what was typed,
+	// and nothing is written: also a negative one, which used to be taken for "not given" (the command said
+	// "written" and the setting stayed; audit 5, r3-a1-06), and also with show and clear, which take no number.
+	before, _ := os.ReadFile(r.files.Path)
+	for _, c := range []struct {
+		args []string
+		want string
+	}{
+		{[]string{"set", "--yes", "--fan-window", "-5"}, "--fan-window must be 0 to 60 seconds (0 = no fan window), not -5; nothing was changed"},
+		{[]string{"set", "--yes", "--fan-window", "-1"}, "--fan-window must be 0 to 60 seconds (0 = no fan window), not -1; nothing was changed"},
+		{[]string{"set", "--yes", "--fan-window=61"}, "--fan-window must be 0 to 60 seconds (0 = no fan window), not 61; nothing was changed"},
+		{[]string{"set", "--yes", "--boot-shutdown", "-5"}, "--boot-shutdown must be 0 to 900 seconds (0 = off), not -5; nothing was changed"},
+		{[]string{"set", "--yes", "--boot-shutdown", "-1"}, "--boot-shutdown must be 0 to 900 seconds (0 = off), not -1; nothing was changed"},
+		{[]string{"set", "--yes", "--boot-shutdown", "901"}, "--boot-shutdown must be 0 to 900 seconds (0 = off), not 901; nothing was changed"},
+		{[]string{"set", "--yes", "--fan-window", "20", "--boot-shutdown", "-300"}, "--boot-shutdown must be 0 to 900 seconds (0 = off), not -300; nothing was changed"},
+		{[]string{"show", "--fan-window", "-5"}, "--fan-window must be 0 to 60 seconds (0 = no fan window), not -5; nothing was changed"},
+		{[]string{"clear", "--yes", "--boot-shutdown", "-5"}, "--boot-shutdown must be 0 to 900 seconds (0 = off), not -5; nothing was changed"},
+	} {
+		code, out, errs := r.run("", c.args...)
+		if code != 1 || strings.TrimSpace(errs) != "fairy-agent helper-trust "+c.args[0]+": "+c.want || strings.Contains(out, "written") {
+			t.Errorf("%v: code %d\n%s\n%s", c.args, code, out, errs)
+		}
+	}
+	if now, _ := os.ReadFile(r.files.Path); !bytes.Equal(now, before) {
+		t.Fatal("a refused number changed the file")
+	}
+	// what is not a number at all is refused by the flag parser, as before (exit 2)
+	if code, _, errs := r.run("", "set", "--yes", "--fan-window", "ten"); code != 2 || !strings.Contains(errs, "invalid value") {
+		t.Errorf("--fan-window ten: code %d\n%s", code, errs)
+	}
+	// the ends of each range are taken, and 0 is a value, not "not given"
+	for _, c := range []struct {
+		args      []string
+		fan, boot int
+	}{
+		{[]string{"--fan-window", "60"}, 60, 600}, {[]string{"--boot-shutdown", "900"}, 60, 900}, {[]string{"--boot-shutdown", "0"}, 60, 0},
+		{[]string{"--fan-window", "0"}, 0, 0}, {[]string{"--boot-shutdown", "600"}, 0, 600},
+	} {
+		if code, out, errs := r.run("", append([]string{"set", "--yes"}, c.args...)...); code != 0 || !strings.Contains(out, "written") {
+			t.Fatalf("set %v: %d\n%s\n%s", c.args, code, out, errs)
+		}
+		if tr := r.trust(); tr.FanWindow() != c.fan || tr.BootShutdownS != c.boot {
+			t.Fatalf("set %v: fan window %d, shutdown after boot %d, want %d and %d", c.args, tr.FanWindow(), tr.BootShutdownS, c.fan, c.boot)
+		}
+	}
 
 	// a key rotation with overlap: the new key from a file, the old one kept
 	next := approval.KeyFromRSA("key-2", &approvaltest.Key(1).PublicKey)

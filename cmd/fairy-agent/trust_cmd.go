@@ -127,6 +127,25 @@ func helperTrustCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) in
 		fmt.Fprintln(stderr, "fairy-agent helper-trust "+sub+":", err)
 		return 1
 	}
+	// A number that was typed is used or refused, never dropped. -1 is how the two settings say "not given",
+	// and every negative number was taken for it: `set --fan-window -5` answered "written" and left the
+	// window as it was (audit 5, r3-a1-06). What was given is asked of the flag set now, and a value outside
+	// the setting's range is refused here, before anything is read or written.
+	given := map[string]bool{}
+	fs.Visit(func(f *flag.Flag) { given[f.Name] = true })
+	for _, n := range []struct {
+		flag  string
+		value int
+		limit int
+		what  string
+	}{
+		{"fan-window", *fanWindow, approval.MaxFanWindowS, "seconds (0 = no fan window)"},
+		{"boot-shutdown", *bootShutdown, approval.MaxBootShutdownS, "seconds (0 = off)"},
+	} {
+		if given[n.flag] && (n.value < 0 || n.value > n.limit) {
+			return fail(fmt.Errorf("--%s must be 0 to %d %s, not %d; nothing was changed", n.flag, n.limit, n.what, n.value))
+		}
+	}
 	// Windows: config.yaml says where the data folder is; one that someone else could have written is not
 	// followed (the same check as the other commands an administrator types)
 	if err := adminDataDirTrusted(*cfgPath); err != nil {
@@ -226,10 +245,10 @@ func helperTrustCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) in
 	if len(users) > 0 {
 		t.Users = []string(users)
 	}
-	if *fanWindow >= 0 {
+	if given["fan-window"] {
 		t.FanWindowS = fanWindow
 	}
-	if *bootShutdown >= 0 {
+	if given["boot-shutdown"] {
 		t.BootShutdownS = *bootShutdown
 	}
 	var missing []string
