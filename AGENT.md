@@ -1076,6 +1076,14 @@ fairy-agent helper-trust set --issuer https://id.example.org --client-id <client
   before passkey approvals that is still running reads no trust file at all (`NOT IN EFFECT IN THE HELPER
   YET`; see "Mixed versions" below).
 
+  **"Within 5 seconds" means: until then the old state still counts**, in both directions. For up to 5
+  seconds after the very first `set`, a request without approval still runs. For up to 5 seconds after you
+  took a user or a key out of the file, an approval by that user, or signed with that key, is still accepted.
+  And for up to 5 seconds after `clear`, requests are still refused. If you are removing somebody because he
+  must not approve any more, wait those 5 seconds before you rely on it (or restart the service that checks:
+  it reads the file when it starts). When the file's content changes, every open challenge and an open fan
+  window are dropped at that moment.
+
   **`set` on the machine proves nothing.** Unlike the panel's first-time set it needs no approval (you are at
   the machine), so it writes what it is given, and says so (`NOT PROVEN`). If the issuer, the client id or a
   user id is wrong, or the clock is off, the first approval is refused. So approve one action from the panel
@@ -1138,7 +1146,9 @@ only root / Administrators (Linux: or the agent's own user) can remove it.
 
 1. The panel asks the machine for a **challenge** for one exact request (`POST /approval/challenge`, e.g.
    shutdown in 60 s). The machine answers with 32 random bytes and remembers them with that request: single
-   use, 180 s (an update: 900 s), at most 16 open at a time. When 16 are open and one more is asked for: if
+   use, 180 s (an update: 900 s, on every system: on Windows the download lies between the approval and
+   the helper's check, and everywhere a panel that updates several machines with one confirmation needs the
+   time), at most 16 open at a time. When 16 are open and one more is asked for: if
    the oldest is at least 90 s old it is dropped for the new one (the log names it); if not, the new request
    is refused (`429 too_many_challenges`, the text says in how many seconds to ask again). So a challenge
    that somebody is confirming at Pocket ID cannot be pushed out for its first 90 s by a burst of requests
@@ -1255,6 +1265,20 @@ looks at the trust file itself, at the moment a request arrives:
 The same refusal holds while no helper has answered at all since the agent started and a trust file exists:
 the agent does not hand a request that needs an approval to a helper it has not seen yet.
 
+**Going back to an older agent switches the check OFF.** A release from before passkey approvals does not know
+the trust file: put back on a machine that has one (`fairy-agent update --force` to an older release, an old
+installer run by hand, a restored backup of the program), it starts as always, leaves
+`approval-trust.json` where it is, sends no `approval` block, answers the two approval routes `404 not
+found`, and carries out fan, power and update requests with the control token alone, as it did before. Nothing
+on the machine warns about it. Upgrade again and the check is back exactly as it was, with the same trust.
+On Windows this is so when both services run the old program (the installer replaces and restarts both); an
+old agent in front of a **new** helper is still refused by that helper. Who can do this: only root / an
+Administrator on the machine. The panel's Update button never installs an older release, and a failed update
+goes back to the program that was running before it, which is this one or a newer one once the trust was
+set with it. What to do: do not go back on a machine with a trust file unless you mean to switch the check
+off; and a panel should treat a machine whose `approval` block was there and is gone as an alarm, not as
+"an agent without the feature".
+
 ## Updates (the panel's Update button)
 
 Nothing ever updates by itself. When an admin presses **Update** on the panel's Updates page (after confirming
@@ -1354,7 +1378,9 @@ self_update:
   [Moving to the new account by itself](#moving-to-the-new-account-by-itself-051-localsystem-only);
   re-running `install.ps1` from the panel's Re-pair does all of it too.)
   Updates never go to an older release through the panel, not even with force: by hand only, with
-  `fairy-agent update --force` as root / Administrator (see "The rules of an update" above).
+  `fairy-agent update --force` as root / Administrator (see "The rules of an update" above). Going back by
+  hand to a release from before passkey approvals switches the approval check off on that machine, trust
+  file or not (see "Mixed versions" in the passkey section).
 
 The very first program with self-update has to be installed by hand once per machine;
 [SETUP-UPDATES.md](SETUP-UPDATES.md) has the exact commands. `self_update.repo` can point at a fork (its

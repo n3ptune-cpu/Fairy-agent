@@ -329,8 +329,8 @@ func TestHelperTrustSetSaysWhatIsInEffect(t *testing.T) {
 		err         error
 		want, never []string
 	}{
-		{"not Windows", trustNoHelperHere, nil, nil, []string{"In effect within 5 seconds, if the fairy-agent service runs this version", "An older fairy-agent"}, []string{"NOT IN EFFECT"}},
-		{"the new helper runs", trustHelperAsked, newHelper, nil, []string{"In effect within 5 seconds: the running helper (pipe protocol 2)"}, []string{"NOT"}},
+		{"not Windows", trustNoHelperHere, nil, nil, []string{"In effect within 5 seconds, if the fairy-agent service runs this version", "An older fairy-agent", "Until then what was in effect before still counts"}, []string{"NOT IN EFFECT"}},
+		{"the new helper runs", trustHelperAsked, newHelper, nil, []string{"In effect within 5 seconds: the running helper (pipe protocol 2)", "a user or key you just removed can still approve"}, []string{"NOT"}},
 		{"the old helper still runs", trustHelperAsked, oldHelper, nil,
 			[]string{"NOT IN EFFECT IN THE HELPER YET", "from before passkey approvals", "503 approval_unavailable", "Restart-Service fairy-agent-helper"}, []string{"In effect within"}},
 		{"a helper that says proto 2 but reports no approval state", trustHelperAsked, status(map[string]any{"proto": 2}), nil, []string{"NOT IN EFFECT IN THE HELPER YET"}, []string{"In effect within"}},

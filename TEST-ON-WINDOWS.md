@@ -461,7 +461,8 @@ text works for the steps below if that client does not exist yet), your user id 
    `& "C:\Program Files\Fairy\fairy-agent.exe" helper-trust set --issuer https://id.example.org --client-id EXAMPLE-CLIENT-ID --user EXAMPLE-USER-ID`
    -> `to be written:`, the issuer, `pinned key:      kid ..., RS256, thumbprint ...`, `allowed users:   1`,
    `signing keys:    fetched just now from https://...`, then a line that starts with `written.`,
-   **[NEW 3]** a line `In effect within 5 seconds: the running helper (pipe protocol 2) ...`,
+   **[NEW 3]** a line `In effect within 5 seconds: the running helper (pipe protocol 2) ...` and one that
+   starts with `Until then what was in effect before still counts`,
    **[NEW]** and under it `NOT PROVEN: ...` (the command writes what it is given; only the panel's first-time
    set is checked against a real approval). **[NEW]** If a line `note: THE CLOCK: ...` shows: the VM's clock
    and Pocket ID's differ by more than 45 s; set the VM's clock (`w32tm /resync`) before going on.
@@ -622,6 +623,9 @@ services), so do it before section A, or after "Going back to build 16".
   -> **no** line `pipe protocol:   2`; instead `approval:        this helper is from before passkey approvals`.
 * G1.3 No trust file yet: a shutdown far away is accepted as before (step 13's request, `delay_s` 86400)
   -> `[200]`; cancel it (step 14). `/metrics` (step 16) has **no** `approval` block.
+  (If this answers `[503] approval_unavailable` with `this agent cannot tell whether this machine has an
+  approval trust file`: the agent's account could not check the helper's folder. That is the open question of
+  step N2; please send the answer. It fails closed: nothing runs, and G1.8's restart of the helper ends it.)
 * G1.4 **[KEY]** Set the trust (step 7's command, with `--yes`).
   -> `written.`, then **`NOT IN EFFECT IN THE HELPER YET: the fairy-agent-helper that is running is from before
   passkey approvals`** and `Restart it now: Restart-Service fairy-agent-helper`. It must NOT say `In effect
@@ -703,6 +707,11 @@ the test panel and run the line it shows. It puts released build 16 back: the in
 whose build number is not higher, and `16-selfbuilt` (build number 16) is not higher than 16. A program built
 without a version (`dev`) is replaced as well. `helper\approval-trust.json` and
 `helper\approval-boot-shutdown.json` are the only new files; build 16 ignores them.
+
+**[NEW 3]** That is the point of the `clear` above, and it holds without it too: build 16 ignores a trust
+file, so on a PC that went back with the file still in place the check is simply OFF (no `approval` block in
+`/metrics`, step 13's shutdown is accepted) until the new program is installed again, which then enforces
+the same trust as before.
 
 ## Rollback (back to build 10 / v0.4.4)
 

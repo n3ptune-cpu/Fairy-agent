@@ -301,15 +301,17 @@ const (
 // approvals that is still running (an update that did not restart it) reads no trust file at all.
 func trustEffect(state string, statusData []byte, err error) []string {
 	const reads = "reads the trust file again every 5 seconds"
+	// what "within 5 seconds" leaves open, said with it (audit 5, r1-a1-05)
+	const until = "  Until then what was in effect before still counts: no check if there was no trust, and a user or key you just removed can still approve."
 	switch {
 	case state == trustNoHelperHere:
-		return []string{"In effect within 5 seconds, if the fairy-agent service runs this version: it " + reads + ".",
-			"  An older fairy-agent (from before passkey approvals) ignores the file: `fairy-agent --version`, then restart the service."}
+		return []string{"In effect within 5 seconds, if the fairy-agent service runs this version: it " + reads + ".", until,
+			"  An older fairy-agent (from before passkey approvals) ignores the file: `fairy-agent version`; if it is older, install this version."}
 	case err != nil:
 		return []string{"NOT KNOWN whether it is in effect: the helper could not be asked (" + clipText(err.Error(), 200) + ").",
 			"  Check: `fairy-agent helper-status` must show `pipe protocol:   2` and `approval:        required`."}
 	case state == api.HelperNotInstalled:
-		return []string{"In effect within 5 seconds for what the agent carries out itself: no fairy-agent-helper is installed, the agent " + reads + "."}
+		return []string{"In effect within 5 seconds for what the agent carries out itself: no fairy-agent-helper is installed, the agent " + reads + ".", until}
 	case state != trustHelperAsked:
 		return []string{"The fairy-agent-helper service is not running (" + state + "): it reads the trust file when it starts.",
 			"  Until then nothing that goes through the helper runs at all, and the agent refuses updates."}
@@ -325,7 +327,7 @@ func trustEffect(state string, statusData []byte, err error) []string {
 			"  (503 approval_unavailable), and the panel's challenge is answered 409 helper_too_old.",
 			"  Restart it now: Restart-Service fairy-agent-helper   (then: fairy-agent helper-status)"}
 	}
-	return []string{"In effect within 5 seconds: the running helper (pipe protocol " + strconv.Itoa(sd.Proto) + ") " + reads + ", and so does the agent."}
+	return []string{"In effect within 5 seconds: the running helper (pipe protocol " + strconv.Itoa(sd.Proto) + ") " + reads + ", and so does the agent.", until}
 }
 
 // clockNote says so when this machine's clock (now) and the issuer's (the Date of its answer) are far enough
