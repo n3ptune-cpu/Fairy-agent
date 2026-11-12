@@ -1010,7 +1010,17 @@ What this rests on, and what no machine can do for you: **the panel must know wh
 machine.** It takes each machine's id on record when it sets the trust (or when it first sees one), builds
 every approval with the id on record, and treats two machines that show the same id, or a machine whose id
 is suddenly another one, as an alarm. A machine sees no other machine, so it **cannot notice** that another
-one has its id. That happens in one ordinary way: **a machine made from a copy of another machine's disk**
+one has its id.
+
+**One id, one machine: the panel has to check that, always.** At every look at its machines, not only when
+it first takes an id on record, and also when it made every id up itself. The reason: a machine that answers
+in another's name can hand the panel, when you turn approvals on for it, the challenge of a machine that has
+no trust yet, and pass your proven set on to that one. The other machine then holds the id your panel
+recorded for the first, and accepts what you later approve "for the first". The only place this shows is two
+machines with one id. Until an administrator has found out which is which, neither of the two is protected
+by its approvals: treat both as machines without the check.
+
+It also happens in an ordinary way: **a machine made from a copy of another machine's disk**
 (a cloned VM, a restored image) has the same trust file and so the same id, and the two then accept each
 other's approvals. On the copy, as root / Administrator: `fairy-agent helper-trust set --new-machine-id`
 (everything else in the file stays), or `helper-trust clear` and set the trust anew. `helper-trust show`
