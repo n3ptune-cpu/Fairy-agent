@@ -16,13 +16,17 @@ import (
 	"bufio"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math/rand/v2"
 	"net"
 	"net/http"
 	"net/netip"
+	"os"
+	"runtime"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -53,15 +57,42 @@ func rootLimits(t *testing.T, o ConnLimits) ConnLimits {
 	return o
 }
 
-// dialAsRoot connects from src and one of the test's root ports (a free one, picked at random).
+// dialAsRoot connects from src and one of the test's root ports (a free one, picked at random). It tries up
+// to 20 times, whatever the error: for a connection the listener is expected to take.
 func dialAsRoot(src, addr string) (c net.Conn, err error) {
 	for i := 0; i < 20; i++ {
-		d := net.Dialer{LocalAddr: &net.TCPAddr{IP: net.ParseIP(src), Port: testRootLo + rand.IntN(testRootHi-testRootLo)}, Timeout: 5 * time.Second}
-		if c, err = d.Dial("tcp", addr); err == nil {
+		if c, err = dialAsRootOnce(src, addr); err == nil {
 			return c, nil
 		}
 	}
 	return nil, err
+}
+
+// dialAsRootOnce opens ONE connection from src and one of the test's root ports. Another port is tried only
+// while the port picked cannot be had on this machine (the bind fails: another connection has it, or one from
+// it was closed less than a minute ago); nothing has reached the listener then. Every other error is the
+// listener's answer and is returned as it is.
+func dialAsRootOnce(src, addr string) (c net.Conn, err error) {
+	for i := 0; i < 2000; i++ {
+		d := net.Dialer{LocalAddr: &net.TCPAddr{IP: net.ParseIP(src), Port: testRootLo + rand.IntN(testRootHi-testRootLo)}, Timeout: 5 * time.Second}
+		c, err = d.Dial("tcp", addr)
+		var se *os.SyscallError
+		if err == nil || !errors.As(err, &se) || se.Syscall != "bind" {
+			return c, err
+		}
+	}
+	return nil, err
+}
+
+// resetAtDial reports whether a dial failed because the other side reset the connection. The listener closes
+// a connection over a cap with a reset, at once, and on loopback that reset can be there before the dial has
+// returned: Go asks the socket for its error once more before it reports a connection, and then reports the
+// reset as the dial's own error ("connect: connection reset by peer"). The connection was made and refused
+// all the same (the listener counts it); measured here, 20 to 30 of 100 such dials end this way with four
+// processors, none with one.
+func resetAtDial(err error) bool {
+	return errors.Is(err, syscall.ECONNRESET) ||
+		(runtime.GOOS == "windows" && errors.Is(err, syscall.Errno(10054))) // WSAECONNRESET
 }
 
 // healthFrom is the update's health check (GET /health with the ask of the read token), sent from one of the
@@ -202,15 +233,26 @@ func TestRootLaneHasItsOwnSlots(t *testing.T) {
 	if s := ln.Stats(); s.Trusted != MaxConnsPerSender || s.Root != RootConns || s.Refused != 0 {
 		t.Fatalf("%+v", s)
 	}
-	// a fifth from a root port finds the lane full of connections that are not idle: it is closed at once
-	c5, err := dialAsRoot(floodLocal, addr)
-	if err != nil {
+	// A fifth from a root port finds the lane full of connections that are not idle: it is closed at once.
+	// That close can arrive before the dial has returned (resetAtDial), and it is the refusal then as well.
+	// (This step used dialAsRoot, which took such a dial for a failed try and dialled again, up to 20 times:
+	// each of them was refused as it should be, and when all 20 were reset before they returned, the last
+	// one's "connection reset by peer" failed the test. On a busy machine that was up to 24 runs of 600.)
+	c5, err := dialAsRootOnce(floodLocal, addr)
+	switch {
+	case resetAtDial(err): // refused before the dial returned
+	case err != nil:
 		t.Fatal(err)
+	default:
+		defer c5.Close()
+		_ = c5.SetReadDeadline(time.Now().Add(5 * time.Second))
+		if _, err := c5.Read(make([]byte, 1)); err == nil || isTimeout(err) {
+			t.Fatal("a fifth connection in root's lane was not closed:", err)
+		}
 	}
-	defer c5.Close()
-	_ = c5.SetReadDeadline(time.Now().Add(5 * time.Second))
-	if _, err := c5.Read(make([]byte, 1)); err == nil || isTimeout(err) {
-		t.Fatal("a fifth connection in root's lane was not closed:", err)
+	// one connection was refused, exactly one, and the four that hold the lane are still counted
+	if s := waitStats(t, ln, func(s ConnStats) bool { return s.Refused >= 1 }); s.Refused != 1 || s.Root != RootConns || s.Trusted != MaxConnsPerSender {
+		t.Fatalf("after the fifth connection: %+v", s)
 	}
 	// closing them gives the slots back
 	for _, c := range held {
