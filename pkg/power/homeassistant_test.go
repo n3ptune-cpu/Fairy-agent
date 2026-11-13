@@ -453,9 +453,32 @@ func TestHomeAssistantConfig(t *testing.T) {
 		"max_age_s NaN":         {map[string]any{"max_age_s": math.NaN()}, "max_age_s must be"},
 		"max_age_s +Inf":        {map[string]any{"max_age_s": math.Inf(1)}, "max_age_s must be"},
 		// the members every type has
-		"interval 0.5":   {map[string]any{"interval": 0.5}, "interval must be 1-300"},
-		"interval NaN":   {map[string]any{"interval": math.NaN()}, "interval must be 1-300"},
-		"id in capitals": {map[string]any{"id": "Desk"}, "id must be"},
+		"interval 0.5": {map[string]any{"interval": 0.5}, "interval must be 1-300"},
+		"interval NaN": {map[string]any{"interval": math.NaN()}, "interval must be 1-300"},
+		// an id that is not valid is not repeated either (the entry is then named by its type)
+		"id in capitals":         {map[string]any{"id": "Desk"}, "of type homeassistant: id must be"},
+		"id missing":             {map[string]any{"id": nil}, "of type homeassistant: id must be"},
+		"a secret as the id":     {map[string]any{"id": secretInURL}, "of type homeassistant: id must be"},
+		"a list as the id":       {map[string]any{"id": []any{secretInURL}}, "of type homeassistant: id must be"},
+		"a number as the id":     {map[string]any{"id": 12}, "of type homeassistant: id must be"},
+		"a secret as the system": {map[string]any{"system": secretInURL}, "invalid system id"},
+		// a value of the wrong kind: the member is named, the value is not shown (the YAML decoder's own error
+		// repeats the beginning of such a text)
+		"max_age_s as text":        {map[string]any{"max_age_s": secretInURL}, "max_age_s: the value is of the wrong kind"},
+		"interval as text":         {map[string]any{"interval": secretInURL}, "interval: the value is of the wrong kind"},
+		"include_in_total as text": {map[string]any{"include_in_total": secretInURL}, "include_in_total: the value is of the wrong kind"},
+		"url as a list":            {map[string]any{"url": []any{"http://fairy:" + secretInURL + "@192.0.2.10:8123"}}, "url: the value is of the wrong kind"},
+		"token_env as a list":      {map[string]any{"token_env": []any{fakeHAToken()}}, "token_env: the value is of the wrong kind"},
+		"token_env as a mapping":   {map[string]any{"token_env": map[string]any{fakeHAToken(): secretInURL}}, "token_env: the value is of the wrong kind"},
+		"entity as a list":         {map[string]any{"entity": []any{"sensor.a", "switch.b"}}, "entity: the value is of the wrong kind"},
+		"name as a mapping":        {map[string]any{"name": map[string]any{"a": secretInURL}}, "name: the value is of the wrong kind"},
+		"entity as a number":       {map[string]any{"entity": 5}, "entity must be"},
+		"token_env as a number":    {map[string]any{"token_env": 12345}, "token_env must be"},
+		"two members are wrong":    {map[string]any{"max_age_s": secretInURL, "tokn": fakeHAToken()}, "max_age_s: the value is of the wrong kind (such as text where a number belongs, or a list); field tokn not found"},
+		// a member's name is only repeated when it looks like one
+		"the token as a member's name": {map[string]any{fakeHAToken(): 1}, "a member with a name that no member of a homeassistant entry has"},
+		"a long text as a name":        {map[string]any{strings.Repeat("a", 33): 1}, "a member with a name that no member of a homeassistant entry has"},
+		"a text with a space as name":  {map[string]any{"to ken": 1}, "a member with a name that no member of a homeassistant entry has"},
 		// https only
 		"ca_file with http":         {map[string]any{"ca_file": "/etc/fairy-agent/ha.pem"}, "ca_file is only for an https url"},
 		"ca_file that is not there": {map[string]any{"url": "https://192.0.2.10:8123", "ca_file": filepath.Join(t.TempDir(), "none.pem")}, "none.pem"},
@@ -475,12 +498,19 @@ func TestHomeAssistantConfig(t *testing.T) {
 			t.Errorf("%s: accepted", name)
 			continue
 		}
-		if !strings.Contains(err.Error(), c.want) || !strings.Contains(err.Error(), "desk") && !strings.Contains(err.Error(), "Desk") {
+		_, otherID := c.more["id"]
+		if !strings.Contains(err.Error(), c.want) || !otherID && !strings.HasPrefix(err.Error(), "power source desk: ") {
 			t.Errorf("%s: %v (want %q, and the entry's id)", name, err, c.want)
 		}
-		if strings.Contains(err.Error(), fakeHAToken()) || strings.Contains(err.Error(), secretInURL) {
-			t.Errorf("%s: the error repeats a secret from the entry: %v", name, err)
+		if strings.Contains(err.Error(), fakeHAToken()) || strings.Contains(err.Error(), secretInURL) || strings.Contains(err.Error(), "Desk") ||
+			strings.Contains(err.Error(), "yaml") || strings.Contains(err.Error(), "unmarshal") || strings.Contains(err.Error(), "\n") {
+			t.Errorf("%s: the error repeats a value of the entry, or is the YAML decoder's own: %v", name, err)
 		}
+	}
+	// the other types keep the shared decoder and its texts
+	if _, err := Build(map[string]any{"id": "p", "type": "shelly", "url": "http://192.0.2.1", "interval": "often"}, nil); err == nil ||
+		!strings.HasPrefix(err.Error(), `power source "p": yaml: unmarshal errors:`) || !strings.Contains(err.Error(), "cannot unmarshal !!str `often` into float64") {
+		t.Errorf("a Shelly entry with a value of the wrong kind: %v", err)
 	}
 	if err := ValidateConfigs([]map[string]any{haEntry("http://192.0.2.10:8123", nil), haEntry("http://192.0.2.11:8123", nil)}); err == nil ||
 		!strings.Contains(err.Error(), "duplicate id") {

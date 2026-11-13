@@ -180,7 +180,7 @@ func Build(raw map[string]any, agentPower AgentPowerFn) (Source, error) {
 	case "redfish", "ipmi":
 		return buildRedfish(decode)
 	case "homeassistant":
-		return buildHomeAssistant(decode)
+		return buildHomeAssistant(raw) // decodes for itself: its errors never repeat a value
 	case "agent":
 		return buildAgentPower(decode, agentPower)
 	}

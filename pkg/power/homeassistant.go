@@ -4,13 +4,17 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"net/http"
 	"net/url"
 	"os"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
+
+	"gopkg.in/yaml.v3"
 
 	"github.com/n3ptune-cpu/Fairy-agent/pkg/configutil"
 	"github.com/n3ptune-cpu/Fairy-agent/pkg/devices"
@@ -140,6 +144,40 @@ func haError(err error, tok string) error {
 	return err
 }
 
+// haMemberName is a member's name that an error may repeat: what a member of this type, or a misspelt one,
+// looks like. Anything else that stands where a name should be is not shown.
+var haMemberName = regexp.MustCompile(`^[A-Za-z0-9_]{1,32}$`)
+
+// haDecode decodes an entry strictly, as DecodeStrict does (a member this type does not have is an error), but
+// its errors are fixed words with the names of the members that are wrong, never a value: the YAML decoder's
+// own error repeats the beginning of a value of the wrong kind ("cannot unmarshal !!str `<its first characters>...`"). To
+// find the members, each is decoded alone, in the order of their names.
+func haDecode(id string, raw map[string]any, c *HomeAssistantConfig) error {
+	if DecodeStrict(raw, c) == nil {
+		return nil
+	}
+	var wrong []string
+	for _, k := range slices.Sorted(maps.Keys(raw)) {
+		one := map[string]any{k: raw[k]}
+		if DecodeStrict(one, &HomeAssistantConfig{}) == nil {
+			continue
+		}
+		b, err := yaml.Marshal(one)
+		switch {
+		case !haMemberName.MatchString(k):
+			wrong = append(wrong, "a member with a name that no member of a homeassistant entry has")
+		case err == nil && yaml.Unmarshal(b, &HomeAssistantConfig{}) == nil: // decodes when unknown members are let through
+			wrong = append(wrong, "field "+k+" not found (a homeassistant entry has no such member)")
+		default:
+			wrong = append(wrong, k+": the value is of the wrong kind (such as text where a number belongs, or a list)")
+		}
+	}
+	if wrong == nil {
+		return fmt.Errorf("power source %s: invalid value", id)
+	}
+	return fmt.Errorf("power source %s: %s", id, strings.Join(slices.Compact(wrong), "; "))
+}
+
 // haAddress checks `url` and returns the one address this source asks and its host[:port]. The url must be
 // Home Assistant itself: http or https, a host, optionally a port, and nothing else. A path, a query, a
 // fragment or a user name would change what is asked, or would put a secret where it is logged.
@@ -158,11 +196,21 @@ func haAddress(raw, entity string) (addr, host string, ok bool) {
 	return (&url.URL{Scheme: u.Scheme, Host: u.Host, Path: "/api/states/" + entity}).String(), u.Host, true
 }
 
-// buildHomeAssistant validates a `type: homeassistant` entry. Its errors name the entry and the member, never
-// a member's value: a url with a password in it, or a token written into the file by mistake, is not repeated.
-func buildHomeAssistant(decode configDecoder) (Source, error) {
+// buildHomeAssistant validates a `type: homeassistant` entry.
+//
+// What its errors repeat of the entry, and nothing else of it: the entry's id when it is a valid id (that is
+// how an entry is named), the names of members, and the path in ca_file when that file cannot be read or holds
+// no certificate (the text of TLSConfig, which says which file). Never another member's value: a url with a
+// password in it, or a token written into the file by mistake, is not repeated. That is why this type does
+// not use the decoder the other types share, whose error repeats the first characters of a value of the wrong
+// kind and an id of any kind (haDecode instead), and why an id that is not valid is not shown.
+func buildHomeAssistant(raw map[string]any) (Source, error) {
+	id, _ := raw["id"].(string)
+	if !configutil.ValidID(id) {
+		return nil, errors.New("power source of type homeassistant: id must be lowercase letters, digits and dashes")
+	}
 	var c HomeAssistantConfig
-	if err := decode(&c); err != nil {
+	if err := haDecode(id, raw, &c); err != nil {
 		return nil, err
 	}
 	if err := c.validate(); err != nil {
