@@ -121,12 +121,14 @@ func (r *Relay) Run(ctx context.Context) {
 // loopSource reads one source at its interval until ctx ends.
 //
 // After a refusal of the source's secret (power.Refused: Home Assistant answered 401 or 403) the next reading
-// is not after the interval but after power.RefusedWait: 5 minutes, then 15 minutes for each further refusal
-// in a row. A revoked token would otherwise be sent every 10 s for as long as the agent runs, and Home
+// is not after the interval but after power.RefusedWait: 5 minutes, then 15 minutes, then an hour for the
+// third and each further refusal in a row. A revoked token would otherwise be sent every 10 s for as long as the agent runs, and Home
 // Assistant counts each as a failed login and can ban the agent's address. The row keeps the refusal's text
 // while the source waits. The count of refusals goes back to zero with the first reading that succeeds; a
 // failure of another kind in between (Home Assistant restarts) is waited out at the normal interval and does
-// not start the count again. Only homeassistant returns refusals: the timing of every other type is unchanged.
+// not start the count again. The count is kept here and nowhere else: a restart of the agent starts it anew,
+// and the first reading after a restart is made at once. Only homeassistant returns refusals: the timing of
+// every other type is unchanged.
 func (r *Relay) loopSource(ctx context.Context, s relaySource) {
 	iv := interval(s.src)
 	pause := r.pause

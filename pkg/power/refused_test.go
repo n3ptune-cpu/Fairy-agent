@@ -53,7 +53,7 @@ func TestRefused(t *testing.T) {
 	}
 
 	for n, want := range map[int]time.Duration{-1: 5 * time.Minute, 0: 5 * time.Minute, 1: 5 * time.Minute, 2: 15 * time.Minute,
-		3: 15 * time.Minute, 1000: 15 * time.Minute} {
+		3: time.Hour, 4: time.Hour, 1000: time.Hour} {
 		if got := RefusedWait(n); got != want {
 			t.Errorf("RefusedWait(%d) is %v, want %v", n, got, want)
 		}

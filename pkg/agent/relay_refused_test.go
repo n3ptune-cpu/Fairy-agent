@@ -96,13 +96,13 @@ func haRelay(t *testing.T, url, more string) *Relay {
 	return relay
 }
 
-// The waits after each answer: 5 minutes after the first refusal, 15 minutes after each further one in a row,
-// the normal interval again after the first reading that succeeds, and 5 minutes again for a refusal after
-// that. One request for each reading, none in between.
+// The waits after each answer: 5 minutes after the first refusal, 15 minutes after the second in a row, an hour
+// after the third and after each further one, the normal interval again after the first reading that
+// succeeds, and 5 minutes again for a refusal after that. One request for each reading, none in between.
 func TestRelayWaitsLongAfterHomeAssistantRefusedTheToken(t *testing.T) {
 	const iv = 10 * time.Second // the default interval of a homeassistant source
-	script := []int{401, 401, 403, 401, 200, 200, 401, 200, 200}
-	want := []time.Duration{5 * time.Minute, 15 * time.Minute, 15 * time.Minute, 15 * time.Minute, iv, iv, 5 * time.Minute, iv, iv}
+	script := []int{401, 401, 403, 401, 403, 200, 200, 401, 200, 200}
+	want := []time.Duration{5 * time.Minute, 15 * time.Minute, time.Hour, time.Hour, time.Hour, iv, iv, 5 * time.Minute, iv, iv}
 	ha := &scriptedHA{script: script}
 	srv := httptest.NewServer(ha)
 	defer srv.Close()
@@ -132,22 +132,64 @@ func TestRelayWaitsLongAfterHomeAssistantRefusedTheToken(t *testing.T) {
 	}
 }
 
-// How many requests a revoked token makes: 5 in the first hour and 13 in the first three hours, where the
-// interval of 10 s made 360 an hour.
+// How many requests a revoked token makes: 3 in the first hour (at once, after 5 and after 20 minutes), 5 in
+// the first three hours and 26 in the first day, one an hour from the third on, where the interval of 10 s
+// made 360 an hour. And a restart of the agent starts the waits anew: the count of refusals is in the running
+// agent's memory only, so the agent that was restarted reads at once and, refused again, waits 5 minutes.
 func TestRelayRequestsWhileTheTokenStaysRefused(t *testing.T) {
 	ha := &scriptedHA{script: []int{401}}
 	srv := httptest.NewServer(ha)
 	defer srv.Close()
 	relay := haRelay(t, srv.URL, "")
-	inFirstHour := 0
+	inFirstHour, inThreeHours := 0, 0
 	waits := runWithClock(t, relay, func(wait, passed time.Duration) bool {
 		if passed < time.Hour {
 			inFirstHour++
 		}
-		return passed+wait >= 3*time.Hour // the next reading would be after the third hour
+		if passed < 3*time.Hour {
+			inThreeHours++
+		}
+		return passed+wait >= 24*time.Hour // the next reading would be after the first day
 	})
-	if inFirstHour != 5 || len(waits) != 13 || ha.requests() != 13 {
-		t.Errorf("%d readings in the first hour (want 5), %d in three hours (want 13), %d requests (want 13)", inFirstHour, len(waits), ha.requests())
+	if inFirstHour != 3 || inThreeHours != 5 || len(waits) != 26 || ha.requests() != 26 {
+		t.Errorf("%d readings in the first hour (want 3), %d in three hours (want 5), %d in a day (want 26), %d requests (want 26)",
+			inFirstHour, inThreeHours, len(waits), ha.requests())
+	}
+	if last := waits[len(waits)-1]; last != time.Hour || slices.Max(waits) != time.Hour {
+		t.Errorf("after a day of refusals the source waits %v (the longest wait was %v), want an hour", last, slices.Max(waits))
+	}
+
+	// The agent is restarted (a relay is built anew, as Run does) while Home Assistant still refuses: one request
+	// at once, then 5 minutes and 15 minutes again, not the hour the agent before it had come to.
+	relay = haRelay(t, srv.URL, "")
+	before, n := ha.requests(), 0
+	waits = runWithClock(t, relay, func(_, passed time.Duration) bool {
+		if n++; n == 1 && (passed != 0 || ha.requests() != before+1) {
+			t.Errorf("after a restart the first reading was not made at once: %v passed, %d requests", passed, ha.requests()-before)
+		}
+		return n == 3
+	})
+	if want := []time.Duration{5 * time.Minute, 15 * time.Minute, time.Hour}; !slices.Equal(waits, want) {
+		t.Errorf("after a restart the waits were %v, want %v", waits, want)
+	}
+	// Restarted with a token that works (the owner stored a new one and restarted): read at once, and at the
+	// normal interval from then on.
+	good := &scriptedHA{script: []int{200}}
+	srvGood := httptest.NewServer(good)
+	defer srvGood.Close()
+	relay = haRelay(t, srvGood.URL, "")
+	n = 0
+	waits = runWithClock(t, relay, func(_, passed time.Duration) bool {
+		if n++; n == 1 && (passed != 0 || good.requests() != 1) {
+			t.Errorf("restarted with a working token, the first reading was not made at once: %v passed, %d requests", passed, good.requests())
+		}
+		return n == 2
+	})
+	if want := []time.Duration{10 * time.Second, 10 * time.Second}; !slices.Equal(waits, want) {
+		t.Errorf("restarted with a working token the waits were %v, want %v", waits, want)
+	}
+	if ps, _ := relay.Rows(); len(ps) != 1 || ps[0]["ok"] != true || ps[0]["watts"] != 41.7 {
+		t.Errorf("restarted with a working token: %v", ps)
 	}
 
 	// a longer interval of the entry is still the least a source waits; after a refusal it waits the same 5 and 15 minutes
@@ -155,7 +197,7 @@ func TestRelayRequestsWhileTheTokenStaysRefused(t *testing.T) {
 	srv2 := httptest.NewServer(ha)
 	defer srv2.Close()
 	relay = haRelay(t, srv2.URL, ", interval: 300")
-	n := 0
+	n = 0
 	waits = runWithClock(t, relay, func(time.Duration, time.Duration) bool { n++; return n == 4 })
 	if want := []time.Duration{5 * time.Minute, 15 * time.Minute, 5 * time.Minute, 5 * time.Minute}; !slices.Equal(waits, want) {
 		t.Errorf("with interval: 300 the waits were %v, want %v", waits, want)

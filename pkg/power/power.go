@@ -85,13 +85,19 @@ func Refused(err error) bool {
 }
 
 // RefusedWait is how long to wait before a source is asked again after its n-th refusal in a row (n >= 1): 5
-// minutes after the first, 15 minutes after each further one. Twelve wrong logins in the first three hours and
-// four an hour after that, where the normal interval of a Home Assistant source made 360 an hour.
+// minutes after the first, 15 minutes after the second, an hour after the third and after every further one.
+// A token that was revoked and forgotten so makes 3 wrong logins in the first hour, 5 in the first three hours
+// and one an hour after that (26 in the first day), where the normal interval of a Home Assistant source made
+// 360 an hour: a Home Assistant that bans an address after a number of failed logins (ip_ban_enabled) is
+// given as few as a source that still notices a repaired token can give it.
 func RefusedWait(n int) time.Duration {
-	if n <= 1 {
+	switch {
+	case n <= 1:
 		return 5 * time.Minute
+	case n == 2:
+		return 15 * time.Minute
 	}
-	return 15 * time.Minute
+	return time.Hour
 }
 
 // refusal is an error for which Refused is true. Its text is a fixed one that is safe to show: devices.Describe
