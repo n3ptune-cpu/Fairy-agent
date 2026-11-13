@@ -6,6 +6,7 @@ package devices
 import (
 	"bytes"
 	"encoding/json"
+	"math"
 	"strings"
 	"testing"
 	"time"
@@ -29,6 +30,14 @@ func FuzzDeviceJSON(f *testing.F) {
 	f.Add([]byte(`{"state":"1e308","attributes":{"unit_of_measurement":"MW"},"last_reported":"2026-01-01T12:00:00+00:00"}`), 0)
 	f.Add([]byte(`{"state":"99999.9996","attributes":{"unit_of_measurement":"kW","device_class":"power"},"last_updated":"x"}`), 0)
 	f.Add([]byte(`{"state":"-0","attributes":{"device_class":"power"}}`), 0)
+	// the other values of a plug in Home Assistant: volts, amperes, the energy total
+	f.Add([]byte(`{"state":"229876.5","attributes":{"unit_of_measurement":"mV","device_class":"voltage"},"last_reported":"2026-01-01T11:59:58+00:00"}`), 0)
+	f.Add([]byte(`{"state":"1000000.4","attributes":{"unit_of_measurement":"mA","device_class":"current"},"last_updated":"x"}`), 0)
+	f.Add([]byte(`{"state":"999999.9999996","attributes":{"unit_of_measurement":"MWh","device_class":"energy","state_class":"total_increasing"}}`), 0)
+	f.Add([]byte(`{"state":"1e12","attributes":{"unit_of_measurement":"Wh","state_class":"total"},"last_reported":"2025-12-31T00:00:00Z"}`), 0)
+	f.Add([]byte(`{"state":"-0.0","attributes":{"device_class":"voltage"}}`), 0)
+	f.Add([]byte(`{"state":"12.5","attributes":{"unit_of_measurement":"kWh","device_class":["energy"],"state_class":{"a":"total"}}}`), 0)
+	f.Add([]byte(`{"state":"1e308","attributes":{"unit_of_measurement":"MWh"}}`), 0)
 	f.Fuzz(func(t *testing.T, raw []byte, channel int) {
 		var d map[string]any
 		dec := json.NewDecoder(bytes.NewReader(raw))
@@ -57,6 +66,20 @@ func FuzzDeviceJSON(f *testing.F) {
 				all = append(all, r)
 			} else if _, fixed := err.(*Error); !fixed || strings.ContainsAny(err.Error(), "\"{}[]") {
 				t.Fatalf("%s: the reason is not one of the fixed texts: %v", raw, err)
+			}
+		}
+		// the other values of a plug in Home Assistant: each inside its range, and a fixed reason otherwise
+		for kind, most := range map[HAKind]float64{HAVoltage: MaxHAVolts, HACurrent: MaxHAAmps, HAEnergy: MaxHAEnergyKWh} {
+			for _, maxAge := range []time.Duration{0, time.Minute} {
+				v, err := ParseHAValue(d, kind, maxAge, time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC))
+				if err == nil {
+					if !(v >= 0 && v <= most) || math.Signbit(v) {
+						t.Fatalf("%s: a Home Assistant value of kind %d of %v", raw, kind, v)
+					}
+					all = append(all, Reading{Voltage: &v})
+				} else if _, fixed := err.(*Error); !fixed || !hvFixed[err.Error()] || v != 0 {
+					t.Fatalf("%s: the reason is not one of the fixed texts: %v %v", raw, v, err)
+				}
 			}
 		}
 		for _, r := range all {
