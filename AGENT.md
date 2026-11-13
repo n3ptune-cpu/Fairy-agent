@@ -971,8 +971,10 @@ BMC, through AGENT-2)" while `agent-1` is offline and `agent-2` is online.
 
 When the panel cannot reach a smart plug or UPS itself (for example at a friend's place), the agent there can
 read it and pass the readings on. The entries are the same as in the panel's `power_sources:` and `ups:`
-(Shelly, Tasmota, Redfish, NUT); passwords go into a separate file named by `env_file:` as
-`NAME=value` lines and stay on that machine. Tuya plugs are no longer supported. An entry with `type: tuya`
+(Shelly, Tasmota, Redfish, NUT, and a plug's power sensor in Home Assistant, see
+[below](#plugs-that-are-in-home-assistant-type-homeassistant)); passwords go into a separate file named by `env_file:` as
+`NAME=value` lines and stay on that machine. Tuya plugs are no longer supported by their own protocol (one that
+is in a Home Assistant can be read through it). An entry with `type: tuya`
 from an earlier version does not stop the agent: it is ignored, and the agent's log at start and
 `fairy-agent check-config` name it in one line (`power source "desk-plug": tuya is no longer supported and is
 ignored (remove the entry from config.yaml, and the line TUYA_KEY_DESK=... from the env file: the plug's key
@@ -1000,6 +1002,103 @@ only for an agent that is a host of its own: for an agent merged into a Proxmox 
 does not work, because the panel shows that machine under the node's id. There, and whenever the panel should
 decide, use `power_links:` in the panel's agent entry (`power_links: {<device id>: <system id>}`, e.g.
 `{office-ups: node-office}`), plus `ups_powers:` / `ups_names:` for UPSes, as for any agent.
+
+#### Plugs that are in Home Assistant (`type: homeassistant`)
+
+A plug the agent cannot ask itself (a Tuya plug, a Zigbee plug, anything else) can still be read when a
+Home Assistant on the same network knows it: the agent asks that Home Assistant for the plug's power sensor.
+It reads the watts and nothing else. Nothing is switched, and nothing is written to Home Assistant.
+
+```yaml
+env_file: /etc/fairy-agent/secrets.env     # HA_TOKEN=...   written by `fairy-agent secret set HA_TOKEN`
+power_sources:
+  - id: desk-plug
+    type: homeassistant
+    name: "Desk plug"
+    url: "http://192.168.1.10:8123"        # Home Assistant itself: http(s)://host[:port], nothing after it
+    token_env: HA_TOKEN                    # the NAME of the variable in env_file, never the token itself
+    entity: sensor.desk_plug_power         # the plug's power sensor; only an id that begins with "sensor." is accepted
+    # max_age_s: 900                       # a value Home Assistant last got longer ago is no reading (0, the default: not checked)
+    # interval: 10                         # seconds between two readings (default 10, never below 5)
+    # ca_file: /etc/fairy-agent/ha.pem     # https only: the certificate Home Assistant shows, or its CA
+    # system_hint: self                    # as for every plug, see above
+```
+
+> **A Home Assistant token is never read-only.** Home Assistant's tokens carry no limits: a long-lived
+> access token is the user it was made for. Also a user that is *not* an administrator can switch every
+> plug, light and lock of that Home Assistant, so whoever holds the token can control everything in it.
+> Fairy itself only ever sends one request with it, `GET /api/states/<the sensor>`, and refuses in
+> `config.yaml` every entity that is not a `sensor.`; but the token in `env_file` can do more than Fairy does
+> with it, in the hands of anybody who can read that file. So: use a Home Assistant (or at least a Home
+> Assistant user made only for Fairy) that has nothing but the plugs in it, keep the token only in `env_file`,
+> and delete the token in Home Assistant when the agent no longer needs it.
+
+Setting it up:
+
+1. **Find the sensor.** In Home Assistant, *Settings > Devices & services > Entities* (or *Developer tools >
+   States*): the plug's power sensor has an entity id like `sensor.desk_plug_power` and a unit of W (mW, kW and
+   MW are converted). An energy sensor (kWh) is the wrong one and is refused.
+2. **Create the token.** Log in to Home Assistant as the user the token is for, open the user profile (the
+   user's name at the bottom of the side bar), tab **Security**, section **Long-lived access tokens**,
+   **Create token**. Give it a name ("fairy"). Home Assistant shows the token once.
+3. **Store it on the agent's machine**, with the agent's own command. It asks for the value without showing
+   it; paste `<the token>` there. Do not write the token into `config.yaml`, onto a command line or into a
+   chat.
+
+   ```
+   sudo fairy-agent secret set HA_TOKEN                                      # Linux
+   & "C:\Program Files\Fairy\fairy-agent.exe" secret set HA_TOKEN           # Windows, Administrator PowerShell
+   ```
+
+   This writes `HA_TOKEN=...` into `env_file` (and sets `env_file` if it was not set), readable only by root
+   / administrators and the agent. The name must not begin with `FAIRY_`.
+4. **Add the entry** to `power_sources:` as above, then check and restart. `fairy-agent check-config` (Linux:
+   `sudo -u fairy-agent fairy-agent check-config`) has a line for every such source:
+
+   ```
+   config OK: /etc/fairy-agent/config.yaml
+   power source "desk-plug": homeassistant, host 192.168.1.10:8123 (http), sensor.desk_plug_power, token: present (HA_TOKEN)
+   ```
+
+   `token: missing (HA_TOKEN is not set: ...)` means the variable is not in `env_file`. `check-config` does
+   not read or try the token; whether Home Assistant accepts it shows in the panel after the restart
+   (`systemctl restart fairy-agent` / `Restart-Service fairy-agent`).
+5. **In the panel**, link the plug to its machine like any relayed plug: `system_hint: self` here, or
+   `power_links: {desk-plug: <system id>}` in the panel's agent entry (the only way for a machine shown as a
+   Proxmox node). The panel needs no update for this type; its Power page shows the type as `homeassistant`.
+
+An agent up to 0.7.0 does not know this type and does not start with such an entry (`unknown type`): update
+the agent first, then add the entry.
+
+What exactly is sent: for every reading one `GET <url>/api/states/<entity>` with the header
+`Authorization: Bearer <the token>`, to the address in `url` only. A redirect is not followed. With an
+`http://` address the token crosses that network unencrypted with every reading, as a Tasmota password does;
+with `https://` the certificate is always checked (against the system's authorities, or `ca_file`; for a
+self-signed certificate put that certificate into `ca_file`), and there is no setting to switch the check
+off. The token is never logged, never part of an error message and never sent to the panel: the row in
+`/metrics` holds the id, the name, the type, the watts and, when there is no reading, one of the texts below.
+
+| The source shows | Meaning |
+| --- | --- |
+| `home assistant refused the token` | Home Assistant answered 401 or 403: the token is wrong or was deleted, or its user is disabled or may not read this entity |
+| `entity not found` | 404: no such entity id (renamed in Home Assistant?) |
+| `home assistant: the sensor is unavailable` / `... state is unknown` | Home Assistant has no value: the plug does not answer it, or it has just started |
+| `home assistant: the sensor's state is not a number` | the entity is not a measurement |
+| `home assistant: the sensor's unit is not a unit of power (W, mW, kW, MW)` / `... has no unit and is not a power sensor` | the wrong entity (energy, voltage, ...). A sensor without a unit is read as watts only when its device class is `power` |
+| `home assistant: the sensor's value is not a possible power (0 to 100000 W)` | negative or over 100 kW |
+| `home assistant: the sensor's value is older than max_age_s` / `... has no time (max_age_s is set)` | only with `max_age_s`, see below |
+| `power source desk-plug: env var HA_TOKEN is missing ...` | the token is not in `env_file` (step 3), or the agent was not restarted |
+| `timeout`, `connection failed`, `tls verification failed`, `http 500` | as for every plug |
+
+`max_age_s` is off by default because an idle plug is not a broken one. With it, the age is taken from the
+state's `last_reported`, which Home Assistant renews whenever the plug's integration reports again, also with
+the same value. An older Home Assistant that does not send `last_reported` is judged by `last_updated`, which
+only moves when the value *changes*: a plug that draws a steady 0 W for an hour then looks an hour old. Some
+integrations do not report again while nothing changes. So set `max_age_s` generously (several times the
+plug's reporting interval, e.g. 900), look at the plug for a day, and leave it off if it shows "older than
+max_age_s" while the plug is fine. The age is Home Assistant's time stamp against this machine's clock, so
+both need the right time. A plug that Home Assistant itself has lost is shown as `unavailable` without
+`max_age_s`.
 
 ## Passkey approval of fan, power and update requests (Pocket ID)
 
@@ -1615,7 +1714,7 @@ The file is `C:\ProgramData\fairy-agent\config.yaml` (Windows) or `/etc/fairy-ag
 | `gpu.amd_adl` | auto | Windows: Radeon temperature and watts from AMD's ADL (Adrenalin driver), read only; `off` to switch off |
 | `sensors.coretemp` | false | Windows: CPU core temperatures and watts from Core Temp (see [Core Temp](#core-temp-optional-windows)) |
 | `ipmi`, `fan_control`, `power_control`, `wol`, `bmc_relay` | off | see [Optional features](#optional-features) |
-| `env_file` | none | `KEY=value` secrets (device and BMC passwords); `fairy-agent secret set NAME` writes it |
+| `env_file` | none | `KEY=value` secrets (device and BMC passwords, a Home Assistant token); `fairy-agent secret set NAME` writes it |
 | `self_update.enabled`, `self_update.repo` | off, `n3ptune-cpu/Fairy-agent` | see [Updates](#updates-the-panels-update-button) |
 | `control_rate_per_min` | 12 | requests a minute, for everybody together, in each of three budgets that cannot use each other up: **control requests** (fan, power other than cancel, Wake-on-LAN, BMC relay, update, helper stop / start, the first-time set of the approval trust), all together; **approval challenges** (`POST /approval/challenge`), so an approved action costs one control request and one challenge, not two control requests; and **`POST /power` with `cancel`**, so that neither a burst of challenges nor a row of refused requests can keep a cancel out (only other cancels with the control token can, and on Windows a `POST /helper/stop`, which also needs the control token: a cancel is answered `503 helper_stopped` until the helper is started again; requests with a wrong token or none count against nobody but themselves, see [Security in short](#security-in-short)). One more is answered `429` (`Retry-After: 60`); the text says which budget |
 | `log_file` | Windows: `C:\ProgramData\fairy-agent\logs\agent.log` (5 MB, one old copy); Linux: the journal | |

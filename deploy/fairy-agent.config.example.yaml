@@ -99,5 +99,11 @@ control_rate_per_min: 12
 power_sources: []
   # - {id: desk-plug, type: shelly, name: "Desk plug", url: "http://192.168.1.61", password_env: SHELLY_PW, system_hint: self}
   # - {id: tasmota-1, type: tasmota, url: "http://192.168.1.62"}
+  # A plug that is in Home Assistant (e.g. a Tuya one): the watts of its power sensor, read-only. url is Home
+  # Assistant itself (nothing after host:port), entity must be a sensor.* id, token_env names the variable in
+  # env_file that holds a long-lived access token: `fairy-agent secret set HA_TOKEN` (never write the token here).
+  # A Home Assistant token is never read-only: whoever holds it can control everything in that Home Assistant.
+  # See AGENT.md, "Plugs that are in Home Assistant". Optional: max_age_s, ca_file (https), interval.
+  # - {id: ha-plug, type: homeassistant, name: "Rack plug", url: "http://192.168.1.10:8123", token_env: HA_TOKEN, entity: sensor.rack_plug_power}
 ups: []
   # - {id: local, host: 127.0.0.1, username: monuser, password_env: NUT_PASSWORD}

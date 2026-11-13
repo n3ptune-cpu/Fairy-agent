@@ -105,8 +105,8 @@ Each folder is one Go package; inside a package, files are named after what they
 | `pkg/agent/ipmi` | Raw IPMI to the BMC: sensor list and readings (`sdr.go`), Supermicro fan commands (`ipmi.go`), through ipmitool or Windows' IPMI WMI class (`ipmitool.go`, `wmi_windows.go`); `fakebmc/` for tests. |
 | `pkg/agent/configedit` | `fairy-agent config set`: changes one setting's text in config.yaml (comments, order and layout stay), checks the result, and replaces the file in one step keeping its owner, permissions and Windows access list. |
 | `pkg/agent/agenttest` | Fakes for tests (here and in the panel's contract test): a collector, a GPU, a power executor, the Windows helper. |
-| `pkg/devices` | Device protocols shared with the panel: Shelly/Tasmota/Redfish parsing, NUT client, HTTP helpers, digest auth, and `Describe` (errors as short messages without secrets). |
-| `pkg/power` | One power source per device type (`shelly.go`, `tasmota.go`, `nut.go`, `redfish.go`, `agentpower.go`), built from a `power_sources:` entry (`build.go`; an entry of the removed type `tuya` is taken out with a warning, `DropRemoved`). The agent relays them; the panel adds backoff, totals and history. |
+| `pkg/devices` | Device protocols shared with the panel: Shelly/Tasmota/Redfish parsing, Home Assistant state objects, NUT client, HTTP helpers (basic, digest and bearer auth), and `Describe` (errors as short messages without secrets). |
+| `pkg/power` | One power source per device type (`shelly.go`, `tasmota.go`, `nut.go`, `redfish.go`, `homeassistant.go`, `agentpower.go`), built from a `power_sources:` entry (`build.go`; an entry of the removed type `tuya` is taken out with a warning, `DropRemoved`). The agent relays them; the panel adds backoff, totals and history. |
 | `pkg/ups` | NUT UPS sources built from an `ups:` entry, and which systems each UPS powers. |
 | `pkg/redact` | Removes passwords/tokens from process command lines (in the agent, and again in the panel). |
 | `pkg/configutil` | The id rule (`ValidID`) and secrets referenced by environment variable name (`EnvSecret`). |
