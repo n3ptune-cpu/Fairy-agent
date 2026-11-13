@@ -98,9 +98,33 @@ Readings come back within about 10 s; `/metrics` says `running` again; `& $fa he
 
 ## 6. Optional: power
 
-With power control on: in the panel, Reboot (or Sleep, if the PC supports it) with a 60 s delay; Windows shows
-its countdown; Cancel in the panel stops it. Then once for real if convenient. helper.log lists each request
-with who asked.
+With power control on: in the panel, Reboot or Shut down with a 60 s delay. Windows shows its own notice
+(`Fairy: reboot requested by <your panel user> in 60 seconds.`) and counts down; Cancel in the panel aborts
+it, and Windows says so. Then once for real if convenient. helper.log lists each request with who asked.
+
+**Sleep is different: Windows shows nothing.** A pending Sleep is a timer inside the helper, not a countdown
+of Windows. There is no notice on the PC when it is set, none while it waits and none when it is cancelled;
+only the panel shows it. Cancel in the panel stops the timer, the PC stays on, and Windows says nothing. (A
+shutdown or reboot uses Windows' own shutdown notice and can be aborted; a sleep cannot be shown that way.)
+
+Sleep, wake, then shutdown and cancel, by hand. For a PC or VM that can sleep (the panel's Power menu offers
+Sleep; if it does not, skip this). It checks that a sleep that was carried out does not swallow the Cancel of
+the next shutdown, as it did before 0.7.0:
+
+1. Panel: **Sleep**, delay 60 s. Expected: the panel shows the pending sleep; nothing appears on the PC.
+2. Let the minute run out. Expected: at its time the PC goes to sleep (the screen goes black, a VM is
+   suspended), and the panel shows the host as asleep, from the panel (`ASLEEP (FROM PANEL)`).
+3. Wake the PC: a key or the power button, the panel's "Power on" (Wake-on-LAN), for a VM "Resume" in the
+   hypervisor. Expected: the panel shows the host running again, with nothing pending.
+4. Panel: **Shut down**, delay 60 s. Expected: Windows shows `Fairy: shutdown requested by <your panel user>
+   in 60 seconds.` and the panel shows the pending shutdown.
+5. Panel: **Cancel**, within that minute. Expected: a few seconds later Windows shows "Logoff is cancelled:
+   The scheduled shutdown has been cancelled.", the panel shows nothing pending, and the PC stays on. Wait
+   until the minute is over to be sure. If the PC shuts down although Cancel said it was cancelled, that is
+   the fault this test looks for: note the time and keep helper.log.
+
+On the owner's test VM (13 Nov 2026, build of 0.7.0) all five steps went as written, and a Sleep cancelled
+before its time left the VM on without any notice.
 
 ## 7. Optional: watchdog
 
