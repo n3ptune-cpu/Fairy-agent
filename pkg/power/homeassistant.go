@@ -178,6 +178,12 @@ func buildHomeAssistant(decode configDecoder) (Source, error) {
 	if !haEnvName.MatchString(c.TokenEnv) {
 		return nil, fmt.Errorf("power source %s: token_env must be the name of the environment variable that holds the token (the token itself does not belong in this file)", c.ID)
 	}
+	// The value of the variable is sent to Home Assistant. Fairy's own variables hold Fairy's own secrets (the
+	// agent's tokens, the panel's keys): none of them may be named here, in whatever letter case (Windows does
+	// not tell the cases apart). `fairy-agent secret set` refuses such a name too.
+	if strings.HasPrefix(strings.ToUpper(c.TokenEnv), "FAIRY_") {
+		return nil, fmt.Errorf("power source %s: token_env must not be one of Fairy's own variables (a name that begins with FAIRY_): what such a variable holds is not for Home Assistant", c.ID)
+	}
 	if !(c.MaxAgeS >= 0 && c.MaxAgeS <= maxHAAgeS) { // "not inside": .nan fails too
 		return nil, fmt.Errorf("power source %s: max_age_s must be 0 (not checked) to %d s", c.ID, maxHAAgeS)
 	}

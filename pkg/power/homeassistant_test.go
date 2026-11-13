@@ -24,7 +24,8 @@ import (
 	"github.com/n3ptune-cpu/Fairy-agent/pkg/devices"
 )
 
-const haTokenEnv = "FAIRY_TEST_HA_TOKEN"
+// haTokenEnv is the variable the tests keep the made-up token in. Not a FAIRY_ name: those are refused.
+const haTokenEnv = "POWER_TEST_HA_TOKEN"
 
 // fakeHAToken is a made-up token, put together when the test runs: no text in this file looks like a
 // credential (a real long-lived token of Home Assistant is a long signed text; nothing here depends on that).
@@ -345,6 +346,10 @@ func TestHomeAssistantConfig(t *testing.T) {
 		{"entity": "sensor._"},
 		{"token_env": "_HA1"},
 		{"token_env": "ha_token"},
+		{"token_env": "FAIRY"},        // not the prefix FAIRY_
+		{"token_env": "FAIRYTALE_HA"}, // the same
+		{"token_env": "HA_FAIRY_TOKEN"},
+		{"token_env": "_FAIRY_TOKEN"},
 		{"max_age_s": 0},
 		{"max_age_s": 0.5},
 		{"max_age_s": 900},
@@ -436,6 +441,12 @@ func TestHomeAssistantConfig(t *testing.T) {
 		"token_env with an assignment": {map[string]any{"token_env": "HA_TOKEN=x"}, "token_env must be"},
 		"the token instead of a name":  {map[string]any{"token_env": fakeHAToken() + ".part.two"}, "token_env must be"},
 		"token_env far too long":       {map[string]any{"token_env": strings.Repeat("A", 129)}, "token_env must be"},
+		// token_env: never one of Fairy's own variables (their values would be sent to Home Assistant)
+		"the agent's read token":      {map[string]any{"token_env": "FAIRY_AGENT_TOKEN"}, "token_env must not be one of Fairy's own variables"},
+		"the agent's control token":   {map[string]any{"token_env": "FAIRY_AGENT_CONTROL_TOKEN"}, "token_env must not be one of Fairy's own variables"},
+		"a FAIRY_ name in small":      {map[string]any{"token_env": "fairy_agent_token"}, "token_env must not be one of Fairy's own variables"},
+		"a FAIRY_ name in mixed case": {map[string]any{"token_env": "Fairy_Ha_Token"}, "token_env must not be one of Fairy's own variables"},
+		"only the prefix":             {map[string]any{"token_env": "FAIRY_"}, "token_env must not be one of Fairy's own variables"},
 		// max_age_s
 		"max_age_s negative":    {map[string]any{"max_age_s": -1}, "max_age_s must be"},
 		"max_age_s over a week": {map[string]any{"max_age_s": 604801}, "max_age_s must be"},
