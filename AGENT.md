@@ -1008,6 +1008,8 @@ decide, use `power_links:` in the panel's agent entry (`power_links: {<device id
 A plug the agent cannot ask itself (a Tuya plug, a Zigbee plug, anything else) can still be read when a
 Home Assistant on the same network knows it: the agent asks that Home Assistant for the plug's power sensor.
 It reads the watts and nothing else. Nothing is switched, and nothing is written to Home Assistant.
+`type: homeassistant` belongs in an agent's `power_sources:`; do not put it into the panel's own
+`power_sources:` (the long wait after a refused token exists only in the agent).
 
 ```yaml
 env_file: /etc/fairy-agent/secrets.env     # HA_TOKEN=...   written by `fairy-agent secret set HA_TOKEN`
@@ -1060,7 +1062,13 @@ Setting it up:
    ```
 
    This writes `HA_TOKEN=...` into `env_file` (and sets `env_file` if it was not set), readable only by root
-   / administrators and the agent. The name must not begin with `FAIRY_`.
+   / administrators and the agent. The name must not begin with `FAIRY_`. The variable named by `token_env`
+   is used for nothing else and is hidden from the programs the agent starts, so do not name a variable of
+   the system there (`PATH`, `SystemRoot`). Do not name one either that another plug, a UPS, the BMC or a
+   BMC relay target keeps its password in (several plugs of one Home Assistant can share one `token_env`).
+   With either, the agent does not start, and `check-config` names the entry: `token_env must not be a
+   variable of the system ...`, `token_env names the same variable as password_env of power source
+   shelly-1 ...`.
 4. **Add the entry** to `power_sources:` as above, then check and restart. `fairy-agent check-config` (Linux:
    `sudo -u fairy-agent fairy-agent check-config`) has a line for every such source:
 

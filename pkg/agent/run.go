@@ -152,7 +152,7 @@ func Run(ctx context.Context, cfg *Config, b Build) error {
 				"token", t.name)
 		}
 	}
-	relay, err := NewRelay(cfg.PowerSources, cfg.UPS)
+	relay, err := cfg.NewRelay()
 	if err != nil {
 		return err
 	}

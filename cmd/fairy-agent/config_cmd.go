@@ -27,7 +27,7 @@ func checkConfig(cfg *agent.Config) error {
 	if _, err := cfg.LoadTokens(); err != nil {
 		return err
 	}
-	_, err := agent.NewRelay(cfg.PowerSources, cfg.UPS)
+	_, err := cfg.NewRelay()
 	return err
 }
 
@@ -63,7 +63,7 @@ func checkConfigCmd(cfgPath string, stdout, stderr io.Writer) int {
 // config problem and not an exit code, as a plug's missing password is not: the agent starts, and the source
 // says "env var ... is missing".
 func sourceLines(cfg *agent.Config) []string {
-	relay, err := agent.NewRelay(cfg.PowerSources, cfg.UPS)
+	relay, err := cfg.NewRelay()
 	if err != nil { // checkConfig has said so
 		return nil
 	}

@@ -55,6 +55,10 @@ var haEntity = regexp.MustCompile(`^sensor\.[a-z0-9_]+$`)
 
 var haEnvName = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]{0,127}$`)
 
+// haSystemEnv are variables of the system that token_env must not name (buildHomeAssistant): the obvious ones,
+// not every one there is.
+var haSystemEnv = []string{"PATH", "HOME", "TEMP", "TMP", "SystemRoot", "USERPROFILE"}
+
 // maxHAAgeS is the largest max_age_s: a week.
 const maxHAAgeS = 7 * 24 * 3600
 
@@ -231,6 +235,13 @@ func buildHomeAssistant(raw map[string]any) (Source, error) {
 	// not tell the cases apart). `fairy-agent secret set` refuses such a name too.
 	if strings.HasPrefix(strings.ToUpper(c.TokenEnv), "FAIRY_") {
 		return nil, fmt.Errorf("power source %s: token_env must not be one of Fairy's own variables (a name that begins with FAIRY_): what such a variable holds is not for Home Assistant", c.ID)
+	}
+	// The variable is hidden from every program the agent starts (the agent hides what token_env names), and
+	// its value goes to Home Assistant: a variable the system itself needs is neither a token nor one a
+	// program can do without. The names are compared in whatever letter case, as Windows does. The error has
+	// the whole list, not the name that was given.
+	if slices.ContainsFunc(haSystemEnv, func(n string) bool { return strings.EqualFold(n, c.TokenEnv) }) {
+		return nil, fmt.Errorf("power source %s: token_env must not be a variable of the system (%s): the variable named there is used for nothing but the token and is hidden from the programs the agent starts", c.ID, strings.Join(haSystemEnv, ", "))
 	}
 	// 0 or at least a second: a fraction of a second is not an age any plug's value can keep to (Home Assistant
 	// hears from a plug every 10 to 60 s), so it would only ever show "older than max_age_s".

@@ -48,6 +48,28 @@ power_sources:
 		t.Fatal("check-config shows the token")
 	}
 
+	// a token_env that another setting names for its own secret, or that is a variable of the system, is a
+	// config problem: fixed words, the two entries by id, no variable's name and no token
+	for bad, word := range map[string]string{
+		"token_env: " + present: "config problem: power source desk-plug: token_env names the same variable as password_env of power source shelly-1: " +
+			"what that variable holds would be sent to Home Assistant as the token. The token needs a variable that nothing else names\n",
+		"token_env: " + missing: "config problem: power source rack-plug: token_env must not be a variable of the system (PATH, HOME, TEMP, TMP, SystemRoot, USERPROFILE): " +
+			"the variable named there is used for nothing but the token and is hidden from the programs the agent starts\n",
+	} {
+		broken := strings.Replace(conf, "password_env: CHECK_TEST_SHELLY_PW", "password_env: "+strings.ToLower(present), 1)
+		if strings.HasSuffix(bad, missing) {
+			broken = strings.Replace(conf, bad, "token_env: Path", 1)
+		}
+		if err := os.WriteFile(p, []byte(broken), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		out.Reset()
+		errb.Reset()
+		if code := checkConfigCmd(p, &out, &errb); code != 1 || out.Len() != 0 || errb.String() != word {
+			t.Errorf("%s: exit %d\nstdout: %s\nstderr: %s\nwant:   %s", bad, code, out.String(), errb.String(), word)
+		}
+	}
+
 	// an entry that is not a sensor is a config problem, named without the entry's secrets
 	for bad, word := range map[string]string{
 		"entity: switch.desk_plug":                      "entity must be",

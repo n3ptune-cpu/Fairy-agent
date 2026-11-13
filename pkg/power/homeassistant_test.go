@@ -333,6 +333,11 @@ func TestHomeAssistantAnswerIsLimited(t *testing.T) {
 
 // What a `type: homeassistant` entry may hold. The entity rule is the read-only promise: only an id that
 // begins with "sensor." and has no character that could change the request's path is ever asked for.
+// haSystemWords is the whole error for a token_env that names a variable of the system, after the entry's id:
+// the same words for every such name (the list, not the name that was given).
+const haSystemWords = "token_env must not be a variable of the system (PATH, HOME, TEMP, TMP, SystemRoot, USERPROFILE): " +
+	"the variable named there is used for nothing but the token and is hidden from the programs the agent starts"
+
 func TestHomeAssistantConfig(t *testing.T) {
 	good := []map[string]any{
 		nil,
@@ -352,6 +357,12 @@ func TestHomeAssistantConfig(t *testing.T) {
 		{"token_env": "FAIRYTALE_HA"}, // the same
 		{"token_env": "HA_FAIRY_TOKEN"},
 		{"token_env": "_FAIRY_TOKEN"},
+		{"token_env": "HOMEASSISTANT_TOKEN"}, // begins with a system variable's name, is not one
+		{"token_env": "HA_PATH"},
+		{"token_env": "PATHS"},
+		{"token_env": "TMP_"},
+		{"token_env": "_TEMP"},
+		{"token_env": "SYSTEMROOT2"},
 		{"max_age_s": 0},
 		{"max_age_s": 1},
 		{"max_age_s": 1.5},
@@ -450,6 +461,22 @@ func TestHomeAssistantConfig(t *testing.T) {
 		"a FAIRY_ name in small":      {map[string]any{"token_env": "fairy_agent_token"}, "token_env must not be one of Fairy's own variables"},
 		"a FAIRY_ name in mixed case": {map[string]any{"token_env": "Fairy_Ha_Token"}, "token_env must not be one of Fairy's own variables"},
 		"only the prefix":             {map[string]any{"token_env": "FAIRY_"}, "token_env must not be one of Fairy's own variables"},
+		// token_env: never a variable of the system (it would be hidden from the programs the agent starts, and
+		// its value sent to Home Assistant), in whatever letter case
+		"PATH":                 {map[string]any{"token_env": "PATH"}, haSystemWords},
+		"Path, as Windows has": {map[string]any{"token_env": "Path"}, haSystemWords},
+		"path":                 {map[string]any{"token_env": "path"}, haSystemWords},
+		"HOME":                 {map[string]any{"token_env": "HOME"}, haSystemWords},
+		"home":                 {map[string]any{"token_env": "home"}, haSystemWords},
+		"TEMP":                 {map[string]any{"token_env": "TEMP"}, haSystemWords},
+		"Temp":                 {map[string]any{"token_env": "Temp"}, haSystemWords},
+		"TMP":                  {map[string]any{"token_env": "TMP"}, haSystemWords},
+		"tmp":                  {map[string]any{"token_env": "tmp"}, haSystemWords},
+		"SystemRoot":           {map[string]any{"token_env": "SystemRoot"}, haSystemWords},
+		"SYSTEMROOT":           {map[string]any{"token_env": "SYSTEMROOT"}, haSystemWords},
+		"systemroot":           {map[string]any{"token_env": "systemroot"}, haSystemWords},
+		"USERPROFILE":          {map[string]any{"token_env": "USERPROFILE"}, haSystemWords},
+		"UserProfile":          {map[string]any{"token_env": "UserProfile"}, haSystemWords},
 		// max_age_s
 		"max_age_s negative":            {map[string]any{"max_age_s": -1}, "max_age_s must be"},
 		"max_age_s half a second":       {map[string]any{"max_age_s": 0.5}, "max_age_s must be 0 (not checked) or 1 to 604800 s"},
@@ -510,6 +537,9 @@ func TestHomeAssistantConfig(t *testing.T) {
 		_, otherID := c.more["id"]
 		if !strings.Contains(err.Error(), c.want) || !otherID && !strings.HasPrefix(err.Error(), "power source desk: ") {
 			t.Errorf("%s: %v (want %q, and the entry's id)", name, err, c.want)
+		}
+		if c.want == haSystemWords && err.Error() != "power source desk: "+haSystemWords {
+			t.Errorf("%s: %v\nwant these words and no others: %s", name, err, haSystemWords)
 		}
 		if strings.Contains(err.Error(), fakeHAToken()) || strings.Contains(err.Error(), secretInURL) || strings.Contains(err.Error(), "Desk") ||
 			strings.Contains(err.Error(), "yaml") || strings.Contains(err.Error(), "unmarshal") || strings.Contains(err.Error(), "\n") {

@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"maps"
+	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -63,6 +65,73 @@ func NewRelay(sources, upsCfg []map[string]any) (*Relay, error) {
 		r.upses = append(r.upses, u)
 	}
 	return r, nil
+}
+
+// NewRelay builds the relay of this config's power_sources and ups entries (the function NewRelay) and makes
+// the one check that needs the whole config: the variable a homeassistant entry names in token_env is not the
+// one another setting keeps its secret in (tokenEnvShared). The running agent and check-config build their
+// relay with it.
+func (c *Config) NewRelay() (*Relay, error) {
+	r, err := NewRelay(c.PowerSources, c.UPS)
+	if err != nil {
+		return nil, err
+	}
+	if err := c.tokenEnvShared(); err != nil { // after NewRelay: every id it names has been checked
+		return nil, err
+	}
+	return r, nil
+}
+
+// tokenEnvShared is the error for a homeassistant entry whose token_env names a variable that something else
+// in config.yaml names for its own secret: a member ending in "_env" of a power_sources entry of another type
+// or of a ups entry, ipmi.password_env, or the password_env of a BMC relay target. What that variable holds (a
+// plug's, a UPS's or a BMC's password) would be sent to Home Assistant as the token with every reading. Names
+// are compared without regard to case, as Windows does.
+//
+// The error names the two settings by their ids and the member, never the variable: an error of a
+// homeassistant entry repeats no value of the entry. Several homeassistant entries may name one variable (the
+// plugs of one Home Assistant share its token), and an ignored entry (tuya) is not looked at.
+func (c *Config) tokenEnvShared() error {
+	type named struct{ what, env string }
+	var tokens, others []named
+	for _, raw := range c.PowerSources {
+		id, _ := raw["id"].(string)
+		if typ, _ := raw["type"].(string); typ == "homeassistant" {
+			if env, _ := raw["token_env"].(string); env != "" {
+				tokens = append(tokens, named{id, env})
+			}
+			continue
+		}
+		for _, k := range slices.Sorted(maps.Keys(raw)) {
+			if env, ok := raw[k].(string); ok && env != "" && strings.HasSuffix(k, "_env") {
+				others = append(others, named{k + " of power source " + id, env})
+			}
+		}
+	}
+	for _, raw := range c.UPS {
+		id, _ := raw["id"].(string)
+		for _, k := range slices.Sorted(maps.Keys(raw)) {
+			if env, ok := raw[k].(string); ok && env != "" && strings.HasSuffix(k, "_env") {
+				others = append(others, named{k + " of ups " + id, env})
+			}
+		}
+	}
+	if c.IPMI.PasswordEnv != "" {
+		others = append(others, named{"ipmi.password_env", c.IPMI.PasswordEnv})
+	}
+	for _, t := range c.BMCRelay.Targets {
+		if t.PasswordEnv != "" {
+			others = append(others, named{"password_env of bmc_relay target " + t.ID, t.PasswordEnv})
+		}
+	}
+	for _, tok := range tokens {
+		for _, o := range others {
+			if strings.EqualFold(tok.env, o.env) {
+				return fmt.Errorf("power source %s: token_env names the same variable as %s: what that variable holds would be sent to Home Assistant as the token. The token needs a variable that nothing else names", tok.what, o.what)
+			}
+		}
+	}
+	return nil
 }
 
 // Checks are the config check's facts about the relayed power sources that read with a secret (homeassistant:
