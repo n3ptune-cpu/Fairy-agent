@@ -124,8 +124,10 @@ func haError(err error, tok string) error {
 	if errors.As(err, &he) {
 		switch he.Code {
 		case http.StatusUnauthorized, http.StatusForbidden:
-			// 401: a wrong or revoked token, a disabled user, or a user that may not read this entity
-			return devices.Errf("home assistant refused the token")
+			// 401: a wrong or revoked token, a disabled user, or a user that may not read this entity. Home
+			// Assistant has counted this request as a failed login: the error is a refusal (Refused), after
+			// which the source is asked again much later, not at its interval.
+			return refusedf("home assistant refused the token")
 		case http.StatusNotFound:
 			return devices.Errf("entity not found")
 		}

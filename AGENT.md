@@ -1080,7 +1080,7 @@ off. The token is never logged, never part of an error message and never sent to
 
 | The source shows | Meaning |
 | --- | --- |
-| `home assistant refused the token` | Home Assistant answered 401 or 403: the token is wrong or was deleted, or its user is disabled or may not read this entity |
+| `home assistant refused the token` | Home Assistant answered 401 or 403: the token is wrong or was deleted, or its user is disabled or may not read this entity. After this answer the agent asks again only after 5 minutes, then every 15 minutes, instead of every `interval`: Home Assistant counts each such request as a failed login and, if it is set up to, bans the address they come from. The text stays until then; the first reading that succeeds brings the normal interval back, and so does a restart of the agent (which a new token needs anyway) |
 | `entity not found` | 404: no such entity id (renamed in Home Assistant?) |
 | `home assistant: the sensor is unavailable` / `... state is unknown` | Home Assistant has no value: the plug does not answer it, or it has just started |
 | `home assistant: the sensor's state is not a number` | the entity is not a measurement |

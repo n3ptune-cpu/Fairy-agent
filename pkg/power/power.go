@@ -8,6 +8,7 @@ package power
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -69,6 +70,42 @@ type Check struct {
 
 // Checker is a Source that has a Check (today: homeassistant).
 type Checker interface{ Check() Check }
+
+// Refused reports whether err says that the device refused the secret it was sent (a token, a password): an
+// error that has, itself or in what it wraps, a method `Refused() bool` that returns true.
+//
+// After such an answer, asking again at once does not help and can do harm: a Home Assistant counts every
+// request with a token it does not know as a failed login and can ban the sender's address. So whoever polls
+// a source waits much longer after a refusal than after any other failure (the agent's relay: RefusedWait). A
+// source type opts in by returning such an error from Read (refusedf); today only homeassistant does, and the
+// timing of every other type is as it was.
+func Refused(err error) bool {
+	var r interface{ Refused() bool }
+	return errors.As(err, &r) && r.Refused()
+}
+
+// RefusedWait is how long to wait before a source is asked again after its n-th refusal in a row (n >= 1): 5
+// minutes after the first, 15 minutes after each further one. Twelve wrong logins in the first three hours and
+// four an hour after that, where the normal interval of a Home Assistant source made 360 an hour.
+func RefusedWait(n int) time.Duration {
+	if n <= 1 {
+		return 5 * time.Minute
+	}
+	return 15 * time.Minute
+}
+
+// refusal is an error for which Refused is true. Its text is a fixed one that is safe to show: devices.Describe
+// finds the *devices.Error inside.
+type refusal struct{ err *devices.Error }
+
+func (e *refusal) Error() string { return e.err.Msg }
+func (e *refusal) Unwrap() error { return e.err }
+func (e *refusal) Refused() bool { return true }
+
+// refusedf is devices.Errf for a refusal of the secret. Never put credentials, URLs or headers into it.
+func refusedf(f string, a ...any) error {
+	return &refusal{err: &devices.Error{Msg: fmt.Sprintf(f, a...)}}
+}
 
 type defaults struct{}
 

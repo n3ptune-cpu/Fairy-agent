@@ -23,6 +23,10 @@ type Relay struct {
 	mu      sync.Mutex
 	rows    map[string]map[string]any // power source id -> row
 	upsRows map[string][]map[string]any
+
+	// pause waits d between two readings of a source and reports whether ctx is still alive. nil: the clock
+	// (pauseFor). Tests put their own here to see the waits without waiting.
+	pause func(ctx context.Context, d time.Duration) bool
 }
 
 type relaySource struct {
@@ -114,20 +118,53 @@ func (r *Relay) Run(ctx context.Context) {
 	}
 }
 
+// loopSource reads one source at its interval until ctx ends.
+//
+// After a refusal of the source's secret (power.Refused: Home Assistant answered 401 or 403) the next reading
+// is not after the interval but after power.RefusedWait: 5 minutes, then 15 minutes for each further refusal
+// in a row. A revoked token would otherwise be sent every 10 s for as long as the agent runs, and Home
+// Assistant counts each as a failed login and can ban the agent's address. The row keeps the refusal's text
+// while the source waits. The count of refusals goes back to zero with the first reading that succeeds; a
+// failure of another kind in between (Home Assistant restarts) is waited out at the normal interval and does
+// not start the count again. Only homeassistant returns refusals: the timing of every other type is unchanged.
 func (r *Relay) loopSource(ctx context.Context, s relaySource) {
 	iv := interval(s.src)
+	pause := r.pause
+	if pause == nil {
+		pause = pauseFor
+	}
+	refusals := 0
 	for ctx.Err() == nil {
-		r.PollSource(ctx, s, min(iv, 10*time.Second))
-		select {
-		case <-ctx.Done():
+		err := r.PollSource(ctx, s, min(iv, 10*time.Second))
+		wait := iv
+		switch {
+		case err == nil:
+			refusals = 0
+		case power.Refused(err):
+			refusals++
+			wait = max(iv, power.RefusedWait(refusals))
+		}
+		if !pause(ctx, wait) {
 			return
-		case <-time.After(iv):
 		}
 	}
 }
 
-// PollSource reads one device and stores its row (exported for tests through PollOnce).
-func (r *Relay) PollSource(ctx context.Context, s relaySource, timeout time.Duration) {
+// pauseFor waits d, or until ctx ends: then it reports false.
+func pauseFor(ctx context.Context, d time.Duration) bool {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-t.C:
+		return true
+	}
+}
+
+// PollSource reads one device and stores its row (exported for tests through PollOnce). It returns the error
+// of the reading, nil when the device answered.
+func (r *Relay) PollSource(ctx context.Context, s relaySource, timeout time.Duration) error {
 	b := s.src.Info()
 	row := map[string]any{"id": b.ID, "name": b.DisplayName(), "type": b.Type, "ok": false, "watts": nil,
 		"voltage": nil, "current": nil, "energy_kwh_total": nil, "system_hint": nil, "error": nil}
@@ -171,6 +208,7 @@ func (r *Relay) PollSource(ctx context.Context, s relaySource, timeout time.Dura
 	r.mu.Lock()
 	r.rows[b.ID] = row
 	r.mu.Unlock()
+	return err
 }
 
 func (r *Relay) loopUPS(ctx context.Context, u *ups.Source) {
