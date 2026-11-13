@@ -82,8 +82,9 @@ poller and web API against this repository's agent handler.
 ## Versions
 
 Fairy-dashboard pins a tagged version of this module in its `go.mod` (and the hashes in its `go.sum`). A change
-to `pkg/` reaches the panel like this: commit and tag here (`git tag -a v0.2.1 -m v0.2.1`, push the commit and the
-tag), then in Fairy-dashboard run `go get github.com/n3ptune-cpu/Fairy-agent@v0.2.1 && go mod tidy`. Never move or
+to `pkg/` reaches the panel like this: commit and tag here (`git tag -a vX.Y.Z -m vX.Y.Z` with the new version's
+number, push the commit and the tag), then in Fairy-dashboard run
+`go get github.com/n3ptune-cpu/Fairy-agent@vX.Y.Z && go mod tidy`. Never move or
 re-create a tag that was pushed: Go's checksum database remembers the first contents it saw for each version.
 
 ## Map of the code

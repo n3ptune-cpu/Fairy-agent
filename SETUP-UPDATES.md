@@ -34,11 +34,13 @@ repositories and pull from them (this keeps your GitHub settings):
 Expand-Archive "$HOME\Downloads\fairy-agent-repo-v2.zip"     -DestinationPath E:\Projects\v2
 Expand-Archive "$HOME\Downloads\fairy-dashboard-repo-v2.zip" -DestinationPath E:\Projects\v2
 
+$tag = "v0.7.0"                            # EXAMPLE VALUE: the tag named in the delivery note
+
 cd E:\Projects\Fairy-agent
 git pull --ff-only E:\Projects\v2\Fairy-agent main
-git fetch E:\Projects\v2\Fairy-agent refs/tags/v0.6.0:refs/tags/v0.6.0
+git fetch E:\Projects\v2\Fairy-agent "refs/tags/${tag}:refs/tags/${tag}"
 git log --oneline -6                       # newest first; the old 5e2d90c is further down
-git rev-parse "v0.6.0^{commit}"            # must be the same as: git rev-parse HEAD
+git rev-parse "${tag}^{commit}"            # must be the same as: git rev-parse HEAD
 
 cd E:\Projects\Fairy-dashboard
 git pull --ff-only E:\Projects\v2\Fairy-dashboard main
@@ -48,8 +50,9 @@ git log --oneline -6                       # ee94dde further down
 If `git pull --ff-only` refuses, stop and ask (something was committed in between). If git says "detected
 dubious ownership", run the `git config --global --add safe.directory ...` line it suggests.
 
-The tag is the one named in the delivery note: `v0.6.0` for release 0.6.0. If the note names another tag, use
-that one in the commands of this part. **Do not change or re-make a tag that was pushed.** The dashboard's
+The tag is the one named in the delivery note (`v0.7.0` for release 0.7.0, and so on for later ones). Put it
+into `$tag` in the first line; the commands of this part use `$tag`, so run them in the same PowerShell window
+(in a new window, set `$tag` again first). **Do not change or re-make a tag that was pushed.** The dashboard's
 `go.sum` has a fingerprint of exactly that tag.
 
 ### 1.2 Make the key
@@ -130,7 +133,7 @@ cd E:\Projects\Fairy-agent
 git add release/signing.pub
 git commit -m "Release signing key"
 git push origin main
-git push origin v0.6.0
+git push origin $tag                       # the tag of 1.1 (a new window: set $tag again first)
 
 cd E:\Projects\Fairy-dashboard
 git add release/signing.pub
@@ -152,7 +155,7 @@ If a run is red:
 * "release/signing.pub is missing": step 1.4.
 * "the private key does not belong to release/signing.pub": the secret and the committed file come from
   different `gen` runs; paste the right key again (1.3).
-* the dashboard cannot download `github.com/n3ptune-cpu/Fairy-agent v0.6.0`: the tag was not pushed (1.4), or
+* the dashboard cannot download `github.com/n3ptune-cpu/Fairy-agent` at the tag of 1.1: the tag was not pushed (1.4), or
   wait a minute and press **Re-run jobs**.
 * "Resource not accessible by integration" when publishing: check that `.github/workflows/release.yml` still
   has `permissions:` with `contents: write`, then re-run. Leave the repository's **Settings** > **Actions** >
