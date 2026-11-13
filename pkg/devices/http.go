@@ -194,9 +194,13 @@ func DecodeJSON(body io.Reader, use func(map[string]any) error) error {
 	return use(out)
 }
 
-// GetJSON fetches a JSON object. auth: "" | "basic" | "digest". Any answer that is not 2xx is an error
+// GetJSON fetches a JSON object. auth: "" | "basic" | "digest" | "bearer". Any answer that is not 2xx is an error
 // ("http <code>"), a redirect included. The answer is limited as DecodeJSON describes. A caller that reads a
 // few values from it should use ReadJSON, which keeps only one decoded answer alive at a time.
+//
+// "bearer" sends pass as `Authorization: Bearer <pass>` (user is not used) with the one request there is. Like
+// a basic password it goes only to the address asked: no client of this package follows a redirect. Without a
+// pass no header is sent.
 func GetJSON(ctx context.Context, c *http.Client, rawURL, auth, user, pass string) (map[string]any, error) {
 	var out map[string]any
 	err := ReadJSON(ctx, c, rawURL, auth, user, pass, func(d map[string]any) error { out = d; return nil })
@@ -213,6 +217,9 @@ func ReadJSON(ctx context.Context, c *http.Client, rawURL, auth, user, pass stri
 		req.Header.Set("Accept", "application/json")
 		if auth == "basic" && pass != "" {
 			req.SetBasicAuth(user, pass)
+		}
+		if auth == "bearer" && pass != "" {
+			req.Header.Set("Authorization", "Bearer "+pass)
 		}
 		if hdr != "" {
 			req.Header.Set("Authorization", hdr)
