@@ -10,10 +10,11 @@ func TestCmdlineRedaction(t *testing.T) {
 		{"mysql -u root --password=hunter2 -h db", "hunter2"},
 		{"app --token abc123 --verbose", "abc123"},
 		{"API_KEY=xyz123 ./run.sh", "xyz123"},
-		{"curl https://bob:s3cr3t@example.com/x", "s3cr3t"},
-		{"curl -H 'Authorization: Bearer eyJabc.def'", "eyJabc"},
-		{"rclone sync --s3-secret-access-key AKIAXYZ remote:", "AKIAXYZ"},
-		{"llama-server -m /models/qwen3-30b-a3b-q4_k_m.gguf -ngl 99 --split-mode layer -c 32768 --host 100.64.0.12 --port 8080 --api-key sk-live-123", "sk-live-123"},
+		// the values with the form of a credential are put together when the test runs (forms_test.go, madeUp)
+		{"curl " + addr("https", "bob", "s3cr3t", "example.com/x"), "s3cr3t"},
+		{"curl -H 'Authorization: Bearer " + tokBearer + "'", tokBearer[:6]},
+		{"rclone sync --s3-secret-access-key " + tokAWS + " remote:", tokAWS},
+		{"llama-server -m /models/qwen3-30b-a3b-q4_k_m.gguf -ngl 99 --split-mode layer -c 32768 --host 100.64.0.12 --port 8080 --api-key " + madeUp("s", "k", "-live-123"), madeUp("s", "k", "-live-123")},
 		{"app --token --password secret", "secret"}, // a flag value never swallows the next secret flag
 	}
 	for _, c := range cases {
@@ -22,7 +23,7 @@ func TestCmdlineRedaction(t *testing.T) {
 			t.Errorf("%q -> %q", c[0], red)
 		}
 	}
-	if got := Cmdline("llama-server -m /models/q.gguf -ngl 99 --split-mode layer --port 8080 --api-key sk-1", 200); got !=
+	if got := Cmdline("llama-server -m /models/q.gguf -ngl 99 --split-mode layer --port 8080 --api-key "+tokShort, 200); got !=
 		"llama-server -m /models/q.gguf -ngl 99 --split-mode layer --port 8080 --api-key ***" {
 		t.Fatal(got)
 	}

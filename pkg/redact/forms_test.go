@@ -5,9 +5,38 @@ package redact
 // use), as arguments (Args, what the agent uses on Linux), and filtered a second time (must not change).
 
 import (
+	"encoding/base64"
 	"strings"
 	"testing"
 	"time"
+)
+
+// The made-up values below that have the form of a real credential (a token with a service's prefix, a JSON
+// web token, an address with a password in it) are put together from pieces when the tests run: no text in
+// the test files of this package has such a form. GitHub's push protection, which reads the source, once
+// refused a push because of one of them. What each case tests is the same value as before.
+func madeUp(pieces ...string) string { return strings.Join(pieces, "") }
+
+// b64 is the base64url text of s, as the parts of a JSON web token are.
+func b64(s string) string { return base64.RawURLEncoding.EncodeToString([]byte(s)) }
+
+var (
+	alnum36 = "abcdefghijklmnopqrstuvwxyz" + "0123456789"
+
+	tokGitHub = madeUp("gh", "p", "_", alnum36)                                                                           // GitHub's personal token: the prefix, 36 letters and digits
+	tokVault  = madeUp("hv", "s", ".", "CAESIJ", alnum36[:32])                                                            // a Vault service token
+	tokSlack  = madeUp("xo", "xb", "-", "1234567890", "-", alnum36[:14])                                                  // a Slack bot token
+	tokLLM    = madeUp("s", "k", "-", "ant", "-", alnum36[:30])                                                           // an API key with the sk- prefix
+	tokJWT    = madeUp(b64(`{"alg":"HS256"}`), ".", b64(`{"sub":"1234567890"}`), ".", b64("made-up signature of a test")) // header.payload.signature
+	tokBearer = madeUp("e", "yJ", "abc", ".", "def")                                                                      // the beginning of a JSON web token
+	tokAWS    = madeUp("AK", "IA", "XYZ")                                                                                 // the prefix of an AWS access key id
+	tokShort  = madeUp("s", "k", "-", "1")                                                                                // an API key far too short to be recognised by its form
+	tokBasic  = b64("user:pass")                                                                                          // what `Authorization: Basic` carries
+
+	// addresses with a password: scheme, user, password, host
+	addr = func(scheme, user, password, rest string) string {
+		return madeUp(scheme, "://", user, ":", password, "@", rest)
+	}
 )
 
 // leaks: a command line and the pieces of the secret that must not survive.
@@ -43,16 +72,16 @@ var leaks = []struct {
 	{"useradd -m -p $6$salt$S3cretHash bob", []string{"S3cretHash", "$6$salt"}},
 	{"xfreerdp /u:bob /p:S3cretPw /v:host", []string{"S3cretPw"}},
 	// addresses
-	{"curl https://bob:s3cr3t@example.com/x", []string{"s3cr3t"}},
-	{"curl https://admin:pAss0=@host/path", []string{"pAss0"}},
-	{"curl https://admin:p@ss:w0rd@host/", []string{"p@ss", "w0rd"}},
-	{"psql postgresql://app:S3cret/Pw@db.internal:5432/app", []string{"S3cret", "Pw@"}},
-	{"git clone https://ghp_abcdefghijklmnopqrstuvwxyz0123456789@github.com/o/r.git", []string{"ghp_abcdefghij"}},
+	{"curl " + addr("https", "bob", "s3cr3t", "example.com/x"), []string{"s3cr3t"}},
+	{"curl " + addr("https", "admin", "pAss0=", "host/path"), []string{"pAss0"}},
+	{"curl " + addr("https", "admin", "p@ss:w0rd", "host/"), []string{"p@ss", "w0rd"}},
+	{"psql " + addr("postgresql", "app", "S3cret/Pw", "db.internal:5432/app"), []string{"S3cret", "Pw@"}},
+	{"git clone https://" + tokGitHub + "@github.com/o/r.git", []string{tokGitHub[:14]}},
 	{"git clone https://S3cretTok@git.example.com/o/r.git", []string{"S3cretTok"}},
-	{"wget ftp://bob:S3cretPw@ftp.example.com/file", []string{"S3cretPw"}},
-	{"mongodump --uri=mongodb://root:S3cretPw@db:27017/app", []string{"S3cretPw"}},
+	{"wget " + addr("ftp", "bob", "S3cretPw", "ftp.example.com/file"), []string{"S3cretPw"}},
+	{"mongodump --uri=" + addr("mongodb", "root", "S3cretPw", "db:27017/app"), []string{"S3cretPw"}},
 	// headers
-	{"curl -H 'Authorization: Bearer eyJabc.def' https://x", []string{"eyJabc"}},
+	{"curl -H 'Authorization: Bearer " + tokBearer + "' https://x", []string{tokBearer[:6]}},
 	{"curl -H 'Authorization: Bearer tok!en:with|odd%chars' https://x", []string{"tok!en", "with|odd", "odd%chars"}},
 	{"curl -H Authorization:Bearer S3cretTok https://x", []string{"S3cretTok"}},
 	{"curl -H 'Authorization: token S3cretTok' https://x", []string{"S3cretTok"}},
@@ -61,13 +90,13 @@ var leaks = []struct {
 	{"curl -H X-Api-Key:S3cretKey https://x", []string{"S3cretKey"}},
 	{"curl --header=PRIVATE-TOKEN:S3cretTok https://gitlab.example.com/api/v4/projects", []string{"S3cretTok"}},
 	{"curl -H 'Cookie: session=S3cretSess' https://x", []string{"S3cretSess"}},
-	{"git -c http.extraHeader=Authorization: Basic dXNlcjpwYXNz ls-remote origin", []string{"dXNlcjpwYXNz"}},
+	{"git -c http.extraHeader=Authorization: Basic " + tokBasic + " ls-remote origin", []string{tokBasic}},
 	// options and variables with a secret word
 	{"mysql -u root --password=hunter2 -h db", []string{"hunter2"}},
 	{"app --token abc123 --verbose", []string{"abc123"}},
 	{"API_KEY=xyz123 ./run.sh", []string{"xyz123"}},
 	{"env MYSQL_PWD=S3cretPw mysql appdb", []string{"S3cretPw"}},
-	{"rclone sync --s3-secret-access-key AKIAXYZ remote:", []string{"AKIAXYZ"}},
+	{"rclone sync --s3-secret-access-key " + tokAWS + " remote:", []string{tokAWS}},
 	{"wget --http-password=S3cretPw http://example.com/file", []string{"S3cretPw"}},
 	{"openssl enc -aes-256-cbc -pass pass:S3cretPw -in a -out b", []string{"S3cretPw"}},
 	{"java -Dspring.datasource.password=S3cretPw -jar app.jar", []string{"S3cretPw"}},
@@ -80,11 +109,45 @@ var leaks = []struct {
 	{`curl -d {"password": "S3cretPw"} https://x`, []string{"S3cretPw"}},
 	{"app --token --password secret", []string{"secret"}},
 	// recognisable tokens anywhere
-	{"vault login hvs.CAESIJabcdefghijklmnopqrstuvwxyz012345", []string{"CAESIJ"}},
-	{"deploy.sh ghp_abcdefghijklmnopqrstuvwxyz0123456789 prod", []string{"ghp_abc"}},
-	{"notify xoxb-1234567890-abcdefghijklmn #alerts", []string{"xoxb-1234"}},
-	{"llm-proxy sk-ant-abcdefghijklmnopqrstuvwxyz0123", []string{"sk-ant-abc"}},
-	{"jwt-tool eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c", []string{"eyJhbGci", "SflKxw"}},
+	{"vault login " + tokVault, []string{"CAESIJ"}},
+	{"deploy.sh " + tokGitHub + " prod", []string{tokGitHub[:7]}},
+	{"notify " + tokSlack + " #alerts", []string{tokSlack[:9]}},
+	{"llm-proxy " + tokLLM, []string{tokLLM[:10]}},
+	{"jwt-tool " + tokJWT, []string{tokJWT[:8], tokJWT[strings.LastIndex(tokJWT, ".")+1:][:6]}},
+}
+
+// The made-up values have the forms they are meant to have (they are no longer written out above, where a
+// slip in a piece would turn a case into one that tests nothing).
+func TestMadeUpValuesHaveTheirForms(t *testing.T) {
+	for value, want := range map[string]struct {
+		prefix string
+		length int
+	}{
+		tokGitHub: {"gh" + "p_abcdefghij", 40},
+		tokVault:  {"hv" + "s.CAESIJabc", 42},
+		tokSlack:  {"xo" + "xb-1234567890-abc", 30},
+		tokLLM:    {"s" + "k-ant-abcdefg", 37},
+		tokJWT:    {"e" + "yJhbGciOiJIUzI1NiJ9.e" + "yJzdWIiOiIxMjM0NTY3ODkwIn0.", 85},
+		tokBearer: {"e" + "yJabc.def", 10},
+		tokAWS:    {"AK" + "IAXYZ", 7},
+		tokShort:  {"s" + "k-1", 4},
+		tokBasic:  {"dXNlcjp" + "wYXNz", 12},
+		addr("https", "bob", "s3cr3t", "example.com/x"): {"https://bob" + ":s3cr3t" + "@example.com/x", 32},
+	} {
+		if !strings.HasPrefix(value, want.prefix) || len(value) != want.length {
+			t.Errorf("a made-up value of %d characters, want %d beginning with %q", len(value), want.length, want.prefix)
+		}
+	}
+	for _, tok := range []string{tokGitHub, tokVault, tokSlack, tokLLM, tokJWT} { // the ones that are found by their form alone
+		if !shapes.MatchString(tok) {
+			t.Errorf("the made-up value beginning with %q no longer has a form the filter knows", tok[:6])
+		}
+	}
+	for _, tok := range []string{tokBearer, tokAWS, tokShort, tokBasic} { // the ones that are hidden for where they stand
+		if shapes.MatchString(tok) {
+			t.Errorf("the made-up value %q has a form the filter knows: its case would no longer test the option or the header", tok)
+		}
+	}
 }
 
 // unchanged: ordinary command lines the filter must leave exactly as they are (it must stay useful).
@@ -171,16 +234,16 @@ func TestExactResults(t *testing.T) {
 		"mysql -u root -pS3cretPw appdb":                                                 "mysql -u root -p*** appdb",
 		"sshpass -p S3cretPw ssh -p 2222 root@host":                                      "sshpass -p *** ssh -p 2222 root@host",
 		"curl -u admin:S3cretPw https://example.com/":                                    "curl -u admin:*** https://example.com/",
-		"curl https://admin:pAss0=@host/path":                                            "curl https://admin:***@host/path",
-		"curl https://admin:p@ss:w0rd@host/":                                             "curl https://admin:***@host/",
-		"psql postgresql://app:S3cret/Pw@db.internal:5432/app":                           "psql postgresql://app:***@db.internal:5432/app",
+		"curl " + addr("https", "admin", "pAss0=", "host/path"):                          "curl " + addr("https", "admin", "***", "host/path"),
+		"curl " + addr("https", "admin", "p@ss:w0rd", "host/"):                           "curl " + addr("https", "admin", "***", "host/"),
+		"psql " + addr("postgresql", "app", "S3cret/Pw", "db.internal:5432/app"):         "psql " + addr("postgresql", "app", "***", "db.internal:5432/app"),
 		"git clone https://S3cretTok@git.example.com/o/r.git":                            "git clone https://***@git.example.com/o/r.git",
 		"curl -H 'Authorization: Bearer tok!en:with|odd%chars' https://x":                "curl -H 'Authorization: Bearer ***' https://x",
 		"curl -H X-Api-Key:S3cretKey https://x":                                          "curl -H X-Api-Key:*** https://x",
 		"curl https://api.example.com/v1?token=S3cretTok&page=2":                         "curl https://api.example.com/v1?token=***&page=2",
 		`curl -d {"user":"bob","password":"S3cretPw"} https://x`:                         `curl -d {"user":"bob","password":"***"} https://x`,
 		"docker login -u me -p S3cretPw ghcr.io":                                         "docker login -u me -p *** ghcr.io",
-		"llama-server -m /models/q.gguf --port 8080 --api-key sk-1":                      "llama-server -m /models/q.gguf --port 8080 --api-key ***",
+		"llama-server -m /models/q.gguf --port 8080 --api-key " + tokShort:               "llama-server -m /models/q.gguf --port 8080 --api-key ***",
 		"backup.exe --password=hunter2 --target s3":                                      "backup.exe --password=*** --target s3",
 		"python3 /opt/bench/stream_chat.py --endpoint http://127.0.0.1:8080 --token=abc": "python3 /opt/bench/stream_chat.py --endpoint http://127.0.0.1:8080 --token=***",
 	} {

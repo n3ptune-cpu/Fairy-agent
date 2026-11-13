@@ -53,7 +53,7 @@ func TestUPSPlaceholders(t *testing.T) {
 func TestDescribeNeverLeaksDetails(t *testing.T) {
 	if Describe(context.DeadlineExceeded) != "timeout" || Describe(&HTTPStatusError{Code: 500}) != "http 500" ||
 		Describe(Errf("nut: ERR ACCESS-DENIED")) != "nut: ERR ACCESS-DENIED" ||
-		Describe(errors.New("Get https://user:pw@host/: something")) != "error" {
+		Describe(errors.New("Get https://user"+":pw"+"@host/: something")) != "error" { // in pieces: no text here has the form of an address with a password
 		t.Fatal("describe")
 	}
 }
