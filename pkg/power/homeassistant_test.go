@@ -655,7 +655,11 @@ func TestHomeAssistantTokenNeverLeaves(t *testing.T) {
 		_, srv := startHA(t, h)
 		s := haSource(t, srv.URL, map[string]any{"max_age_s": 60})
 		for i := 0; i < 2; i++ {
-			rs, err := s.Read(context.Background(), 300*time.Millisecond)
+			// a deadline of the reading's own: a source that does not keep its timeout fails here ("no answer
+			// in time" is then not given up in time, TestHomeAssistantGivesUpInTime) instead of waiting for ever
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			rs, err := s.Read(ctx, 300*time.Millisecond)
+			cancel()
 			check(name, rs, err)
 		}
 		srv.CloseClientConnections()
