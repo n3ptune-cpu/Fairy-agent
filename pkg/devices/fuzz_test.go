@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 )
 
 func reviewFinite(t *testing.T, what string, ps ...*float64) {
@@ -25,6 +26,9 @@ func FuzzDeviceJSON(f *testing.F) {
 	f.Add([]byte(`{"apower":1e308,"voltage":1e400,"aenergy":{"total":1e15}}`), 0)
 	f.Add([]byte(`{"emeters":[{"power":1,"total":1e300}],"meters":[{"power":2,"total":9e307}]}`), 1)
 	f.Add([]byte(`{"PowerControl":[{"PowerConsumedWatts":1e13}],"PowerSupplies":[{"LineInputVoltage":-1e13}]}`), 0)
+	f.Add([]byte(`{"state":"1e308","attributes":{"unit_of_measurement":"MW"},"last_reported":"2026-01-01T12:00:00+00:00"}`), 0)
+	f.Add([]byte(`{"state":"99999.9996","attributes":{"unit_of_measurement":"kW","device_class":"power"},"last_updated":"x"}`), 0)
+	f.Add([]byte(`{"state":"-0","attributes":{"device_class":"power"}}`), 0)
 	f.Fuzz(func(t *testing.T, raw []byte, channel int) {
 		var d map[string]any
 		dec := json.NewDecoder(bytes.NewReader(raw))
@@ -43,6 +47,17 @@ func FuzzDeviceJSON(f *testing.F) {
 		}
 		if w, v, err := ParseRedfishPower(d); err == nil {
 			all = append(all, Reading{Watts: w, Voltage: v})
+		}
+		// a Home Assistant state: with and without an age limit, never more than a plug can draw
+		for _, maxAge := range []time.Duration{0, time.Minute} {
+			if r, err := ParseHAState(d, maxAge, time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)); err == nil {
+				if r.Watts == nil || !(*r.Watts >= 0 && *r.Watts <= MaxHAWatts) {
+					t.Fatalf("%s: a Home Assistant reading of %v", raw, r.Watts)
+				}
+				all = append(all, r)
+			} else if _, fixed := err.(*Error); !fixed || strings.ContainsAny(err.Error(), "\"{}[]") {
+				t.Fatalf("%s: the reason is not one of the fixed texts: %v", raw, err)
+			}
 		}
 		for _, r := range all {
 			reviewFinite(t, string(raw), r.Watts, r.Voltage, r.Current, r.EnergyKWh)
