@@ -244,16 +244,7 @@ func Parse(data []byte, path string) (*Config, error) {
 // The agent's own variables (FAIRY_...) are never among them. Names are compared without regard to case, as
 // Windows does.
 func (c *Config) notNamedElsewhere(names []string) []string {
-	var used []string
-	for _, raws := range [][]map[string]any{c.PowerSources, c.UPS} {
-		for _, raw := range raws {
-			for k, v := range raw {
-				if s, ok := v.(string); ok && strings.HasSuffix(k, "_env") {
-					used = append(used, s)
-				}
-			}
-		}
-	}
+	used := c.deviceSecretEnv()
 	used = append(used, c.IPMI.PasswordEnv)
 	for _, t := range c.BMCRelay.Targets {
 		used = append(used, t.PasswordEnv)
@@ -266,6 +257,23 @@ func (c *Config) notNamedElsewhere(names []string) []string {
 		out = append(out, n)
 	}
 	return out
+}
+
+// deviceSecretEnv are the environment variables that the power_sources and ups entries name for their secrets:
+// the value of every member that ends in "_env" (password_env, token_env). Only names: no value is read.
+func (c *Config) deviceSecretEnv() []string {
+	var names []string
+	for _, raws := range [][]map[string]any{c.PowerSources, c.UPS} {
+		for _, raw := range raws {
+			for k, v := range raw {
+				if s, ok := v.(string); ok && s != "" && strings.HasSuffix(k, "_env") {
+					names = append(names, s)
+				}
+			}
+		}
+	}
+	slices.Sort(names)
+	return slices.Compact(names)
 }
 
 // UnusedSecret reports whether name is an environment variable that only an ignored entry of config.yaml named

@@ -95,6 +95,11 @@ type Build struct {
 // test reads the source to keep it so). It must run before a transport is built (IPMITransport copies the
 // environment for ipmitool then).
 //
+// A device secret need not be in env_file: the service's own environment can hold it (systemd's Environment=,
+// a variable of the Windows service). So every variable that a power_sources or ups entry names in a member
+// ending in "_env" (password_env, token_env) is hidden as well, wherever its value came from, and so is one
+// that only an ignored entry named.
+//
 // A secret that only an ignored entry of config.yaml named (the local key of a Tuya plug, which this version no
 // longer reads) is not loaded at all: the agent does not keep in its environment what it has no use for. The
 // line stays in env_file until the owner removes it; the start log and check-config name the variable.
@@ -104,6 +109,8 @@ func loadSecrets(cfg *Config) error {
 		return err
 	}
 	collect.HideEnv(names...)
+	collect.HideEnv(cfg.deviceSecretEnv()...)
+	collect.HideEnv(cfg.unusedEnv...)
 	for _, t := range cfg.BMCRelay.Targets {
 		collect.HideEnv(t.PasswordEnv)
 	}
