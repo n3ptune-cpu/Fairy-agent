@@ -1024,6 +1024,15 @@ power_sources:
     # system_hint: self                    # as for every plug, see above
 ```
 
+On Windows, write the path of `ca_file` without quotes or in single quotes. In double quotes a backslash
+begins a YAML escape, and the agent does not start (`found unknown escape character`):
+
+```yaml
+    ca_file: C:\ProgramData\fairy-agent\ha.pem       # good
+    ca_file: 'C:\ProgramData\fairy-agent\ha.pem'     # good
+    # ca_file: "C:\ProgramData\fairy-agent\ha.pem"   # a YAML error: not in double quotes
+```
+
 > **A Home Assistant token is never read-only.** Home Assistant's tokens carry no limits: a long-lived
 > access token is the user it was made for. Also a user that is *not* an administrator can switch every
 > plug, light and lock of that Home Assistant, so whoever holds the token can control everything in it.
@@ -1068,7 +1077,9 @@ Setting it up:
    Proxmox node). The panel needs no update for this type; its Power page shows the type as `homeassistant`.
 
 An agent up to 0.7.0 does not know this type and does not start with such an entry (`unknown type`): update
-the agent first, then add the entry.
+the agent first, then add the entry. The other way round as well: before you put an agent of 0.7.0 or older
+back on this machine (an older installer, Re-pair from a panel that still installs the older agent), take
+the entry out of `config.yaml` first. The older agent does not start with it.
 
 What exactly is sent: for every reading one `GET <url>/api/states/<entity>` with the header
 `Authorization: Bearer <the token>`, to the address in `url` only. A redirect is not followed. With an
