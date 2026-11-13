@@ -27,7 +27,7 @@ type HomeAssistantConfig struct {
 	URL      string  `yaml:"url"`       // http://192.168.1.10:8123: Home Assistant itself, nothing after the port
 	TokenEnv string  `yaml:"token_env"` // the environment variable that holds the long-lived access token
 	Entity   string  `yaml:"entity"`    // sensor.desk_plug_power: the power sensor's entity id
-	MaxAgeS  float64 `yaml:"max_age_s"` // 0 (default): not checked; else a value reported longer ago is no reading
+	MaxAgeS  float64 `yaml:"max_age_s"` // 0 (default): not checked; else (1 s to a week) a value reported longer ago is no reading
 	CAFile   string  `yaml:"ca_file"`   // https only: the certificate (or its CA) Home Assistant must show
 }
 
@@ -232,8 +232,10 @@ func buildHomeAssistant(raw map[string]any) (Source, error) {
 	if strings.HasPrefix(strings.ToUpper(c.TokenEnv), "FAIRY_") {
 		return nil, fmt.Errorf("power source %s: token_env must not be one of Fairy's own variables (a name that begins with FAIRY_): what such a variable holds is not for Home Assistant", c.ID)
 	}
-	if !(c.MaxAgeS >= 0 && c.MaxAgeS <= maxHAAgeS) { // "not inside": .nan fails too
-		return nil, fmt.Errorf("power source %s: max_age_s must be 0 (not checked) to %d s", c.ID, maxHAAgeS)
+	// 0 or at least a second: a fraction of a second is not an age any plug's value can keep to (Home Assistant
+	// hears from a plug every 10 to 60 s), so it would only ever show "older than max_age_s".
+	if !(c.MaxAgeS == 0 || c.MaxAgeS >= 1 && c.MaxAgeS <= maxHAAgeS) { // "not inside": .nan fails too
+		return nil, fmt.Errorf("power source %s: max_age_s must be 0 (not checked) or 1 to %d s", c.ID, maxHAAgeS)
 	}
 	s := &homeAssistant{c: c, addr: addr, host: host, maxAge: time.Duration(c.MaxAgeS * float64(time.Second))}
 	https := strings.HasPrefix(addr, "https://")

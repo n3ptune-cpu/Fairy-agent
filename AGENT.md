@@ -1018,7 +1018,7 @@ power_sources:
     url: "http://192.168.1.10:8123"        # Home Assistant itself: http(s)://host[:port], nothing after it
     token_env: HA_TOKEN                    # the NAME of the variable in env_file, never the token itself
     entity: sensor.desk_plug_power         # the plug's power sensor; only an id that begins with "sensor." is accepted
-    # max_age_s: 900                       # a value Home Assistant last got longer ago is no reading (0, the default: not checked)
+    # max_age_s: 900                       # a value Home Assistant last got longer ago is no reading (0, the default: not checked; else 1 to 604800)
     # interval: 10                         # seconds between two readings (default 10, never below 5)
     # ca_file: /etc/fairy-agent/ha.pem     # https only: the certificate Home Assistant shows, or its CA
     # system_hint: self                    # as for every plug, see above
@@ -1085,7 +1085,7 @@ off. The token is never logged, never part of an error message and never sent to
 | `home assistant: the sensor is unavailable` / `... state is unknown` | Home Assistant has no value: the plug does not answer it, or it has just started |
 | `home assistant: the sensor's state is not a number` | the entity is not a measurement |
 | `home assistant: the sensor's unit is not a unit of power (W, mW, kW, MW)` / `... has no unit and is not a power sensor` | the wrong entity (energy, voltage, ...). A sensor without a unit is read as watts only when its device class is `power` |
-| `home assistant: the sensor's value is not a possible power (0 to 100000 W)` | negative or over 100 kW |
+| `home assistant: the sensor's value is not a possible power (0 to 100000 W)` | -1 W or less, or over 100 kW. A value between -1 W and 0, which some plugs report when nothing is drawn, is shown as 0 W |
 | `home assistant: the sensor's value is older than max_age_s` / `... has no time (max_age_s is set)` | only with `max_age_s`, see below |
 | `power source desk-plug: env var HA_TOKEN is missing ...` | the token is not in `env_file` (step 3), or the agent was not restarted |
 | `timeout`, `connection failed`, `tls verification failed`, `http 500` | as for every plug |

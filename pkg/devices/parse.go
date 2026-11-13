@@ -92,7 +92,11 @@ var haWatts = map[string]float64{"mW": 0.001, "W": 1, "kW": 1000, "MW": 1e6}
 //     which a number parser would take.
 //   - The unit is attributes.unit_of_measurement: W, mW, kW or MW, converted to watts. Without a unit the
 //     number counts as watts only when attributes.device_class is "power". Any other unit is no reading.
-//   - A negative number and one over MaxHAWatts are no reading.
+//   - The number, converted to watts, must be a possible power of a plug: over MaxHAWatts it is no reading, and
+//     so is -1 W and everything below. A value between -1 W and 0 is read as 0 W: a plug that measures nothing
+//     reports such noise around zero (-0.3 W at standby), and that is a reading of zero, not a fault. The range
+//     is checked on the converted number before it is rounded, so 100.0000004 kW is over the limit and is not
+//     rounded into it.
 //   - maxAge > 0: the state must have been written at most that long before now. The time is last_reported,
 //     which Home Assistant renews whenever the integration writes the state again, also with the same value;
 //     an answer without it (an older Home Assistant) is judged by last_updated, which only moves when the
@@ -129,16 +133,17 @@ func ParseHAState(d map[string]any, maxAge time.Duration, now time.Time) (Readin
 	default:
 		return Reading{}, Errf("home assistant: the sensor's unit is not a unit of power (W, mW, kW, MW)")
 	}
-	w := &v
-	if factor != 1 {
-		w = numRound(v*factor, 3)
-	}
-	if w == nil || !(*w >= 0 && *w <= MaxHAWatts) {
+	watts := v * factor
+	if !(watts > -1 && watts <= MaxHAWatts) { // "not inside": an infinity from the conversion fails too
 		return Reading{}, Errf("home assistant: the sensor's value is not a possible power (0 to 100000 W)")
 	}
-	if *w == 0 {
-		*w = 0 // "-0" is zero
+	switch {
+	case watts <= 0:
+		watts = 0 // noise below zero, and "-0", are zero
+	case factor != 1:
+		watts = round(watts, 3) // inside the range before, so inside it after
 	}
+	w := &watts
 	if maxAge > 0 {
 		at, ok := haTime(d["last_reported"])
 		if !ok {

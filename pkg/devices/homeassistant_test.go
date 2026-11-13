@@ -113,18 +113,41 @@ func TestParseHAStateUnitsAndNumbers(t *testing.T) {
 		"only a sign":                {`"-"`, haAttrs("W"), 0, haNotNumber},
 		"a very long text of digits": {`"` + strings.Repeat("9", 65) + `"`, haAttrs("W"), 0, haNotNumber},
 		// numbers that are no power of a plug
-		"negative":                 {`"-5"`, haAttrs("W"), 0, haRange},
-		"slightly negative":        {`"-0.001"`, haAttrs("W"), 0, haRange},
-		"negative kilowatts":       {`"-0.2"`, haAttrs("kW"), 0, haRange},
-		"exactly 100 kW":           {`"100000"`, haAttrs("W"), 100000, ""},
-		"100 kW in megawatts":      {`"0.1"`, haAttrs("MW"), 100000, ""},
-		"just over 100 kW":         {`"100000.1"`, haAttrs("W"), 0, haRange},
-		"over 100 kW in kilowatts": {`"101"`, haAttrs("kW"), 0, haRange},
-		"a meter's megawatts":      {`"3"`, haAttrs("MW"), 0, haRange},
-		"1e12":                     {`"1e12"`, haAttrs("W"), 0, haRange},
-		"1e308":                    {`"1e308"`, haAttrs("W"), 0, haNotNumber}, // not a number a device can have measured
-		"1e308 megawatts":          {`"1e307"`, haAttrs("MW"), 0, haNotNumber},
-		"a huge number, converted": {`"9e11"`, haAttrs("MW"), 0, haRange},
+		"negative":             {`"-5"`, haAttrs("W"), 0, haRange},
+		"negative kilowatts":   {`"-0.2"`, haAttrs("kW"), 0, haRange},
+		"exactly 100 kW":       {`"100000"`, haAttrs("W"), 100000, ""},
+		"100 kW in kilowatts":  {`"100"`, haAttrs("kW"), 100000, ""},
+		"100 kW in megawatts":  {`"0.1"`, haAttrs("MW"), 100000, ""},
+		"100 kW in milliwatts": {`"1e8"`, haAttrs("mW"), 100000, ""},
+		"just over 100 kW":     {`"100000.1"`, haAttrs("W"), 0, haRange},
+		// the range is checked before the rounding: a number over the limit is not rounded into it
+		"a hair over 100 kW":               {`"100000.0001"`, haAttrs("W"), 0, haRange},
+		"a hair over 100 kW, in kilowatts": {`"100.0000004"`, haAttrs("kW"), 0, haRange}, // rounded to three places: 100000
+		"a hair over 100 kW, in megawatts": {`"0.1000000001"`, haAttrs("MW"), 0, haRange},
+		"a hair over, in milliwatts":       {`"100000000.4"`, haAttrs("mW"), 0, haRange},
+		"a hair under 100 kW":              {`"99.9999996"`, haAttrs("kW"), 100000, ""}, // inside the range, then rounded
+		// noise below zero is zero: over -1 W. From -1 W down it is no reading
+		"noise below zero":                 {`"-0.001"`, haAttrs("W"), 0, ""},
+		"standby noise":                    {`"-0.3"`, haAttrs("W"), 0, ""},
+		"nearly -1 W":                      {`"-0.999"`, haAttrs("W"), 0, ""},
+		"noise in milliwatts":              {`"-0.4"`, haAttrs("mW"), 0, ""},
+		"nearly -1 W in milliwatts":        {`"-999"`, haAttrs("mW"), 0, ""},
+		"noise in kilowatts":               {`"-0.0009"`, haAttrs("kW"), 0, ""},
+		"nearly -1 W in kilowatts":         {`"-0.0009996"`, haAttrs("kW"), 0, ""}, // -1 W when rounded to three places first
+		"noise, no unit":                   {`"-0.5"`, `{"device_class":"power"}`, 0, ""},
+		"exactly -1 W":                     {`"-1"`, haAttrs("W"), 0, haRange},
+		"exactly -1 W in milliwatts":       {`"-1000"`, haAttrs("mW"), 0, haRange},
+		"exactly -1 W in kilowatts":        {`"-0.001"`, haAttrs("kW"), 0, haRange},
+		"a hair under -1 W":                {`"-1.0001"`, haAttrs("W"), 0, haRange},
+		"a hair under -1 W, in milliwatts": {`"-1000.4"`, haAttrs("mW"), 0, haRange}, // -1.0004 W
+		"-1 MW":                            {`"-0.000001"`, haAttrs("MW"), 0, haRange},
+		"feeding in":                       {`"-120"`, haAttrs("W"), 0, haRange},
+		"over 100 kW in kilowatts":         {`"101"`, haAttrs("kW"), 0, haRange},
+		"a meter's megawatts":              {`"3"`, haAttrs("MW"), 0, haRange},
+		"1e12":                             {`"1e12"`, haAttrs("W"), 0, haRange},
+		"1e308":                            {`"1e308"`, haAttrs("W"), 0, haNotNumber}, // not a number a device can have measured
+		"1e308 megawatts":                  {`"1e307"`, haAttrs("MW"), 0, haNotNumber},
+		"a huge number, converted":         {`"9e11"`, haAttrs("MW"), 0, haRange},
 	} {
 		r, err := ParseHAState(haState(t, c.state, c.attributes, ""), 0, haNow)
 		if c.reason != "" {
