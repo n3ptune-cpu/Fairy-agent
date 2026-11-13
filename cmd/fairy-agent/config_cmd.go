@@ -42,10 +42,40 @@ func checkConfigCmd(cfgPath string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	fmt.Fprintln(stdout, "config OK:", cfgPath)
+	for _, l := range sourceLines(cfg) {
+		fmt.Fprintln(stdout, l)
+	}
 	for _, n := range configNotes(cfg) {
 		fmt.Fprintln(stdout, n)
 	}
 	return 0
+}
+
+// sourceLines are check-config's lines for the relayed power sources that read with a token (type
+// homeassistant): the source's id, its type, the host it asks, the sensor, and whether the token is there, as
+//
+//	power source "desk-plug": homeassistant, host 192.168.1.10:8123 (http), sensor.desk_plug_power, token: present (HA_TOKEN)
+//	power source "desk-plug": homeassistant, host 192.168.1.10:8123 (http), sensor.desk_plug_power, token: missing (HA_TOKEN is not set: fairy-agent secret set HA_TOKEN, then restart the agent)
+//
+// "present" means the variable named by token_env has a value, in env_file (checkConfig has loaded it into this
+// process) or in the environment check-config was started in. The token is not read, shown or tried: whether
+// Home Assistant accepts it shows in the panel ("home assistant refused the token"). A missing token is not a
+// config problem and not an exit code, as a plug's missing password is not: the agent starts, and the source
+// says "env var ... is missing".
+func sourceLines(cfg *agent.Config) []string {
+	relay, err := agent.NewRelay(cfg.PowerSources, cfg.UPS)
+	if err != nil { // checkConfig has said so
+		return nil
+	}
+	var lines []string
+	for _, c := range relay.Checks() {
+		token := "present (" + c.SecretEnv + ")"
+		if !c.SecretSet {
+			token = "missing (" + c.SecretEnv + " is not set: fairy-agent secret set " + c.SecretEnv + ", then restart the agent)"
+		}
+		lines = append(lines, fmt.Sprintf("power source %q: %s, host %s (%s), %s, token: %s", c.ID, c.Type, c.Host, c.Scheme, c.Reads, token))
+	}
+	return lines
 }
 
 // configNotes are what check-config says about a config that loads but will not do what its owner expects.

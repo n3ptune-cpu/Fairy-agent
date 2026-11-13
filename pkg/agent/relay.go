@@ -61,6 +61,21 @@ func NewRelay(sources, upsCfg []map[string]any) (*Relay, error) {
 	return r, nil
 }
 
+// Checks are the config check's facts about the relayed power sources that read with a secret (homeassistant:
+// the host, the sensor, the token's variable and whether it is set), in config order. Never a secret.
+func (r *Relay) Checks() []power.Check {
+	var out []power.Check
+	if r == nil {
+		return out
+	}
+	for _, s := range r.sources {
+		if c, ok := s.src.(power.Checker); ok {
+			out = append(out, c.Check())
+		}
+	}
+	return out
+}
+
 // Empty reports whether nothing is configured.
 func (r *Relay) Empty() bool { return r == nil || (len(r.sources) == 0 && len(r.upses) == 0) }
 
