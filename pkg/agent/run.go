@@ -98,7 +98,7 @@ type Build struct {
 // A device secret need not be in env_file: the service's own environment can hold it (systemd's Environment=,
 // a variable of the Windows service). So every variable that a power_sources or ups entry names in a member
 // ending in "_env" (password_env, token_env) is hidden as well, wherever its value came from, and so is one
-// that only an ignored entry named.
+// that only an ignored entry named (HideDeviceSecrets).
 //
 // A secret that only an ignored entry of config.yaml named (the local key of a Tuya plug, which this version no
 // longer reads) is not loaded at all: the agent does not keep in its environment what it has no use for. The
@@ -109,6 +109,20 @@ func loadSecrets(cfg *Config) error {
 		return err
 	}
 	collect.HideEnv(names...)
+	HideDeviceSecrets(cfg)
+	return nil
+}
+
+// HideDeviceSecrets hides from every program this process starts (collect.HideEnv) the variables that
+// config.yaml names for a device's secret: every member ending in "_env" of a power_sources or ups entry
+// (password_env, token_env), the one that only an ignored entry named, the passwords of the BMC relay's
+// targets and ipmi.password_env. Only names: it reads no file and no value, and the variables stay in this
+// process's own environment.
+//
+// The agent calls it through loadSecrets. The Windows helper (pkg/helper) reads the same config.yaml, never
+// env_file, and starts PowerShell for the BMC: a device secret kept as a variable of the whole machine is in
+// the helper's environment too, so the helper calls this before it builds anything.
+func HideDeviceSecrets(cfg *Config) {
 	collect.HideEnv(cfg.deviceSecretEnv()...)
 	collect.HideEnv(cfg.unusedEnv...)
 	for _, t := range cfg.BMCRelay.Targets {
@@ -117,7 +131,6 @@ func loadSecrets(cfg *Config) error {
 	if cfg.IPMI.PasswordEnv != "" {
 		collect.HideEnv(cfg.IPMI.PasswordEnv)
 	}
-	return nil
 }
 
 // Run starts every part of the agent and serves until ctx ends.

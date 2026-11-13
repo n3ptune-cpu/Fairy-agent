@@ -79,7 +79,13 @@ func New(p Parts) *Server {
 // FromConfig builds the parts config.yaml switches on: Core Temp (sensors.coretemp), IPMI through Windows
 // (ipmi.enabled with transport wmi) and fan control, power control and self-update. The returned close function
 // stops the IPMI transport.
+//
+// Before anything is built, the variables config.yaml names for a device's secret are hidden from the programs
+// the helper starts (agent.HideDeviceSecrets), as the agent hides them: the helper does not read env_file, but
+// a secret kept as a variable of the whole machine is in its environment too, and PowerShell (IPMI through
+// Windows) would get it.
 func FromConfig(cfg *agent.Config, version string, audit *slog.Logger) (Parts, func(), error) {
+	agent.HideDeviceSecrets(cfg)
 	p := Parts{Version: version, Audit: audit}
 	p.Approval = approval.NewGate(approval.Options{Files: agent.ApprovalFiles(cfg), EnforcedBy: api.EnforcedByHelper,
 		Uptime: agent.SystemUptime, BootID: agent.SystemBootID, Log: audit})
