@@ -30,7 +30,7 @@ func DecodeStrict(raw map[string]any, out any) error {
 }
 
 // Types are the built-in `type:` values of power_sources entries.
-var Types = []string{"agent", "ipmi", "nut", "redfish", "shelly", "tasmota"}
+var Types = []string{"agent", "homeassistant", "ipmi", "nut", "redfish", "shelly", "tasmota"}
 
 // Removed are `type:` values that earlier versions read and this one does not (tuya, the plugs' local protocol:
 // nobody had set one up). A config file that still has such an entry must never stop the agent or
@@ -179,6 +179,8 @@ func Build(raw map[string]any, agentPower AgentPowerFn) (Source, error) {
 		return buildNut(decode)
 	case "redfish", "ipmi":
 		return buildRedfish(decode)
+	case "homeassistant":
+		return buildHomeAssistant(decode)
 	case "agent":
 		return buildAgentPower(decode, agentPower)
 	}

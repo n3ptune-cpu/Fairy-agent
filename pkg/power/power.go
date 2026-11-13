@@ -56,6 +56,20 @@ type Source interface {
 	Close()
 }
 
+// Check is what a config check may show of a source that reads with a secret: where it reads, what, and
+// whether the secret is there. It never holds the secret, only the name of the variable it is kept in.
+type Check struct {
+	ID, Type  string
+	Scheme    string // http or https
+	Host      string // host[:port]
+	Reads     string // what is read there (homeassistant: the sensor's entity id)
+	SecretEnv string // the environment variable the source takes its secret from
+	SecretSet bool   // that variable is set (in the environment of whoever asks)
+}
+
+// Checker is a Source that has a Check (today: homeassistant).
+type Checker interface{ Check() Check }
+
 type defaults struct{}
 
 func (defaults) DefaultInterval() float64 { return 2 }

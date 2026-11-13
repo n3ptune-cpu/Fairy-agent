@@ -1,8 +1,8 @@
 package power
 
 // Audit 4, T-02: what one answer of a configured power source may cost, for every source type that reads JSON
-// over HTTP (tasmota, shelly Gen1 and Gen2, redfish / ipmi). The shapes are the ones of the auditors' and
-// verifiers' proofs; the limits themselves are tested in pkg/devices.
+// over HTTP (tasmota, shelly Gen1 and Gen2, redfish / ipmi, and homeassistant since it exists). The shapes are
+// the ones of the auditors' and verifiers' proofs; the limits themselves are tested in pkg/devices.
 
 import (
 	"bytes"
@@ -30,7 +30,8 @@ const (
 )
 
 // goodHead opens an answer that every source type reads as 5 W.
-const goodHead = `{"apower":5,"StatusSNS":{"ENERGY":{"Power":5}},"meters":[{"power":5}],"PowerControl":[{"PowerConsumedWatts":5}],"x":[`
+const goodHead = `{"apower":5,"StatusSNS":{"ENERGY":{"Power":5}},"meters":[{"power":5}],"PowerControl":[{"PowerConsumedWatts":5}],` +
+	`"state":"5","attributes":{"unit_of_measurement":"W"},"x":[`
 
 func chainOf(open, leaf, shut string, depth int) string {
 	return strings.Repeat(open, depth) + leaf + strings.Repeat(shut, depth)
@@ -89,14 +90,16 @@ func jsonSources(t *testing.T, dev *device) map[string]Source {
 	bmc := httptest.NewTLSServer(dev)
 	t.Cleanup(bmc.Close)
 	t.Setenv("FAIRY_TEST_BMC_PASSWORD", "bmc-password")
+	t.Setenv(haTokenEnv, fakeHAToken())
 	out := map[string]Source{}
 	for name, cfg := range map[string]map[string]any{
-		"tasmota":     {"id": "p", "type": "tasmota", "url": plain.URL},
-		"shelly gen2": {"id": "p", "type": "shelly", "url": plain.URL, "gen": "2"},
-		"shelly gen1": {"id": "p", "type": "shelly", "url": plain.URL, "gen": "1"},
-		"shelly auto": {"id": "p", "type": "shelly", "url": plain.URL},
-		"redfish":     {"id": "p", "type": "redfish", "url": bmc.URL, "password_env": "FAIRY_TEST_BMC_PASSWORD", "verify_tls": false},
-		"ipmi":        {"id": "p", "type": "ipmi", "url": bmc.URL, "password_env": "FAIRY_TEST_BMC_PASSWORD", "verify_tls": false},
+		"tasmota":       {"id": "p", "type": "tasmota", "url": plain.URL},
+		"shelly gen2":   {"id": "p", "type": "shelly", "url": plain.URL, "gen": "2"},
+		"shelly gen1":   {"id": "p", "type": "shelly", "url": plain.URL, "gen": "1"},
+		"shelly auto":   {"id": "p", "type": "shelly", "url": plain.URL},
+		"redfish":       {"id": "p", "type": "redfish", "url": bmc.URL, "password_env": "FAIRY_TEST_BMC_PASSWORD", "verify_tls": false},
+		"ipmi":          {"id": "p", "type": "ipmi", "url": bmc.URL, "password_env": "FAIRY_TEST_BMC_PASSWORD", "verify_tls": false},
+		"homeassistant": {"id": "p", "type": "homeassistant", "url": plain.URL, "token_env": haTokenEnv, "entity": "sensor.p_power"},
 	} {
 		s, err := Build(cfg, nil)
 		if err != nil {
@@ -196,18 +199,29 @@ func TestLargeHonestAnswers(t *testing.T) {
 	shellyGen2 := `{"id":0,"source":"init","output":true,"apower":95.5,"voltage":229.8,"freq":50.0,"current":0.41,"pf":0.98,
 		"aenergy":{"total":12000.0,"by_minute":[1591.2,1590.8,1592.1],"minute_ts":1767268800},
 		"ret_aenergy":{"total":0.0,"by_minute":[0.0,0.0,0.0],"minute_ts":1767268800},"temperature":{"tC":41.3,"tF":106.3}}`
+	// a Home Assistant state object of a plug's power sensor from an integration that hangs everything it knows
+	// on every entity (the REST API page's sample has four attributes)
+	haState := `{"entity_id":"sensor.desk_plug_power","state":"41.7","attributes":{"state_class":"measurement",
+		"unit_of_measurement":"W","device_class":"power","friendly_name":"Desk plug Power","icon":"mdi:flash","suggested_display_precision":1,
+		"attribution":"Data provided by the plug","restored":false,"supported_features":0,"voltage":229.8,"current":0.19,"current_consumption":41.7,
+		"today_energy_kwh":0.512,"total_energy_kwh":123.456,"overheated":false,"signal_level":3,"rssi":-58,"ssid":"home","mac":"AA:BB:CC:DD:EE:FF",
+		"model":"Smart plug with metering","firmware":"1.2.3","options":["a","b","c"],"raw":{"dps":{"1":true,"9":0,"18":190,"19":417,"20":2298,"21":1,
+		"22":610,"23":30636,"24":17362,"25":2460,"26":0,"38":"memory","41":"","42":"","46":true}}},
+		"last_changed":"2026-01-01T11:59:40.123456+00:00","last_reported":"2026-01-01T11:59:58.123456+00:00",
+		"last_updated":"2026-01-01T11:59:40.123456+00:00","context":{"id":"ctx-1","parent_id":null,"user_id":null}}`
 	for name, c := range map[string]struct {
 		body                 string
 		source               string
 		watts, volts, kwh    float64
 		minBytes, minMembers int
 	}{
-		"tasmota, three phases": {tasmota, "tasmota", 300, 690, 7037.034, 600, 40},
-		"shelly 3EM (Gen1)":     {shellyGen1, "shelly gen1", 100.5, 230.1, 250.0005, 1200, 70},
-		"shelly Plus (Gen2)":    {shellyGen2, "shelly gen2", 95.5, 229.8, 12, 300, 20},
-		"shelly Plus (auto)":    {shellyGen2, "shelly auto", 95.5, 229.8, 12, 300, 20},
-		"BMC, large server":     {bigRedfishPower(4, 70), "redfish", 412, 232, 0, 60 << 10, 2000},
-		"BMC, the same (ipmi)":  {bigRedfishPower(4, 70), "ipmi", 412, 232, 0, 60 << 10, 2000},
+		"tasmota, three phases":  {tasmota, "tasmota", 300, 690, 7037.034, 600, 40},
+		"shelly 3EM (Gen1)":      {shellyGen1, "shelly gen1", 100.5, 230.1, 250.0005, 1200, 70},
+		"shelly Plus (Gen2)":     {shellyGen2, "shelly gen2", 95.5, 229.8, 12, 300, 20},
+		"shelly Plus (auto)":     {shellyGen2, "shelly auto", 95.5, 229.8, 12, 300, 20},
+		"BMC, large server":      {bigRedfishPower(4, 70), "redfish", 412, 232, 0, 60 << 10, 2000},
+		"BMC, the same (ipmi)":   {bigRedfishPower(4, 70), "ipmi", 412, 232, 0, 60 << 10, 2000},
+		"home assistant, a plug": {haState, "homeassistant", 41.7, 0, 0, 900, 50},
 	} {
 		dev := &device{body: []byte(c.body)}
 		s := jsonSources(t, dev)[c.source]
