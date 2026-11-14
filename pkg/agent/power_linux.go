@@ -19,6 +19,13 @@ import (
 // poweroff|reboot|suspend`). The agent's user needs permission for that: a polkit rule
 // (deploy/fairy-agent-power.polkit.rules), see AGENT.md. If the agent stops before the time comes, the action is
 // dropped (the safe direction).
+//
+// The same direction when the time comes late: the timer counts on a clock that stands still while the
+// machine sleeps (and while this process is stopped), so what was left of a countdown ran when the machine
+// woke, hours or days after the moment that was asked for and shown. When the timer fires, the system's uptime
+// (which goes on counting through sleep) is held against the uptime at which the action was due: more than
+// powerLate after it, the action is dropped and logged, and nothing is run. Where the uptime cannot be read,
+// nothing is held against anything, as before.
 type systemPower struct {
 	mu    sync.Mutex
 	timer *time.Timer
@@ -27,7 +34,12 @@ type systemPower struct {
 	ran string
 	// run runs `systemctl <verb>`; nil: the real one. Tests put their own in.
 	run func(path, verb string)
+	// uptime is the system's uptime; nil: SystemUptime. Tests put their own in.
+	uptime func() (time.Duration, error)
 }
+
+// powerLate is how long after its time the Linux power part still carries a delayed action out.
+const powerLate = 60 * time.Second
 
 // SystemPower returns the Linux implementation.
 func SystemPower() PowerExec { return &systemPower{} }
@@ -68,6 +80,14 @@ func (s *systemPower) Schedule(action string, delay time.Duration, _ string) err
 		s.timer.Stop()
 	}
 	s.ran = ""
+	uptime := s.uptime
+	if uptime == nil {
+		uptime = SystemUptime
+	}
+	due, dueKnown := time.Duration(0), false
+	if up, err := uptime(); err == nil {
+		due, dueKnown = up+delay, true
+	}
 	var t *time.Timer
 	t = time.AfterFunc(delay, func() {
 		// Either Cancel stopped this timer or it runs systemctl, never both: a Cancel that came in the moment
@@ -76,6 +96,14 @@ func (s *systemPower) Schedule(action string, delay time.Duration, _ string) err
 		s.mu.Lock()
 		if s.timer != t {
 			s.mu.Unlock()
+			return
+		}
+		if up, err := uptime(); dueKnown && err == nil && up >= due+powerLate {
+			// the machine slept, or this process stood still, over the moment: not now (see systemPower)
+			s.timer = nil
+			s.mu.Unlock()
+			slog.Warn("power: dropped, its time passed while this agent or the machine stood still; the machine stays on",
+				"verb", verb, "late_s", int((up-due)/time.Second))
 			return
 		}
 		s.ran = verb

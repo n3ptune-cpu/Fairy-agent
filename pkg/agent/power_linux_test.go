@@ -138,3 +138,49 @@ func TestLinuxCancelAndTheTimerNeverBothWin(t *testing.T) {
 	}
 	t.Logf("400 rounds: cancelled in time %d, too late %d", cancelled, late)
 }
+
+// The timer counts on a clock that stands still while the machine sleeps. What was left of a countdown ran
+// when the machine woke, hours after the moment that was asked for (for the self-off of a run: hours after the
+// notice said). Held against the uptime, which goes on through sleep: an action that is more than a minute
+// late is dropped, and the machine stays on (review of fd6d3be, T2).
+func TestLinuxTimerDropsAnActionWhoseTimePassedWhileTheMachineSlept(t *testing.T) {
+	for _, c := range []struct {
+		name  string
+		slept time.Duration // how much more than the delay the uptime moved until the timer fired
+		err   error
+		runs  int
+	}{
+		{"on time", 0, nil, 1},
+		{"59 s late", 59 * time.Second, nil, 1},
+		{"60 s late", 60 * time.Second, nil, 0},
+		{"the machine slept for 8 hours", 8 * time.Hour, nil, 0},
+		{"the uptime cannot be read: as before", 8 * time.Hour, errors.New("no /proc"), 1},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			s, log := linuxPower(t)
+			var mu sync.Mutex
+			up := 100 * time.Second
+			s.uptime = func() (time.Duration, error) { mu.Lock(); defer mu.Unlock(); return up, c.err }
+			const delay = 30 * time.Millisecond
+			if err := s.Schedule("shutdown", delay, ""); err != nil {
+				t.Fatal(err)
+			}
+			mu.Lock()
+			up += delay + c.slept
+			mu.Unlock()
+			for i := 0; i < 100 && log.count() == 0; i++ {
+				time.Sleep(5 * time.Millisecond)
+			}
+			if log.count() != c.runs {
+				t.Fatalf("systemctl was run %d times, want %d", log.count(), c.runs)
+			}
+			err := s.Cancel()
+			if c.runs == 0 && err != nil {
+				t.Fatalf("Cancel after a dropped action: %v", err)
+			}
+			if c.runs == 1 && !errors.Is(err, errTooLate) {
+				t.Fatalf("Cancel after the action ran: %v", err)
+			}
+		})
+	}
+}

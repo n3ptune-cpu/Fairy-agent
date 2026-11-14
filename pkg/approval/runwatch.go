@@ -36,8 +36,10 @@ type RunWatch struct {
 	h RunHooks
 	// mu makes "the wait is over: schedule the shutdown" and "cancel" one after the other: a cancel that comes
 	// while the shutdown is being scheduled waits, and then stops it.
-	mu      sync.Mutex
-	waiting bool // said once that the self-off waits for an update
+	mu sync.Mutex
+	// waitingFor is the run whose self-off this process put off at its time because an update was being
+	// installed ("": none). Only that run may still be switched off later than runOffGrace after its time.
+	waitingFor string
 }
 
 // NewRunWatch returns the watch of g's runs.
@@ -98,6 +100,16 @@ func RunNotice(name string, noticeS int) string {
 // RunUpdateWait at most). Then the shutdown is scheduled with the ticket's notice, once: from here on it is
 // the pending power action of this machine, shown and cancelled like any other. A machine that is still
 // running a minute after the countdown ended was kept on (`shutdown /a`): the run is over.
+//
+// A time that passed while nothing looked never ends in a late action. The ticket says "wait_s after the
+// arming", not "whenever the service next runs": this watch looks every second, so it finds the wait over more
+// than runOffGrace late only when it was not running at that moment (the service was stopped, which the
+// holder of the control token can do to the Windows helper; the machine slept, or was "shut down" with Fast
+// Startup, and the uptime went on counting). Then the run is disarmed for good and the machine stays on. The
+// one exception is the run this same process saw at its time and put off for an update; that one is switched
+// off when the update is done, RunUpdateWait after its time at the latest, and no later than runOffGrace
+// after that. The countdown itself is the power part's: Windows counts it down and is on time by itself; the
+// Linux agent's own timer drops an action whose time passed while it stood still (agent.systemPower).
 func (w *RunWatch) Tick() {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -107,8 +119,10 @@ func (w *RunWatch) Tick() {
 			w.g.o.Log.Error("approval: the countdown of a run that ended could not be stopped", "error", firstLine(err.Error()))
 		}
 	}
+	if r == nil || r.State != api.RunArmed || w.waitingFor != r.ID {
+		w.waitingFor = ""
+	}
 	if r == nil {
-		w.waiting = false
 		return
 	}
 	ms := func(n int64) time.Duration { return time.Duration(n) * time.Millisecond }
@@ -116,6 +130,11 @@ func (w *RunWatch) Tick() {
 	case api.RunArmed:
 		deadline := ms(r.ArmedUpMS) + time.Duration(r.WaitS)*time.Second
 		if up < deadline {
+			return
+		}
+		if late := up - deadline; late >= RunUpdateWait+runOffGrace || (late >= runOffGrace && w.waitingFor != r.ID) {
+			w.waitingFor = ""
+			w.g.DisarmRun("the wait ended " + late.Round(time.Second).String() + " ago while nothing looked (this service was not running, or the machine slept): no self-off now, the machine stays on")
 			return
 		}
 		if w.h.Shutdown == nil || (w.h.Pending != nil && w.h.Pending()) {
@@ -129,8 +148,8 @@ func (w *RunWatch) Tick() {
 			}
 		}
 		if w.h.Updating != nil && w.h.Updating() && up < deadline+RunUpdateWait {
-			if !w.waiting {
-				w.waiting = true
+			if w.waitingFor != r.ID {
+				w.waitingFor = r.ID
 				w.g.o.Log.Warn("approval: run self-off waits, an update is being installed", "run", r.ID)
 			}
 			return

@@ -748,6 +748,9 @@ func (g *Gate) runBeginOff(id string) bool {
 	if r == nil || r.ID != id || r.State != api.RunArmed || g.rs.dirty {
 		return false
 	}
+	if up.Milliseconds() >= r.ArmedUpMS+int64(r.WaitS)*1000+(RunUpdateWait+runOffGrace).Milliseconds() {
+		return false // never this late, whoever asks (RunWatch.Tick disarms such a run before it gets here)
+	}
 	r.State, r.OffUpMS = api.RunOffPending, max(up.Milliseconds(), r.ArmedUpMS, 1)
 	if err := g.runWrite(now, up); err != nil {
 		r.State, r.OffUpMS = api.RunArmed, 0
