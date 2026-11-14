@@ -85,7 +85,15 @@ const (
 	// Version3 only.
 	VerbChallenge = "challenge"  // a challenge for one exact fan_set, fan_mode, power or apply_update request, or for trust_init
 	VerbTrustInit = "trust_init" // the first trust, accepted only while the helper has none and with an approval that proves it
+	// Runs (api, "Runs"): the ticket and the confirmation of a wake / update / shutdown run. The helper checks
+	// both itself, keeps the run record, counts the wait and switches the PC off; the agent only carries them.
+	VerbRunArm = "run_arm" // a run ticket: an approval whose list holds a run_arm entry for this machine
+	VerbRunGo  = "run_go"  // a run confirmation: the run_go request and the approval of a challenge for it
 )
+
+// ForRunGo is the "for" of a challenge for a run confirmation (api.ApproveRunGo), with run, to,
+// shutdown_delay_s and within_s.
+const ForRunGo = api.ApproveRunGo
 
 // ForTrustSet is the "for" of a challenge for the first-time set of the trust (api.ApproveTrustSet): the
 // request that will follow is trust_init, and the challenge is bound to the hash of the trust it will propose
@@ -123,12 +131,19 @@ type Request struct {
 	Trust    *api.TrustInit `json:"trust,omitempty"`    // trust_init: the proposed trust with the approval that proves it
 	// TrustHash (challenge for trust_set): api.TrustHash of the trust that will be proposed.
 	TrustHash *string `json:"trust_hash,omitempty"`
+	// Run: on power (action shutdown) and apply_update, the id of the confirmed run that is to let the request
+	// through in the place of an approval; on run_go and a challenge for it, the run that is confirmed.
+	Run *string `json:"run,omitempty"`
+	// To, ShutdownDelayS, WithinS: the other members of a run_go request (run_go, and a challenge for it).
+	To             *string `json:"to,omitempty"`
+	ShutdownDelayS *int    `json:"shutdown_delay_s,omitempty"`
+	WithinS        *int    `json:"within_s,omitempty"`
 }
 
 // Control reports whether the verb changes something (the helper's control rate limit and audit log).
 func Control(verb string) bool {
 	switch verb {
-	case VerbFanSet, VerbFanMode, VerbFanAuto, VerbPower, VerbApplyUpdate, VerbChallenge, VerbTrustInit:
+	case VerbFanSet, VerbFanMode, VerbFanAuto, VerbPower, VerbApplyUpdate, VerbChallenge, VerbTrustInit, VerbRunArm, VerbRunGo:
 		return true
 	}
 	return false
@@ -140,10 +155,17 @@ var verbFields = map[string][]string{
 	VerbFanSet:      {"zone", "percent", "by", "approval"},
 	VerbFanMode:     {"mode", "by", "approval"},
 	VerbFanAuto:     {"by"},
-	VerbPower:       {"action", "delay_s", "by", "approval"},
-	VerbApplyUpdate: {"by", "approval"},
-	VerbChallenge:   {"for", "zone", "percent", "mode", "action", "delay_s", "trust_hash", "by"},
+	VerbPower:       {"action", "delay_s", "by", "approval", "run"},
+	VerbApplyUpdate: {"by", "approval", "run"},
+	VerbChallenge:   {"for", "zone", "percent", "mode", "action", "delay_s", "trust_hash", "by", "run", "to", "shutdown_delay_s", "within_s"},
 	VerbTrustInit:   {"trust", "by"},
+	VerbRunArm:      {"approval", "by"},
+	VerbRunGo:       {"run", "to", "shutdown_delay_s", "within_s", "approval", "by"},
+}
+
+// RunGoRequestOf is the run_go request r names (the verb run_go, or a challenge for it).
+func RunGoRequestOf(r Request) api.ApprovalRequest {
+	return api.ApprovalRequest{Verb: api.ApproveRunGo, Run: r.Run, To: r.To, ShutdownDelayS: r.ShutdownDelayS, WithinS: r.WithinS}
 }
 
 // ApprovalRequestOf is r as the request an approval is given for, when r is one that needs an approval while
@@ -155,6 +177,9 @@ func ApprovalRequestOf(r Request) (api.ApprovalRequest, bool) {
 	if verb == VerbChallenge && r.For != nil {
 		if verb = *r.For; verb == ForTrustSet {
 			return api.ApprovalRequest{Verb: api.ApproveTrustSet, TrustHash: r.TrustHash}, true
+		}
+		if verb == ForRunGo {
+			return RunGoRequestOf(r), true
 		}
 	}
 	switch verb {
@@ -229,7 +254,8 @@ func (r *Request) Validate() error {
 	}
 	present := map[string]bool{"zone": r.Zone != nil, "percent": r.Percent != nil, "mode": r.Mode != nil,
 		"action": r.Action != nil, "delay_s": r.DelayS != nil, "by": r.By != nil,
-		"approval": r.Approval != nil, "for": r.For != nil, "trust": r.Trust != nil, "trust_hash": r.TrustHash != nil}
+		"approval": r.Approval != nil, "for": r.For != nil, "trust": r.Trust != nil, "trust_hash": r.TrustHash != nil,
+		"run": r.Run != nil, "to": r.To != nil, "shutdown_delay_s": r.ShutdownDelayS != nil, "within_s": r.WithinS != nil}
 	for f, p := range present {
 		if p && !slices.Contains(allowed, f) {
 			return bad("%s does not take %s", r.Verb, f)
@@ -270,6 +296,28 @@ func (r *Request) Validate() error {
 		} else if r.DelayS == nil || *r.DelayS < MinDelayS || *r.DelayS > MaxDelayS {
 			return bad("delay_s must be %d-%d", MinDelayS, MaxDelayS)
 		}
+		if r.Run != nil {
+			if *r.Action != "shutdown" {
+				return bad("only a shutdown takes run")
+			}
+			if err := checkRun(r); err != nil {
+				return err
+			}
+		}
+	case VerbApplyUpdate:
+		if r.Run != nil {
+			if err := checkRun(r); err != nil {
+				return err
+			}
+		}
+	case VerbRunArm:
+		if r.Approval == nil {
+			return bad("run_arm needs approval")
+		}
+	case VerbRunGo:
+		if _, err := RunGoRequestOf(*r).Canonical(); err != nil {
+			return bad("%s", err.Error())
+		}
 	case VerbChallenge:
 		// the request the challenge is for must itself be a valid request, and one that needs an approval
 		if r.For == nil {
@@ -287,9 +335,21 @@ func (r *Request) Validate() error {
 		if r.TrustHash != nil {
 			return bad("trust_hash is for a challenge for trust_set")
 		}
+		if *r.For == ForRunGo { // the confirmation of a run: its four members and nothing else
+			if r.Zone != nil || r.Percent != nil || r.Mode != nil || r.Action != nil || r.DelayS != nil {
+				return bad("a challenge for run_go takes run, to, shutdown_delay_s and within_s only")
+			}
+			if _, err := RunGoRequestOf(*r).Canonical(); err != nil {
+				return bad("%s", err.Error())
+			}
+			break
+		}
+		if r.Run != nil || r.To != nil || r.ShutdownDelayS != nil || r.WithinS != nil {
+			return bad("run, to, shutdown_delay_s and within_s are for a challenge for run_go")
+		}
 		inner := Request{V: Version, Verb: *r.For, Zone: r.Zone, Percent: r.Percent, Mode: r.Mode, Action: r.Action, DelayS: r.DelayS}
 		if _, ok := ApprovalRequestOf(inner); !ok || inner.Verb == VerbChallenge {
-			return bad("a challenge is for fan_set, fan_mode, power (not cancel), apply_update or trust_set")
+			return bad("a challenge is for fan_set, fan_mode, power (not cancel), apply_update, trust_set or run_go")
 		}
 		if err := inner.Validate(); err != nil {
 			return err
@@ -307,6 +367,17 @@ func (r *Request) Validate() error {
 	return nil
 }
 
+// checkRun: a request names a run in the place of an approval, never next to one.
+func checkRun(r *Request) error {
+	if r.Approval != nil {
+		return bad("%s takes an approval or run, not both", r.Verb)
+	}
+	if err := api.CheckRunID(*r.Run); err != nil {
+		return bad("run: %s", err.Error())
+	}
+	return nil
+}
+
 func trustApproval(t *api.TrustInit) *api.Approval {
 	if t == nil {
 		return nil
@@ -314,10 +385,15 @@ func trustApproval(t *api.TrustInit) *api.Approval {
 	return t.Approval
 }
 
-// FrameVersion is the one protocol version r is sent in: Version3 for challenge, trust_init and a request with
-// an approval, Version for everything else.
+// FrameVersion is the one protocol version r is sent in: Version3 for challenge, trust_init, run_arm, run_go
+// and a request with an approval or a run, Version for everything else. (A helper from before runs knows
+// neither the two verbs nor the member "run" and refuses such a frame as a bad request, having run nothing.)
 func FrameVersion(r Request) int {
-	if r.Verb == VerbChallenge || r.Verb == VerbTrustInit || r.Approval != nil {
+	switch r.Verb {
+	case VerbChallenge, VerbTrustInit, VerbRunArm, VerbRunGo:
+		return Version3
+	}
+	if r.Approval != nil || r.Run != nil {
 		return Version3
 	}
 	return Version
@@ -409,6 +485,9 @@ type Response struct {
 	// RetryAfterS: with a refusal that says when to ask again (too_many_challenges), in how many seconds. The
 	// agent passes it on as the Retry-After header of its HTTP answer.
 	RetryAfterS int `json:"retry_after_s,omitempty"`
+	// Reason: with a refusal of a run ticket or a run confirmation, which rule refused it (the "reason" of the
+	// agent's HTTP answer).
+	Reason string `json:"reason,omitempty"`
 }
 
 // OK is a 200 response with data.
@@ -431,7 +510,7 @@ func Fail(code, msg string) Response {
 		st = 400
 	case CodeApprovalRequired, CodeApprovalRefused, CodeTrustProofRequired, CodeTrustProofRefused:
 		st = 403
-	case CodeTrustAlreadySet:
+	case CodeTrustAlreadySet, api.CodeApprovalOff, api.CodeRunRefused:
 		st = 409
 	case CodeApprovalUnavailable:
 		st = 503
@@ -441,7 +520,7 @@ func Fail(code, msg string) Response {
 		st = 429
 	case CodeDisabled:
 		st = 404
-	case CodeUnavailable, CodeDenied:
+	case CodeUnavailable, CodeDenied, api.CodeRunUnavailable:
 		st = 503
 	}
 	return Response{Status: st, Code: code, Error: msg}
