@@ -57,6 +57,11 @@ func checkConfigCmd(cfgPath string, stdout, stderr io.Writer) int {
 //	power source "desk-plug": homeassistant, host 192.168.1.10:8123 (http), sensor.desk_plug_power, token: present (HA_TOKEN)
 //	power source "desk-plug": homeassistant, host 192.168.1.10:8123 (http), sensor.desk_plug_power, token: missing (HA_TOKEN is not set: fairy-agent secret set HA_TOKEN, then restart the agent)
 //
+// A source that also reads the plug's volts, amperes or energy total (voltage_entity, current_entity,
+// energy_entity) names those sensors after the power sensor, each with its word:
+//
+//	power source "desk-plug": homeassistant, host 192.168.1.10:8123 (http), sensor.desk_plug_power, voltage sensor.desk_plug_voltage, current sensor.desk_plug_current, energy sensor.desk_plug_energy, token: present (HA_TOKEN)
+//
 // "present" means the variable named by token_env has a value, in env_file (checkConfig has loaded it into this
 // process) or in the environment check-config was started in. The token is not read, shown or tried: whether
 // Home Assistant accepts it shows in the panel ("home assistant refused the token"). A missing token is not a
@@ -73,7 +78,11 @@ func sourceLines(cfg *agent.Config) []string {
 		if !c.SecretSet {
 			token = "missing (" + c.SecretEnv + " is not set: fairy-agent secret set " + c.SecretEnv + ", then restart the agent)"
 		}
-		lines = append(lines, fmt.Sprintf("power source %q: %s, host %s (%s), %s, token: %s", c.ID, c.Type, c.Host, c.Scheme, c.Reads, token))
+		reads := c.Reads
+		if c.Also != "" {
+			reads += ", " + c.Also
+		}
+		lines = append(lines, fmt.Sprintf("power source %q: %s, host %s (%s), %s, token: %s", c.ID, c.Type, c.Host, c.Scheme, reads, token))
 	}
 	return lines
 }

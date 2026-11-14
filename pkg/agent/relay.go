@@ -235,6 +235,12 @@ func pauseFor(ctx context.Context, d time.Duration) bool {
 
 // PollSource reads one device and stores its row (exported for tests through PollOnce). It returns the error
 // of the reading, nil when the device answered.
+//
+// A row has the same members for every type. One more, "missing", is there only in the row of a reading that
+// came without a value its source was set up to read (power.Partial: a homeassistant entry with
+// voltage_entity, current_entity or energy_entity whose sensor gave nothing): an object with that value's
+// member name ("voltage", "current", "energy_kwh_total") and a short fixed text for why it is null. The row is
+// still ok, with its watts. A panel that does not know the member does not look at it.
 func (r *Relay) PollSource(ctx context.Context, s relaySource, timeout time.Duration) error {
 	b := s.src.Info()
 	row := map[string]any{"id": b.ID, "name": b.DisplayName(), "type": b.Type, "ok": false, "watts": nil,
@@ -243,7 +249,14 @@ func (r *Relay) PollSource(ctx context.Context, s relaySource, timeout time.Dura
 		row["system_hint"] = s.hint
 	}
 	cctx, cancel := context.WithTimeout(ctx, timeout+time.Second)
-	readings, err := s.src.Read(cctx, timeout)
+	var readings []power.Reading
+	var missing map[string]string
+	var err error
+	if p, ok := s.src.(power.Partial); ok {
+		readings, missing, err = p.ReadPartial(cctx, timeout)
+	} else {
+		readings, err = s.src.Read(cctx, timeout)
+	}
 	cancel()
 	switch {
 	case err != nil:
@@ -274,6 +287,9 @@ func (r *Relay) PollSource(ctx context.Context, s relaySource, timeout time.Dura
 		}
 		if e := devices.Num(first.EnergyKWhTotal); e != nil && len(readings) == 1 {
 			row["energy_kwh_total"] = *e
+		}
+		if len(missing) > 0 {
+			row["missing"] = missing
 		}
 	}
 	r.mu.Lock()
