@@ -1641,9 +1641,13 @@ the machines are up.
 
 **What you must know before you install it.**
 
-* **Nothing changes until a panel that knows runs is installed** (panel build 15). This agent answers every
-  request an older panel sends exactly as 0.8.0 did; `"proto"` in the `approval` block stays 2, and the only
-  thing an older panel could see is one new member in that block, `"runs": 1`, which it does not read. A
+* **Nothing changes until a panel that knows runs is installed** (panel build 15). For approvals, power and
+  updates this agent answers every request an older panel sends exactly as 0.8.0 did; `"proto"` in the
+  `approval` block stays 2, and the only thing an older panel could see is one new member in that block,
+  `"runs": 1`, which it does not read. (The other new thing in 0.9.0 has nothing to do with runs and shows
+  only where it is set up: a Home Assistant plug whose entry names the new sensors has their values in its
+  row of `/metrics`, see
+  [Volts, amperes and the energy total](#volts-amperes-and-the-energy-total-voltage_entity-current_entity-energy_entity).) A
   machine without the check behaves as before in a run. A machine with the check that no ticket reaches
   behaves as before too: nothing is counted down, every request needs its approval. The one new thing on its
   disk is the run record, which then holds the clock and nothing of a run ("The record" below).
@@ -2107,7 +2111,9 @@ only the cores are shown. Core Temp's Fahrenheit and "distance to Tj. Max" displ
 ## Settings (config.yaml)
 
 The file is `C:\ProgramData\fairy-agent\config.yaml` (Windows) or `/etc/fairy-agent/config.yaml` (Linux).
-`deploy/fairy-agent.config.example.yaml` lists every setting with an explanation. The important ones:
+`deploy/fairy-agent.config.example.yaml` is a file to start from, with an explanation of each setting it has
+(it leaves out `log_file`, `bmc_relay` and the less common members of a device entry; every name there is,
+is in the list below the table). The important ones:
 
 | Setting | Default | Meaning |
 | --- | --- | --- |
@@ -2121,8 +2127,11 @@ The file is `C:\ProgramData\fairy-agent\config.yaml` (Windows) or `/etc/fairy-ag
 | `gpu.amdgpu` | auto | Linux: AMD GPUs through the amdgpu driver's sysfs files; `off` to switch off |
 | `gpu.windows` | auto | Windows: AMD / Intel / other GPUs from Windows' GPU counters; `off` to switch off |
 | `gpu.amd_adl` | auto | Windows: Radeon temperature and watts from AMD's ADL (Adrenalin driver), read only; `off` to switch off |
+| `gpu.interval_s` | 2 | seconds between two readings of the GPUs |
 | `sensors.coretemp` | false | Windows: CPU core temperatures and watts from Core Temp (see [Core Temp](#core-temp-optional-windows)) |
+| `sensors.acpi_thermal` | true | Windows: the temperatures of the ACPI thermal zones; `false` to switch off |
 | `ipmi`, `fan_control`, `power_control`, `wol`, `bmc_relay` | off | see [Optional features](#optional-features) |
+| `power_sources`, `ups` | none | plugs, BMCs and UPSes on this machine's network that the agent reads and passes on: see [Plugs and UPSes on this machine's network](#plugs-and-upses-on-this-machines-network). New in 0.9.0: a `type: homeassistant` entry may also have `voltage_entity`, `current_entity` and `energy_entity` ([Volts, amperes and the energy total](#volts-amperes-and-the-energy-total-voltage_entity-current_entity-energy_entity)). **An agent up to 0.8.0 does not start with one of these three in its file: update the agent first, add them afterwards** |
 | `env_file` | none | `KEY=value` secrets (device and BMC passwords, a Home Assistant token); `fairy-agent secret set NAME` writes it |
 | `self_update.enabled`, `self_update.repo` | off, `n3ptune-cpu/Fairy-agent` | see [Updates](#updates-the-panels-update-button) |
 | `control_rate_per_min` | 12 | requests a minute, for everybody together, in each of three budgets that cannot use each other up: **control requests** (fan, power other than cancel, Wake-on-LAN, BMC relay, update, helper stop / start, the first-time set of the approval trust), all together; **approval challenges** (`POST /approval/challenge`), so an approved action costs one control request and one challenge, not two control requests; and **`POST /power` with `cancel`**, so that neither a burst of challenges nor a row of refused requests can keep a cancel out (only other cancels with the control token can, and on Windows a `POST /helper/stop`, which also needs the control token: a cancel is answered `503 helper_stopped` until the helper is started again; requests with a wrong token or none count against nobody but themselves, see [Security in short](#security-in-short)). One more is answered `429` (`Retry-After: 60`); the text says which budget |
@@ -2132,6 +2141,45 @@ Unknown settings are an error (so a typo does not silently do nothing). `fairy-a
 file and the tokens without starting anything. The one thing from an earlier version that is ignored instead, with
 a line in the log and in `check-config`, is a `power_sources` entry with `type: tuya`
 (see [Plugs and UPSes on this machine's network](#plugs-and-upses-on-this-machines-network)).
+
+**Every name a `config.yaml` of 0.9.0 may contain.** No other name is accepted, at any level (but for what an
+ignored `type: tuya` entry holds):
+
+```yaml
+listen, allow_all_interfaces, only_from_panel, require_helper_pipe_owner,
+token_file, control_token_file, env_file, log_file, hide_host_details, control_rate_per_min
+processes:     enabled, cmdline, never_open
+gpu:           nvidia_smi, amdgpu, windows, amd_adl, interval_s
+sensors:       acpi_thermal, coretemp
+ipmi:          enabled, transport, ipmitool, host, username, password_env, sensors, sensor_interval_s
+fan_control:   enabled, vendor, min_duty, max_temp_c, auto_mode
+power_control: enabled, min_delay_s
+wol:           enabled, allowed_macs
+self_update:   enabled, repo
+bmc_relay:     enabled, targets (each: id, backend, host, url, username, password_env, cipher_suite,
+               ipmitool_path, tls_fingerprint)
+power_sources: a list; every entry: id, type, name, system, system_hint, include_in_total, interval, and by type
+  shelly:         url, gen, channel, rpc_method, username, password_env
+  tasmota:        url, username, password_env
+  nut:            host, port, ups, username, password_env
+  redfish, ipmi:  url, chassis_id, power_path, username, password_env, verify_tls, ca_file
+  homeassistant:  url, token_env, entity, max_age_s, ca_file,
+                  voltage_entity, current_entity, energy_entity      # these three: 0.9.0
+ups:           a list; every entry: id, type, name, powers, host, port, ups, username, password_env
+```
+
+(This block is a list of names, not a file to copy: `deploy/fairy-agent.config.example.yaml` is that.)
+
+What 0.9.0 adds to this list is the three members of a `homeassistant` entry and nothing else. Because unknown
+names are an error, **an agent up to 0.8.0 does not start with a `config.yaml` that has `voltage_entity`,
+`current_entity` or `energy_entity`** (`field voltage_entity not found`). So the order is always: update the
+agent to 0.9.0, then add the members, then restart it; and take them out again before an agent of 0.8.0 or
+older is put back on the machine. The three members are optional: a `config.yaml` that 0.8.0 accepts, 0.9.0
+accepts too, and reads in the same way. Runs (see
+[Runs](#runs-approvals-inside-the-panels-update-unpowered-hosts-090)) have no setting in `config.yaml` and
+none in the trust file: their times come with the approved request, within fixed limits, and the two existing
+settings they depend on are `power_control.enabled` (a run ends with a shutdown; `min_delay_s` is the
+lowest delay a run may name) and, for a run that updates, `self_update.enabled`.
 
 ### Changing a setting from the command line
 
@@ -2378,6 +2426,12 @@ on the first install and report anything odd:
     taking a run over after the update restarted it, whether the updater service shows as running to the
     helper while it installs, and `helper-run show | cancel` in an Administrator window. An ACCEPTED ticket
     and confirmation need a panel that knows runs;
+* **0.9.0's log guard and the Home Assistant sensors** (TEST-ON-WINDOWS.md, section 15; none of it has run on
+  Windows): both Windows services now set their log up in one new way (the agent's `agent.log` and the
+  helper's `helper.log`, so that a line of Go's HTTP client cannot repeat what a device sent), so after the
+  update look that both files still get their lines; and a `type: homeassistant` entry with `voltage_entity`,
+  `current_entity` or `energy_entity` on a Windows agent (the code is the same on Windows and Linux; only
+  Linux has run it against a made-up Home Assistant);
 * **0.6.0's security fixes** (TEST-ON-WINDOWS.md, section 12, is the checklist; none of this has run on
   Windows): the trust check and repair of the data folder (owners and access lists read from the objects
   themselves, the rename to `*.untrusted-<time>`, folders created with their final permissions), the updater

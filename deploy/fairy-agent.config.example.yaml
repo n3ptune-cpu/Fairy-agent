@@ -106,6 +106,8 @@ power_sources: []
   # See AGENT.md, "Plugs that are in Home Assistant". Optional: max_age_s, ca_file (https), interval, and the
   # plug's other sensors: voltage_entity (V), current_entity (A), energy_entity (the total in kWh, not a power),
   # each a sensor.* id of its own. A sensor of those that fails leaves its value empty; the watts stay.
+  # These three need fairy-agent 0.9.0: an agent up to 0.8.0 does not start with one of them in this file
+  # ("field voltage_entity not found"). Update the agent first, add them afterwards.
   # - {id: ha-plug, type: homeassistant, name: "Rack plug", url: "http://192.168.1.10:8123", token_env: HA_TOKEN, entity: sensor.rack_plug_power}
   # - {id: ha-plug-2, type: homeassistant, url: "http://192.168.1.10:8123", token_env: HA_TOKEN, entity: sensor.lab_plug_power,
   #    voltage_entity: sensor.lab_plug_voltage, current_entity: sensor.lab_plug_current, energy_entity: sensor.lab_plug_energy}

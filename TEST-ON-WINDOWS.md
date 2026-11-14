@@ -1,4 +1,4 @@
-# Testing 0.5.x, 0.6.0 and the passkey approval on Windows (agent + helper, self-migration, security fixes)
+# Testing 0.5.x, 0.6.0, the passkey approval and 0.9.0 on Windows (agent + helper, self-migration, security fixes, runs)
 
 0.5.0 moves the Windows agent to its own low-rights account and adds the **fairy-agent-helper** service (see
 AGENT.md, "Two services"). None of this has run on real Windows yet. Try it on **one** PC first, ideally one
@@ -1002,6 +1002,42 @@ Start a run for this PC only, confirm the start with the passkey, and do NOT con
 ### What to send back
 
 The output of J1, J2, J4, J5, J9 to J15 and the tail of `helper.log` (J6); later K1 to K9.
+
+## 15. 0.9.0: both logs after the update, and a Home Assistant plug's other sensors (none of this has run on Windows)
+
+What it is: AGENT.md, "Checking, logs, updating, removing" (the line about data nobody asked for) and "Volts,
+amperes and the energy total". In 0.9.0 both services set their log up in a new way, so that a line of Go's
+HTTP client cannot repeat what a device sent. That was tested on Linux. On a PC one thing can be seen: the
+logs are written as before. L1 is for every PC, L2 for a PC with power control on, L3 only for a Windows PC
+whose agent reads a plug through Home Assistant (skip it where none does). One step is one line, in
+**Windows PowerShell as Administrator**; after `->` is what a good answer looks like.
+
+* L1 **[KEY]** **Both logs get their lines after the update.** After the PC was updated to 0.9.0 (the update
+  restarts both services):
+  `Select-String -Path C:\ProgramData\fairy-agent\logs\agent.log -Pattern 'fairy-agent listening' | Select-Object -Last 1`
+  -> one line with the time of the update and `version=<N>-<commit>`, where `N` is the build number of the
+  0.9.0 release (the number in the tag `build-N` on the Releases page; `& $fa version` shows the same).
+  Where the helper is installed:
+  `Select-String -Path C:\ProgramData\fairy-agent\helper\helper.log -Pattern 'helper started' | Select-Object -Last 1`
+  -> the same for the helper. A log that has no such line from after the update is the fault this step
+  looks for: send the last 30 lines of that file and the Event Viewer's entries of the source "fairy-agent" /
+  "fairy-agent-helper".
+* L2 **The helper still writes each request.** Section 6, steps 4 and 5 (Shut down with 60 s, then Cancel).
+  -> `helper.log` has a line for the shutdown and one for the cancel, as before 0.9.0.
+* L3 **A plug's volts, amperes and energy total.** Only after L1, and only on a PC whose `config.yaml` has a
+  `type: homeassistant` entry: add `voltage_entity`, `current_entity` and `energy_entity` to it (AGENT.md has
+  the rules; leave out a member the plug has no sensor for), then `& $fa check-config`
+  -> the entry's line names the sensors: `power source "<id>": homeassistant, host <host> (http), sensor.<...>,
+  voltage sensor.<...>, current sensor.<...>, energy sensor.<...>, token: present (<NAME>)`. Then
+  `Restart-Service fairy-agent` -> the panel's Power page shows the plug's Volts, Amps and kWh next to its
+  watts. A value that stays `–` while the watts are shown has its reason in the agent's own answer:
+  `curl.exe -s -H "Authorization: Bearer $read" "$base/metrics" | Select-String -Pattern '"missing":\{[^}]*\}' | ForEach-Object { $_.Matches.Value }`
+  (`$read` and `$base` as in section 13). **An agent up to 0.8.0 does not start with these members**: add
+  them only after L1 has shown the new build number, and take them out before going back to an older agent.
+
+### What to send back
+
+The two lines of L1 (or what was there instead), and for L3 the line of `check-config`.
 
 ## Rollback (back to build 10 / v0.4.4)
 
