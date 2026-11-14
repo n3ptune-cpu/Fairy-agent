@@ -144,7 +144,11 @@ type Deps struct {
 	// parts): this agent checks nothing itself, and on a machine whose helper says that approvals are not off
 	// it refuses what it would have to check.
 	Approval *approval.Gate
-	Version  string
+	// Runs carries the runs of Approval out where this agent is the checker and can (Linux): it takes the run
+	// ticket and the confirmation, counts the wait and switches the machine off through Power. nil: Windows
+	// (the helper does), a system without an uptime to read, or power control is off.
+	Runs    *approval.RunWatch
+	Version string
 }
 
 // Agent answers the panel.
@@ -386,6 +390,10 @@ func (a *Agent) Handler() http.Handler {
 		// the passkey approval of the routes above (approval.go)
 		api.PathApprovalChallenge: {method: http.MethodPost, control: true, budget: budgetChallenge, maxBody: approvalBody, feature: a.hasApproval, code: api.CodeApprovalDisabled, h: a.approvalChallenge},
 		api.PathApprovalTrust:     {method: http.MethodPost, control: true, budget: budgetControl, maxBody: approvalBody, feature: a.hasApproval, code: api.CodeApprovalDisabled, h: a.approvalTrust},
+		// the ticket and the confirmation of a wake / update / shutdown run (api, "Runs"): both carry a passkey
+		// approval, and nothing is done for a body without one
+		api.PathRunArm: {method: http.MethodPost, control: true, budget: budgetControl, maxBody: approvalBody, feature: a.hasApproval, code: api.CodeApprovalDisabled, h: a.runArm},
+		api.PathRunGo:  {method: http.MethodPost, control: true, budget: budgetControl, maxBody: approvalBody, feature: a.hasApproval, code: api.CodeApprovalDisabled, h: a.runGo},
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ip := clientIP(r)
@@ -1183,6 +1191,8 @@ func (a *Agent) power(w http.ResponseWriter, r *http.Request) {
 		DelayS      json.RawMessage `json:"delay_s"`
 		RequestedBy any             `json:"requested_by"`
 		Approval    *api.Approval   `json:"approval"`
+		// Run: a shutdown without approval names the confirmed run that lets it through (api, "Runs").
+		Run string `json:"run"`
 	}
 	err := decodeBody(r, &b)
 	// This route counts its requests itself: cancel has a budget of its own, everything else (a body that
@@ -1213,13 +1223,37 @@ func (a *Agent) power(w http.ResponseWriter, r *http.Request) {
 			delay = *req.DelayS
 		}
 		// the first step of the passkey check; the second is req.Gate, which Power.Handle asks after its own checks
-		gate, ok := a.approved(w, r, api.ApprovalRequest{Verb: api.ApprovePower, Action: &b.Action, DelayS: &delay}, b.Approval)
+		areq := api.ApprovalRequest{Verb: api.ApprovePower, Action: &b.Action, DelayS: &delay}
+		var gate Gated
+		var ok bool
+		if b.Run != "" && b.Approval == nil && b.Action == "shutdown" {
+			if err := api.CheckRunID(b.Run); err != nil {
+				writeJSON(w, 400, map[string]any{"error": "run: " + err.Error()})
+				return
+			}
+			gate, ok = a.approvedRun(w, r, areq, b.Run)
+			req.Run = b.Run
+		} else {
+			gate, ok = a.approved(w, r, areq, b.Approval)
+		}
 		if !ok {
 			return
 		}
 		req.Gate = gate
 	}
+	var runErr error
+	if b.Action == "cancel" && a.d.Runs != nil {
+		// A cancel also ends the run this machine is in (armed, counting down or confirmed), and nothing arms it
+		// again in this boot. First the run, so that its self-off is not scheduled behind this cancel; then the
+		// pending action, which may be that self-off. (Windows: the helper does both when the cancel reaches it,
+		// and Power passes a cancel on whenever the helper has a run: HelperPower.RunLive.)
+		_, runErr = a.d.Runs.Cancel("a cancel of the pending power action (POST /power)")
+	}
 	st, body := a.d.Power.Handle(req)
+	if runErr != nil && st == 200 { // not "cancelled": a restart of the agent would find the run again
+		slog.Error("power: the end of the run could not be written down", "error", safeErr(runErr))
+		st, body = 500, map[string]any{"error": "the pending action is stopped, but the end of the run could not be written down (" + safeErr(runErr) + "); cancel again"}
+	}
 	// The /metrics answer kept from before this request (up to 250 ms old) is not served after it: a cancel
 	// answered 200 and the next /metrics still showed the shutdown as pending (audit 6, r4-p2-10); a shutdown
 	// was accepted and the next /metrics said nothing was pending. A flag, not the lock of the kept answer: this
@@ -1254,9 +1288,34 @@ func (a *Agent) update(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 400, map[string]any{"error": err.Error()})
 		return
 	}
+	if b.Run != "" {
+		if err := api.CheckRunID(b.Run); err != nil {
+			writeJSON(w, 400, map[string]any{"error": "run: " + err.Error()})
+			return
+		}
+	}
 	if a.helperRuns(api.ApproveApplyUpdate) { // Windows with the helper: it checks, when the installer is started
 		if !a.updateApproval(w, r, &b) {
 			return
+		}
+	} else if b.Run != "" && b.Approval == nil {
+		// The one update of a confirmed run, on a machine where this agent keeps the run: looked at now (nothing
+		// is used up), used up by Updater.Start after its own checks, and the version the confirmation named is
+		// the only one that is downloaded.
+		req, run, pin := api.ApprovalRequest{Verb: api.ApproveApplyUpdate}, b.Run, ""
+		if a.ownGateMissing(r.Context()) {
+			writeRefusal(w, noOwnCheck())
+			return
+		}
+		if _, ref := a.d.Approval.RunCovers(req, run); ref != nil {
+			writeRefusal(w, ref)
+			return
+		}
+		b.Pin = &pin
+		b.Gate = func() (*approval.Pass, *approval.Refusal) {
+			to, ref := a.d.Approval.AdmitRun(req, run)
+			pin = to
+			return nil, ref
 		}
 	} else { // this agent starts the installer itself and checks itself: Updater.Start asks b.Gate after its own checks
 		gate, ok := a.approved(w, r, api.ApprovalRequest{Verb: api.ApproveApplyUpdate}, b.Approval)

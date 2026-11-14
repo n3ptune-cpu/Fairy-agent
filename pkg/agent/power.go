@@ -39,6 +39,12 @@ type powerApproved interface {
 	ScheduleApproved(action string, delay time.Duration, who string, ap *api.Approval) error
 }
 
+// powerRun is a PowerExec that passes the id of the confirmed run a shutdown names on to whoever checks it
+// (the Windows helper).
+type powerRun interface {
+	ScheduleRun(action string, delay time.Duration, who, run string) error
+}
+
 // pendingSource is a PowerExec that knows which action of Fairy's own is pending, also one scheduled before
 // this process started: RememberedPower (the operating system counts the shutdown down, a file remembers it)
 // and the Windows helper's client (the helper remembers it and says so in its status).
@@ -80,6 +86,11 @@ type Power struct {
 	// not end it: the earlier one can still be taken once the later one is cancelled.
 	maybe     time.Time
 	maybeWhat string
+	// runLive, when set, reports whether whoever checks on this machine has a run that a cancel must end (the
+	// Windows helper, asked at this moment: HelperPower.RunLive). A cancel is then passed on to the exec also
+	// when nothing is on record as pending: the run may be armed with nothing scheduled yet, and the cancel is
+	// what disarms it. nil, or false: nothing changes for a cancel.
+	runLive func() bool
 	// dropped is the time (Pending.At) of the action this process cancelled last: what the exec still reports
 	// for a moment afterwards (the helper's status is cached for a few seconds) is not shown again. Compared
 	// within two seconds.
@@ -128,6 +139,15 @@ const defaultPowerDelayS = 60
 // NewPower returns the power controller.
 func NewPower(exec PowerExec, minDelayS int) *Power {
 	return &Power{exec: exec, minDelay: minDelayS, now: time.Now, steady: time.Now}
+}
+
+// NewPowerForRuns is NewPower for a machine whose power part also ends runs when it is asked to cancel (the
+// Windows helper): runLive says, asked at the moment of a cancel, whether it has a run to end (HelperPower.
+// RunLive). A cancel is then passed on to it also when nothing is on record as pending.
+func NewPowerForRuns(exec PowerExec, minDelayS int, runLive func() bool) *Power {
+	p := NewPower(exec, minDelayS)
+	p.runLive = runLive
+	return p
 }
 
 var whoClean = regexp.MustCompile(`[^A-Za-z0-9 ._@-]`)
@@ -225,6 +245,9 @@ type PowerRequest struct {
 	// Gate is the passkey check of a request this process carries out itself (nil: none, or the helper checks).
 	// Handle asks it when the request has passed every check of its own and is about to be scheduled.
 	Gate Gated `json:"-"`
+	// Run is the id of the confirmed run a shutdown without approval names ("": none). Where the helper checks,
+	// it is passed on with the request; where this process checks, Gate is the check of it.
+	Run string `json:"-"`
 }
 
 // throughHelper reports whether shutdown, reboot and sleep are carried out by the Windows helper, which then is
@@ -261,7 +284,7 @@ func (p *Power) Handle(req PowerRequest) (int, map[string]any) {
 			// Nothing on record. What this process scheduled itself and never asked the exec to stop is stopped
 			// all the same (the exec's Cancel stops what the exec scheduled and nothing else; with nothing left
 			// it does nothing): "ok" without asking, when the record was wrong, left the countdown running.
-			if !p.unstopped && !maybe {
+			if !p.unstopped && !maybe && !(p.runLive != nil && p.runLive()) {
 				return 200, map[string]any{"action": "cancel", "pending": nil}
 			}
 		}
@@ -334,6 +357,8 @@ func (p *Power) Handle(req PowerRequest) (int, map[string]any) {
 	var err error
 	if ap, ok := p.exec.(powerApproved); ok && req.Approval != nil {
 		err = ap.ScheduleApproved(req.Action, time.Duration(delay)*time.Second, who, req.Approval)
+	} else if rn, ok := p.exec.(powerRun); ok && req.Run != "" { // the helper checks the run, as it checks an approval
+		err = rn.ScheduleRun(req.Action, time.Duration(delay)*time.Second, who, req.Run)
 	} else if by, ok := p.exec.(powerBy); ok { // the Windows helper builds the message itself from who
 		err = by.ScheduleBy(req.Action, time.Duration(delay)*time.Second, who)
 	} else {
@@ -368,6 +393,37 @@ func (p *Power) Handle(req PowerRequest) (int, map[string]any) {
 	p.unstopped = true
 	slog.Warn("power: scheduled", "action", req.Action, "delay_s", delay, "requested_by", who)
 	return 200, map[string]any{"action": req.Action, "pending": *p.pending}
+}
+
+// ScheduleOwn schedules a shutdown that this process decided itself, with nobody's request: the self-off of a
+// run, where the agent is the checker (approval.RunWatch). It is the same delayed shutdown POST /power
+// schedules, through the same exec, and it is on record like one: /metrics shows it as pending, and POST /power
+// cancel stops it. It is refused while another action is pending.
+func (p *Power) ScheduleOwn(delay time.Duration, message, who string) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if c := p.current(); c != nil {
+		return fmt.Errorf("a %s is already pending", c.Action)
+	}
+	who = cleanWho(who)
+	if err := p.exec.Schedule("shutdown", delay, message); err != nil {
+		slog.Error("power: could not schedule", "action", "shutdown", "error", err.Error(), "requested_by", who)
+		return err
+	}
+	d := int(delay / time.Second)
+	at := collect.Round(float64(p.now().UnixMilli())/1000+float64(d), 3)
+	p.pending, p.dropped, p.since = &Pending{Action: "shutdown", At: at, DelayS: d, RequestedBy: who}, 0, p.steady()
+	p.unstopped = true
+	slog.Warn("power: scheduled", "action", "shutdown", "delay_s", d, "requested_by", who)
+	return nil
+}
+
+// CancelOwn is POST /power cancel asked by this process itself (the countdown of a run that ended).
+func (p *Power) CancelOwn(who string) error {
+	if st, body := p.Handle(PowerRequest{Action: "cancel", RequestedBy: who}); st != 200 {
+		return fmt.Errorf("%v", body["error"])
+	}
+	return nil
 }
 
 // pendingSleep is the one sleep the Windows power part waits for: a timer in the process, because Windows

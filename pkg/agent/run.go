@@ -12,6 +12,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/n3ptune-cpu/Fairy-agent/pkg/agent/api"
@@ -187,8 +188,14 @@ func Run(ctx context.Context, cfg *Config, b Build) error {
 	// is the helper's, in a folder this account reads and cannot change; the agent's gate only reads it, and
 	// checks the requests that do not go through the helper (fans over ipmitool; everything of an agent that
 	// was started without the helper).
+	//
+	// Runs (the ticket and the confirmation of a wake / update / shutdown run): kept by the checker that owns the
+	// trust file. That is this agent where there is no helper and the uptime can be read (Linux); on Windows
+	// the helper keeps them, and this agent's gate only looks at the helper's record.
+	keepsRuns := helper == nil && runtime.GOOS == "linux"
 	d.Approval = approval.NewGate(approval.Options{Files: ApprovalFiles(cfg), EnforcedBy: api.EnforcedByAgent,
-		Uptime: SystemUptime, BootID: SystemBootID, ReadOnly: helper != nil})
+		Uptime: SystemUptime, BootID: SystemBootID, ReadOnly: helper != nil,
+		Runs: keepsRuns, MinDelayS: cfg.PowerControl.MinDelayS})
 	// This first look is also where, on systems other than Windows, a trust file from before machine ids gets
 	// its id (approval.Gate.reload): the agent owns the file there. On Windows the helper does (its file).
 	if st := d.Approval.Status(); st.State != api.ApprovalOff {
@@ -269,12 +276,28 @@ func Run(ctx context.Context, cfg *Config, b Build) error {
 			defer stopFans()
 		}
 	}
+	var updater atomic.Pointer[Updater] // set further down; the run watch asks it when the wait of a run is over
 	if cfg.PowerControl.Enabled {
 		if viaHelper {
-			d.Power = NewPower(helper.Power(), cfg.PowerControl.MinDelayS)
+			hp := helper.Power()
+			// a cancel reaches the helper whenever it has a run to end
+			d.Power = NewPowerForRuns(hp, cfg.PowerControl.MinDelayS, hp.RunLive)
 			d.HelperSources = append(d.HelperSources, api.FeaturePower)
 		} else {
 			d.Power = NewPower(SystemPower(), cfg.PowerControl.MinDelayS)
+		}
+		if keepsRuns {
+			// The self-off of a run is the ordinary delayed shutdown of this agent, through the same Power: it is
+			// shown as pending and stopped by POST /power cancel like every other.
+			power := d.Power
+			d.Runs = approval.NewRunWatch(d.Approval, approval.RunHooks{
+				Pending:  power.Scheduled,
+				Shutdown: power.ScheduleOwn,
+				Cancel:   func() error { return power.CancelOwn("run") },
+				Updating: func() bool { u := updater.Load(); return u != nil && u.Busy() },
+				Guests:   GuestsRunning,
+			})
+			go d.Runs.Run(ctx)
 		}
 	}
 	if cfg.WOL.Enabled {
@@ -295,6 +318,8 @@ func Run(ctx context.Context, cfg *Config, b Build) error {
 		if viaHelper {
 			// a request with an approval: the helper checks it and starts the updater itself
 			o.ApplyApproved = helper.ApplyUpdateApproved
+			// a request that names a confirmed run: the same, with the run's one update
+			o.ApplyRun = helper.ApplyUpdateRun
 			// the helper may start the updater when this account's own start right is missing
 			apply := o.Apply
 			o.Apply = func(ctx context.Context) error {
@@ -320,6 +345,7 @@ func Run(ctx context.Context, cfg *Config, b Build) error {
 			}
 		}
 		d.Updater = NewUpdater(o)
+		updater.Store(d.Updater)
 		if st := d.Updater.Status(); st.State == "unavailable" {
 			slog.Warn("self_update is enabled but cannot work", "reason", st.Message)
 		} else if st.Last != nil {

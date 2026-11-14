@@ -71,6 +71,8 @@ func (a *Agent) helperRuns(verb string) bool {
 		return a.d.Power != nil && a.d.Power.throughHelper()
 	case api.ApproveApplyUpdate:
 		return a.d.Updater != nil && a.d.Updater.throughHelper()
+	case api.ApproveRunArm, api.ApproveRunGo: // a run is kept by whoever carries out its shutdown
+		return a.d.Power != nil && a.d.Power.throughHelper()
 	}
 	return false
 }
@@ -186,6 +188,9 @@ func refusalBody(ref *approval.Refusal) map[string]any {
 	}
 	if ref.RetryAfterS > 0 {
 		body[retryAfterMember] = ref.RetryAfterS
+	}
+	if ref.Reason != "" {
+		body["reason"] = ref.Reason
 	}
 	return body
 }
@@ -355,8 +360,8 @@ func (a *Agent) featureOff(verb string) string {
 	switch {
 	case (verb == api.ApproveFanSet || verb == api.ApproveFanMode) && a.d.Fan == nil:
 		return "fan_control_disabled"
-	case verb == api.ApprovePower && a.d.Power == nil:
-		return "power_control_disabled"
+	case (verb == api.ApprovePower || verb == api.ApproveRunArm || verb == api.ApproveRunGo) && a.d.Power == nil:
+		return "power_control_disabled" // a run ends with a shutdown
 	case verb == api.ApproveApplyUpdate && a.d.Updater == nil:
 		return "self_update_disabled"
 	}
@@ -378,6 +383,10 @@ func (a *Agent) approvalChallenge(w http.ResponseWriter, r *http.Request) {
 	}
 	if _, err := req.Canonical(); err != nil {
 		writeJSON(w, 400, map[string]any{"error": "not a request that can be approved: " + err.Error()})
+		return
+	}
+	if req.Verb == api.ApproveRunArm { // the same answer whoever checks on this machine: no challenge is given for a ticket
+		writeJSON(w, 400, map[string]any{"error": "a run ticket (run_arm) answers no challenge: it is sent to POST " + api.PathRunArm})
 		return
 	}
 	if code := a.featureOff(req.Verb); code != "" {
@@ -505,9 +514,12 @@ func (a *Agent) updateApproval(w http.ResponseWriter, r *http.Request, b *Update
 	state, why := a.helperCheckState(r.Context())
 	switch state {
 	case api.ApprovalOff:
-		b.Approval = nil // nothing checks it: as before
+		b.Approval, b.Run = nil, "" // nothing checks it: as before
 		return true
 	case api.ApprovalRequired:
+		if b.Approval == nil && b.Run != "" {
+			return a.updateOfRun(w, r, b)
+		}
 		if b.Approval == nil {
 			writeJSON(w, 403, map[string]any{"code": api.CodeApprovalRequired,
 				"error": "this needs a passkey approval (Pocket ID) and the request carried none"})
@@ -533,4 +545,134 @@ func (a *Agent) updateApproval(w http.ResponseWriter, r *http.Request, b *Update
 	}
 	writeJSON(w, 503, map[string]any{"code": api.CodeApprovalUnavailable, "error": "the update was not started: " + why})
 	return false
+}
+
+// approvedRun is approved for a request that carries no approval and names a confirmed run in its place
+// (POST /power shutdown with "run"): the two steps, asked of whoever keeps the run. Where the helper carries
+// the request out, the helper does (the run id goes to it with the request). Where this process does, its own
+// gate: approval.Gate.RunCovers when the request arrives, which uses nothing up, and AdmitRun when the request
+// has passed its own checks, which uses the run's one shutdown up. A request the run does not cover is refused
+// like every request without approval; the fan window and the shutdown after boot are not asked.
+func (a *Agent) approvedRun(w http.ResponseWriter, r *http.Request, req api.ApprovalRequest, run string) (Gated, bool) {
+	ctx := r.Context()
+	if a.helperRuns(req.Verb) {
+		if why := a.helperUnchecked(ctx); why != "" {
+			a.logOnce("unchecked-helper", "approval: request for the helper refused, the helper does not check approvals", "verb", req.Verb, "reason", why)
+			writeRefusal(w, &approval.Refusal{Status: 503, Code: api.CodeApprovalUnavailable, Msg: "not run: " + why})
+			return nil, false
+		}
+		return nil, true
+	}
+	check := func(final bool) *approval.Refusal {
+		var ref *approval.Refusal
+		switch {
+		case a.ownGateMissing(ctx):
+			ref = noOwnCheck()
+		case final:
+			_, ref = a.d.Approval.AdmitRun(req, run)
+		default:
+			_, ref = a.d.Approval.RunCovers(req, run)
+		}
+		if ref != nil && ref.Code == api.CodeApprovalUnavailable && a.helperSaysOff(ctx) {
+			return nil // as ownCheck: no trust file, says the helper
+		}
+		return ref
+	}
+	if ref := check(false); ref != nil {
+		writeRefusal(w, ref)
+		return nil, false
+	}
+	return func() (*approval.Pass, *approval.Refusal) { return nil, check(true) }, true
+}
+
+// updateOfRun is updateApproval for a request without approval that names a run, on a machine whose helper
+// keeps the run: before anything is downloaded this agent looks at the run record itself (its read-only look
+// at the helper's folder; nothing is used up), refuses what the run does not cover, and learns the version the
+// confirmation named. The installer is then started through the helper, which uses the run's one update up
+// (Updater.ApplyRun). Like the rule that an update needs an approval at all, the version is the agent's check;
+// that the installer installs only a newer release signed with the release key is the installer's.
+func (a *Agent) updateOfRun(w http.ResponseWriter, r *http.Request, b *UpdateRequest) bool {
+	gate := a.d.Approval
+	if gate == nil {
+		writeRefusal(w, noOwnCheck())
+		return false
+	}
+	req, run, pin := api.ApprovalRequest{Verb: api.ApproveApplyUpdate}, b.Run, ""
+	look := func() (*approval.Pass, *approval.Refusal) {
+		to, ref := gate.RunCovers(req, run)
+		pin = to
+		return nil, ref
+	}
+	if _, ref := look(); ref != nil {
+		writeRefusal(w, ref)
+		return false
+	}
+	b.Gate, b.Pin = look, &pin
+	return true
+}
+
+// runArm is POST /run/arm: a run ticket, to whoever keeps runs on this machine (Windows: the helper;
+// elsewhere this agent, on Linux).
+func (a *Agent) runArm(w http.ResponseWriter, r *http.Request) {
+	var b api.RunArm
+	if err := decodeStrictBody(r, &b); err != nil {
+		writeJSON(w, 400, map[string]any{"error": err.Error()})
+		return
+	}
+	if b.Approval == nil {
+		writeJSON(w, 400, map[string]any{"error": "a run ticket is an approval: the body needs \"approval\""})
+		return
+	}
+	a.runRequest(w, r, api.ApproveRunArm, func(h HelperRuns) (int, any) { return h.RunArm(r.Context(), b.Approval) },
+		func(rw *approval.RunWatch) (api.RunAnswer, *approval.Refusal) { return rw.Arm(b.Approval) })
+}
+
+// runGo is POST /run/go: the confirmation of a run.
+func (a *Agent) runGo(w http.ResponseWriter, r *http.Request) {
+	var b api.RunGo
+	if err := decodeStrictBody(r, &b); err != nil {
+		writeJSON(w, 400, map[string]any{"error": err.Error()})
+		return
+	}
+	req := b.Request()
+	if b.ShutdownDelayS == nil || b.WithinS == nil {
+		writeJSON(w, 400, map[string]any{"error": "not a run confirmation: run, to, shutdown_delay_s and within_s are needed"})
+		return
+	}
+	if _, err := req.Canonical(); err != nil {
+		writeJSON(w, 400, map[string]any{"error": "not a run confirmation: " + err.Error()})
+		return
+	}
+	a.runRequest(w, r, api.ApproveRunGo, func(h HelperRuns) (int, any) { return h.RunGo(r.Context(), b) },
+		func(rw *approval.RunWatch) (api.RunAnswer, *approval.Refusal) { return rw.Go(req, b.Approval) })
+}
+
+// runRequest hands a run request to whoever keeps runs here and writes the answer.
+func (a *Agent) runRequest(w http.ResponseWriter, r *http.Request, verb string, viaHelper func(HelperRuns) (int, any),
+	own func(*approval.RunWatch) (api.RunAnswer, *approval.Refusal)) {
+	if code := a.featureOff(verb); code != "" {
+		writeJSON(w, 404, map[string]any{"error": "a run ends with a shutdown, and power control is disabled on this agent", "code": code})
+		return
+	}
+	defer a.cacheOld.Store(true) // the next GET /metrics shows the run
+	if h, ok := a.helperApproval(); ok && a.helperRuns(verb) {
+		hr, ok := h.(HelperRuns)
+		if !ok {
+			writeRefusal(w, approval.NoRuns())
+			return
+		}
+		st, body := viaHelper(hr)
+		writeJSON(w, st, body)
+		return
+	}
+	if a.d.Runs == nil { // Windows without the helper, or a system whose uptime the agent cannot read
+		writeRefusal(w, approval.NoRuns())
+		return
+	}
+	ans, ref := own(a.d.Runs)
+	if ref != nil {
+		writeRefusal(w, ref)
+		return
+	}
+	writeJSON(w, 200, ans)
 }

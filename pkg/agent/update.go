@@ -74,6 +74,12 @@ type UpdateRequest struct {
 	// the request has passed its own checks (a release key, no update in progress, the installer can be
 	// started), immediately before the run begins.
 	Gate Gated `json:"-"`
+	// Run is the id of the confirmed run this update belongs to ("": none): a request without approval that
+	// names one is let through as that run's one update (api, "Runs").
+	Run string `json:"run"`
+	// Pin, when set, is read after Gate has passed: the version the run's confirmation named. The update
+	// installs that version or nothing: when the newest signed release is another one, nothing is downloaded.
+	Pin *string `json:"-"`
 }
 
 // UpdateCooldown is the least time between two installer runs that were asked for through the agent (the
@@ -144,7 +150,10 @@ type UpdaterOptions struct {
 	// ApplyApproved, when set, starts the installer for a request that carried an approval: through whoever
 	// checks the approval (Windows: the helper, which then starts the installer itself). Apply is not tried.
 	ApplyApproved func(ctx context.Context, ap *api.Approval) error
-	ResultWait    time.Duration // how long to wait for the installer's result (default 5 min)
+	// ApplyRun, when set, starts the installer for a request that named a confirmed run: through whoever keeps
+	// the run (Windows: the helper, which uses the run's one update up and starts the installer itself).
+	ApplyRun   func(ctx context.Context, run string) error
+	ResultWait time.Duration // how long to wait for the installer's result (default 5 min)
 	// Ready says why the installer cannot be started on this machine (nil: it can), e.g. Windows without the
 	// fairy-agent-update service. Asked at start, before each update and (while it fails) once a minute.
 	Ready func() error
@@ -236,6 +245,13 @@ func (u *Updater) refreshLast(force bool) {
 // which then is the one that checks the approval.
 func (u *Updater) throughHelper() bool { return u.o.ApplyApproved != nil }
 
+// Busy reports whether an update is in progress (downloading, or the installer is running).
+func (u *Updater) Busy() bool {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	return u.busy
+}
+
 func (u *Updater) ts() float64 { return collect.Round(float64(u.now().UnixMilli())/1000, 3) }
 
 // Status is the current state.
@@ -287,7 +303,14 @@ func (u *Updater) Start(req UpdateRequest) (int, map[string]any) {
 		slog.Warn("self-update: \"force\" in the request is ignored (the same or an older version is only installed by hand: fairy-agent update --force)",
 			"requested_by", who)
 	}
-	go u.run(who, req.Approval, u.done)
+	pin, run := "", ""
+	if req.Pin != nil {
+		pin = *req.Pin
+	}
+	if req.Approval == nil {
+		run = req.Run
+	}
+	go u.run(who, req.Approval, run, pin, u.done)
 	return 202, map[string]any{"state": "downloading", "current": u.o.Version}
 }
 
@@ -303,13 +326,18 @@ func (u *Updater) fail(msg, target string) {
 	u.set("failed", msg, target)
 }
 
-func (u *Updater) run(who string, ap *api.Approval, done chan struct{}) {
+func (u *Updater) run(who string, ap *api.Approval, runID, pin string, done chan struct{}) {
 	defer u.finish(done)
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
 	defer cancel()
 	ch, err := u.o.Client.Check(ctx, u.o.Key, release.AgentProgram)
 	if err != nil {
 		u.fail("checking the latest release: "+safeErr(err), "")
+		return
+	}
+	if pin != "" && ch.Version != pin {
+		// The update of a run: the passkey confirmed one version, and this is the moment before the download.
+		u.fail(fmt.Sprintf("the newest signed release is %s, and the run this update belongs to was confirmed for %s; not installing", ch.Version, pin), ch.Version)
 		return
 	}
 	cmp, known := release.Compare(u.o.Version, ch.Version)
@@ -349,6 +377,8 @@ func (u *Updater) run(who string, ap *api.Approval, done chan struct{}) {
 	apply := u.o.Apply
 	if ap != nil && u.o.ApplyApproved != nil {
 		apply = func(ctx context.Context) error { return u.o.ApplyApproved(ctx, ap) }
+	} else if runID != "" && u.o.ApplyRun != nil {
+		apply = func(ctx context.Context) error { return u.o.ApplyRun(ctx, runID) }
 	}
 	if err := apply(ctx); err != nil {
 		// The installer was not started (the helper refused the approval, say). The stage must not stay: it

@@ -401,8 +401,22 @@ func (c *HelperClient) ApplyUpdate(ctx context.Context) error { return c.ApplyUp
 // ApplyUpdateApproved asks the helper to start the updater service and hands it the approval POST /update
 // carried. The helper checks it; the agent does not look inside.
 func (c *HelperClient) ApplyUpdateApproved(ctx context.Context, ap *api.Approval) error {
+	return c.applyUpdate(ctx, ap, "")
+}
+
+// ApplyUpdateRun asks the helper to start the updater service for the one update of the confirmed run with
+// this id. The helper checks that there is one, and uses it up.
+func (c *HelperClient) ApplyUpdateRun(ctx context.Context, run string) error {
+	return c.applyUpdate(ctx, nil, run)
+}
+
+func (c *HelperClient) applyUpdate(ctx context.Context, ap *api.Approval, run string) error {
 	by := "self-update"
-	r, err := c.Call(ctx, proto.Request{Verb: proto.VerbApplyUpdate, By: &by, Approval: ap})
+	req := proto.Request{Verb: proto.VerbApplyUpdate, By: &by, Approval: ap}
+	if run != "" && c.runsKnown(ctx) { // a helper from before runs is asked without: it answers what it answers to a request without approval
+		req.Run = &run
+	}
+	r, err := c.Call(ctx, req)
 	if err != nil {
 		return err
 	}
@@ -610,6 +624,37 @@ func (p *HelperPower) ScheduleApproved(action string, delay time.Duration, who s
 	return p.call(proto.Request{Verb: proto.VerbPower, Action: &action, DelayS: &d, By: byOf(who), Approval: ap})
 }
 
+// ScheduleRun is ScheduleBy for the one shutdown of the confirmed run with this id. The helper checks that
+// there is one, and uses it up. A helper from before runs is asked without the run, and answers what it
+// answers to every shutdown without approval.
+func (p *HelperPower) ScheduleRun(action string, delay time.Duration, who, run string) error {
+	d := int(delay / time.Second)
+	req := proto.Request{Verb: proto.VerbPower, Action: &action, DelayS: &d, By: byOf(who)}
+	if p.c.runsKnown(context.Background()) {
+		req.Run = &run
+	}
+	return p.call(req)
+}
+
+// RunLive asks the helper at this moment whether it has a run that a cancel must end: armed, counting down
+// or confirmed. It asks only a helper whose approval check is on and that knows runs; for every other
+// machine the answer is no without a question, and a cancel is what it always was.
+func (p *HelperPower) RunLive() bool {
+	c := p.c
+	ctx := context.Background()
+	if !c.runsKnown(ctx) {
+		return false
+	}
+	c.stMu.Lock()
+	on := c.last.Approval != nil && c.last.Approval.State == api.ApprovalRequired
+	c.stMu.Unlock()
+	if !on {
+		return false
+	}
+	st, known := c.ApprovalNow(ctx)
+	return known && st.Run != nil && (st.Run.State == api.RunArmed || st.Run.State == api.RunOffPending || st.Run.State == api.RunConfirmed)
+}
+
 // Cancel cancels a pending action.
 func (p *HelperPower) Cancel() error {
 	a := "cancel"
@@ -740,6 +785,53 @@ func (c *HelperClient) Checks(ctx context.Context) (seen, checks bool) {
 	return c.hasLast, c.checksLocked()
 }
 
+// runsKnown reports whether the helper that answered last takes run tickets and confirmations (its approval
+// block says "runs"). A helper from before runs knows neither the two verbs nor the member "run" of a request.
+func (c *HelperClient) runsKnown(ctx context.Context) bool {
+	c.Status(ctx)
+	c.stMu.Lock()
+	defer c.stMu.Unlock()
+	return c.checksLocked() && c.last.Approval.Runs >= api.ApprovalRuns
+}
+
+// HelperRuns is the helper's part in a run as the HTTP API sees it (POST /run/arm, /run/go): the helper checks
+// the ticket and the confirmation and keeps the run; the agent only carries them and the answers.
+type HelperRuns interface {
+	RunArm(ctx context.Context, ap *api.Approval) (int, any)
+	RunGo(ctx context.Context, b api.RunGo) (int, any)
+}
+
+func helperWithoutRuns() (int, any) {
+	return 409, map[string]any{"code": api.CodeHelperTooOld,
+		"error": "the running fairy-agent-helper is older than this agent and knows no runs (restart it: Restart-Service fairy-agent-helper; if it is still older after that, install this version of both services)"}
+}
+
+// RunArm is POST /run/arm through the helper.
+func (c *HelperClient) RunArm(ctx context.Context, ap *api.Approval) (int, any) {
+	if !c.runsKnown(ctx) {
+		if st, body := c.approvalCall(ctx, proto.Request{Verb: proto.VerbStatus}); st != 200 {
+			return st, body // not running, or too old for approvals altogether: its own answer
+		}
+		return helperWithoutRuns()
+	}
+	st, body := c.approvalCall(ctx, proto.Request{Verb: proto.VerbRunArm, Approval: ap})
+	c.invalidate() // the next /metrics, and the next cancel, see the run
+	return st, body
+}
+
+// RunGo is POST /run/go through the helper.
+func (c *HelperClient) RunGo(ctx context.Context, b api.RunGo) (int, any) {
+	if !c.runsKnown(ctx) {
+		if st, body := c.approvalCall(ctx, proto.Request{Verb: proto.VerbStatus}); st != 200 {
+			return st, body
+		}
+		return helperWithoutRuns()
+	}
+	st, body := c.approvalCall(ctx, proto.Request{Verb: proto.VerbRunGo, Run: &b.Run, To: &b.To, ShutdownDelayS: b.ShutdownDelayS, WithinS: b.WithinS, Approval: b.Approval})
+	c.invalidate()
+	return st, body
+}
+
 // approvalCall sends a protocol version 3 request and turns the helper's answer into an HTTP answer.
 func (c *HelperClient) approvalCall(ctx context.Context, req proto.Request) (int, any) {
 	st := c.Status(ctx)
@@ -758,6 +850,9 @@ func (c *HelperClient) approvalCall(ctx context.Context, req proto.Request) (int
 	if unanswered(err) {
 		if req.Verb == proto.VerbTrustInit {
 			return helperUnanswered("the trust", "it may be written all the same: look at the machine's approval state before anything else")
+		}
+		if req.Verb == proto.VerbRunArm || req.Verb == proto.VerbRunGo {
+			return helperUnanswered("the run request", "it may have been taken all the same: look at the \"run\" of the machine's approval state")
 		}
 		return helperUnanswered("the question about an approval", "nothing was done; ask again")
 	}
@@ -779,13 +874,23 @@ func (c *HelperClient) approvalCall(ctx context.Context, req proto.Request) (int
 	if r.RetryAfterS > 0 { // too_many_challenges: when to ask again (retryAfter makes the header of it)
 		body[retryAfterMember] = r.RetryAfterS
 	}
+	if r.Reason != "" { // which rule refused a run ticket or confirmation
+		body["reason"] = r.Reason
+	}
 	return r.Status, body
 }
 
 // Challenge is POST /approval/challenge through the helper.
 func (c *HelperClient) Challenge(ctx context.Context, req api.ApprovalRequest) (int, any) {
+	if req.Verb == api.ApproveRunGo && !c.runsKnown(ctx) {
+		if st, body := c.approvalCall(ctx, proto.Request{Verb: proto.VerbStatus}); st != 200 {
+			return st, body
+		}
+		return helperWithoutRuns()
+	}
 	return c.approvalCall(ctx, proto.Request{Verb: proto.VerbChallenge, For: &req.Verb, Zone: req.Zone, Percent: req.Percent,
-		Mode: req.Mode, Action: req.Action, DelayS: req.DelayS, TrustHash: req.TrustHash})
+		Mode: req.Mode, Action: req.Action, DelayS: req.DelayS, TrustHash: req.TrustHash,
+		Run: req.Run, To: req.To, ShutdownDelayS: req.ShutdownDelayS, WithinS: req.WithinS})
 }
 
 // TrustInit is POST /approval/trust through the helper: the first-time set of the trust, with the approval
