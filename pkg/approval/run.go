@@ -323,6 +323,9 @@ func (g *Gate) runEnsure(now time.Time, up time.Duration) {
 	if g.o.ReadOnly || !g.o.Runs || g.state != api.ApprovalRequired || !m.loaded || m.bad != "" || m.file != nil {
 		return
 	}
+	if g.bootID() == "" {
+		return // a machine that cannot say which boot this is keeps no runs, and no record of them
+	}
 	m.file = newRunFile(g.bootRef(now, up))
 	m.armedHere = true
 	g.o.Log.Warn("approval: there was no run record; one was made anew. No ticket is taken until this machine has been started again, and none that was signed before now",

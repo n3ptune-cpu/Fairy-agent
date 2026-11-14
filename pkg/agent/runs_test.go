@@ -55,6 +55,9 @@ type rrig struct {
 	helperStarts atomic.Int32                      // the helper started it
 	guests       atomic.Bool
 	tokens       []string
+	// beforeStart, when set, is called once in the moment between the agent's first look at a request for an
+	// update (when it arrives) and its second (when the installer is about to be started).
+	beforeStart atomic.Pointer[func()]
 }
 
 func (r *rrig) clock() time.Time { r.mu.Lock(); defer r.mu.Unlock(); return r.now }
@@ -95,7 +98,13 @@ func newRunsRig(t *testing.T, windows bool) *rrig {
 	uo := agent.UpdaterOptions{Version: "41-aaaaaaa", Key: r.gh.Pub, Client: r.gh.Client(),
 		StageDir: filepath.Join(dir, "state", "update"), ResultPath: filepath.Join(dir, "result", "result.json"),
 		Asset: "fairy-agent-linux-amd64", ResultWait: 50 * time.Millisecond,
-		Apply: func(context.Context) error { r.ownStarts.Add(1); return nil }}
+		Apply: func(context.Context) error { r.ownStarts.Add(1); return nil },
+		Ready: func() error {
+			if f := r.beforeStart.Swap(nil); f != nil {
+				(*f)()
+			}
+			return nil
+		}}
 	d := agent.Deps{Collector: agenttest.NewCollector(), Version: "test"}
 	if windows {
 		r.bootID = "0f1e2d3c4b5a69788796a5b4c3d2e1f0" // the value the helper keeps in its volatile registry key
@@ -764,4 +773,96 @@ func rawPost(t *testing.T, base, path, tok, body string) (int, string) {
 	defer resp.Body.Close()
 	b, _ := io.ReadAll(resp.Body)
 	return resp.StatusCode, string(b)
+}
+
+// R36 of the review. On Windows the agent looks at the helper's run record when the request for the run's
+// update arrives (before anything is downloaded), and again when the installer is about to be started; the
+// version it installs is the one the second look hands it. Between the two the run may have ended: cancelled
+// on the machine, or its time ran out. Then nothing is downloaded and nothing is started. (On Linux the agent
+// keeps the run itself, and the second look is the one that uses the update up.)
+func TestRunUpdateLooksAtTheRunAgainBeforeItStarts(t *testing.T) {
+	bothKinds(t, func(t *testing.T, r *rrig) {
+		for _, ends := range []string{"cancelled on the machine", "its time ran out"} {
+			t.Run(ends, func(t *testing.T) {
+				r := newRunsRig(t, r.windows).trusted()
+				r.arm(hRunA)
+				if st, b := r.confirm(hRunA, "42-bbbbbbb", 30, 300); st != 200 {
+					t.Fatalf("go: %d %v", st, b)
+				}
+				between := func() {
+					switch ends {
+					case "cancelled on the machine":
+						id, _ := r.boot()
+						up, _ := r.uptime()
+						if _, changed, err := r.files.RunCancel(approval.RunStamp{BootID: id, Now: r.clock(), Up: up}); err != nil || !changed {
+							t.Errorf("helper-run cancel: %v %v", changed, err)
+						}
+					case "its time ran out":
+						r.mu.Lock()
+						r.now, r.up = r.now.Add(301*time.Second), r.up+301*time.Second
+						r.mu.Unlock()
+					}
+				}
+				r.beforeStart.Store(&between)
+				st, b := r.post("/update", map[string]any{"run": hRunA})
+				if r.beforeStart.Load() != nil {
+					t.Fatal("the moment between the two looks never came: the test tests nothing")
+				}
+				if st == 202 {
+					t.Fatalf("the update of a run that ended between the two looks was started: %d %v", st, b)
+				}
+				wantRefusal(t, "the update of a run that ended between the two looks", st, b, 403, api.CodeApprovalRequired)
+				r.updateDone()
+				if r.starts() != 0 {
+					t.Fatalf("the installer was started %d times", r.starts())
+				}
+			})
+		}
+	})
+}
+
+// R42 of the review. On Linux the agent ends the run itself when the panel cancels, and then stops the
+// pending action. When the end of the run cannot be written down, the answer is not 200: a restart of the
+// agent would find the run in the record again. And whatever the answer, the agent that is running does not
+// switch the machine off.
+func TestLinuxCancelIsNotAnsweredOKWhenTheEndOfTheRunCannotBeWritten(t *testing.T) {
+	r := newRunsRig(t, false).trusted()
+	r.arm(hRunA)
+	// the record's name is taken by something no file can replace
+	rec := filepath.Join(filepath.Dir(r.files.Path), approval.RunFileName)
+	good, err := os.ReadFile(rec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(rec); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(rec, "in the way"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	st, b := r.post("/power", map[string]any{"action": "cancel"})
+	if st == 200 {
+		t.Fatalf("the end of the run could not be written and the cancel was answered %d %v", st, b)
+	}
+	if st != 500 || !strings.Contains(b["error"].(string), "could not be written down") {
+		t.Errorf("cancel: %d %v", st, b)
+	}
+	r.pass(2000 * time.Second)
+	if len(r.exec.Scheduled) != 0 {
+		t.Fatalf("the machine switched itself off after a cancel: %v", r.exec.Scheduled)
+	}
+	// the record is back as it was (armed, as a restarted agent would find it): the cancel sent again ends it
+	if err := os.RemoveAll(rec); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(rec, good, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if st, b := r.post("/power", map[string]any{"action": "cancel"}); st != 200 {
+		t.Fatalf("the cancel sent again: %d %v", st, b)
+	}
+	r.pass(2000 * time.Second)
+	if len(r.exec.Scheduled) != 0 {
+		t.Fatalf("switched off: %v", r.exec.Scheduled)
+	}
 }
