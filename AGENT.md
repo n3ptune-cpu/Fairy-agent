@@ -1178,6 +1178,7 @@ says the same next to the id. The panel then has to be told the new id (it still
 | `POST /fan/duty`, `POST /fan/mode` | yes | after one approved fan change that the machine applied, further fan changes need none for 30 s (the **fan window**; see settings) |
 | `POST /power` with `shutdown`, `reboot`, `sleep` | yes, one each | never the fan window |
 | `POST /update` | yes, one each | Windows: see "Updates on Windows" below |
+| `POST /run/arm`, `POST /run/go` (0.9.0) | each **is** one | the ticket and the confirmation of a run: see "Runs" below. `POST /update` and `POST /power` `shutdown` with `"run"` are then let through once each without a new one |
 | `POST /power` with `cancel` | no | it only stops something. Windows: answered `503 helper_stopped` while the helper is stopped (see the next row but one) |
 | `POST /wol`, `POST /bmc/power` (`on`, `status`) | no | they wake machines; the relay has no "off" |
 | `POST /helper/stop`, `/helper/start` | no | the service manager does this, not the helper; stop hands the fans back to the BMC. While the helper is stopped nothing that goes through it runs, and that includes the cancel of a shutdown (`503 helper_stopped`) until `/helper/start` |
@@ -1431,7 +1432,7 @@ the user (`sub`), the key id and the first 8 characters of the challenge. Never 
 **What the panel sees.** `GET /metrics` has `"approval": {"state": "off" | "required" | "broken" | "unknown",
 "enforced_by": "helper" | "agent", "proto": 2, "machine_id": ..., "issuer": ..., "client_id": ..., "keys": [{"kid", "alg",
 "thumbprint"}], "users": <how many>, "trust_hash": ..., "set_by": "panel" | "admin", "set_at": ...,
-"fan_window_s": ..., "boot_shutdown_s": ..., "error": ...}`. No user ids
+"fan_window_s": ..., "boot_shutdown_s": ..., "error": ..., "runs": 1, "run": {...}}` (the last two: "Runs" below). No user ids
 and no keys, only how many users, each key's thumbprint, and `trust_hash`: the hash of issuer, client id, keys
 and users that the panel computes for a first-time set (`pkg/agent/api`: `TrustHash`), so a panel can tell
 whether a machine trusts exactly what it would set, without the user ids being sent. `machine_id`: this
@@ -1527,6 +1528,179 @@ goes back to the program that was running before it, which is this one or a newe
 set with it. What to do: do not go back on a machine with a trust file unless you mean to switch the check
 off; and a panel should treat a machine whose `approval` block was there and is gone as an alarm, not as
 "an agent without the feature".
+
+### Runs: approvals inside the panel's "Update unpowered hosts" (0.9.0)
+
+The panel can wake machines, update them and switch them off again in one go (a run). Until 0.9.0 a machine
+with the check on could not take part: it was off when you confirmed the start, so it could not give the
+challenge an approval answers. From 0.9.0 it can, with two passkey confirmations: one at the start, one when
+the machines are up.
+
+**What you must know before you install it.**
+
+* **Nothing changes until a panel that knows runs is installed** (panel build 15). This agent answers every
+  request an older panel sends exactly as 0.8.0 did; `"proto"` in the `approval` block stays 2, and the only
+  thing an older panel could see is one new member in that block, `"runs": 1`, which it does not read. A
+  machine without the check behaves as before in a run. A machine with the check that no ticket reaches
+  behaves as before too: no file is written, nothing is counted down, every request needs its approval.
+* **Three things get slightly weaker than before, each within fixed bounds.**
+  1. *One kind of approval is not the answer to a challenge of the machine.* Every approval before this
+     answered 32 random bytes the machine had made up minutes earlier, so it could be used on that machine,
+     once, and nowhere else. The **run ticket** cannot (the machine was off). It is signed by your passkey
+     like every approval, it names the machine, and it allows exactly one thing: *this machine switches
+     itself off again after the wait it names, with a notice*. For as long as it is valid (the panel's
+     default: 7 minutes; never more than 35) whoever holds it can present it. The machine takes it only when
+     it has been up for less than 10 minutes, started **after** the ticket was signed, has taken no ticket
+     in this boot and none of this run before.
+  2. *The panel keeps that ticket in memory until the machines are up* (up to its validity; never on disk).
+     Before this it kept no token after using it. (This is the panel's part; it is named here because it
+     belongs to the same change.)
+  3. *After the second confirmation the machine keeps a small record on disk*: "this run may still update
+     once and shut down once", for the time the confirmation names (the panel's default: 25 minutes plus its
+     settle time; never more than 60), in this boot only. It has to survive the restart of the checking
+     service during the update. Before this no approval outlived the service that accepted it. The record
+     holds no token; it is in the folder of the trust file, with the same permissions.
+  The panel alone still cannot make a checked machine switch off, update, or arm anything: both steps need
+  a token signed by your passkey, and the machine checks both itself with the pinned key.
+* `boot_shutdown_s` (the machine's own setting for one unapproved shutdown shortly after boot) has no part in
+  a run and can stay off.
+
+**The two texts.** Both are approved by an ordinary ID token of the same Pocket ID client, with the same
+nonce over the same kind of list (`pkg/agent/api`: `ApprovalNonce`); only the request text of the entry is new:
+
+```
+run_arm run=<16 hex> valid_s=<120-2100> wait_s=<120-3600> notice_s=<30-600>               the ticket
+run_go run=<16 hex> to=<version | -> shutdown_delay_s=<10-600> within_s=<300-3600>          the confirmation
+```
+
+`run`: 16 lower-case hex characters the panel makes up for the run. `to`: the version the update must install
+(1-48 characters of `A-Z a-z 0-9 . _ + -`), or `-`: **no update, only the shutdown**. A text outside these
+limits has no canonical form: it cannot be signed and is not accepted. `notice_s` and `shutdown_delay_s` are
+also never below this machine's `power_control.min_delay_s` (`409 run_refused`, reason `limits`).
+
+**1. The ticket: `POST /run/arm`** (control token), body `{"approval": {"token": ..., "entries": [...]}}`. The
+list holds, for this machine, one entry `{"machine_id": <its id on record>, "challenge": <43 characters: 32
+random bytes of the panel's>, "request": "run_arm ..."}`. The checker (Windows: the helper; Linux: the agent)
+accepts it when **all** of this holds:
+
+* a trust is set on this machine (else `409 approval_off`);
+* exactly one `run_arm` entry of the list is this machine's: the token carries the nonce of the list with
+  **this machine's own id** written into that entry (as for every approval), and the entry's challenge member
+  is not a challenge this machine has open;
+* the token passes the same check as every approval: signed with a pinned key, the issuer, the client "Fairy
+  PC actions", an allowed user, a passkey sign-in, not expired, no time in it in this machine's future; and it
+  was signed (`iat`) and the passkey was checked (`auth_time`) at most `valid_s` ago (plus the 60 s the clocks
+  may differ);
+* the machine has been up for less than 600 s, by its uptime;
+* it started (its clock minus its uptime) not before the ticket was signed, less those 60 s. A machine that
+  was already running when you confirmed can never be armed;
+* no ticket was accepted in this boot (one per boot, whatever became of it), none of this run before (the
+  machine remembers the last 16 runs, also across restarts), no run is confirmed, and no cancel ended a run in
+  this boot;
+* no shutdown, reboot or sleep of Fairy's is pending.
+
+Answer `200 {"run": "<id>", "state": "armed", "off_in_s": <wait_s>}`. The run record is written **before**
+the answer; if it cannot be written, nothing is armed (`503 run_unavailable`). No challenge is ever given for
+a `run_arm` text (`POST /approval/challenge` answers `400`), so a ticket is never the answer to one, and the
+answer to a challenge is never a ticket.
+
+**2. The wait and the self-off.** The machine counts `wait_s` from the moment it accepted the ticket, **on its
+uptime, not on its clock**: a clock that is set while it waits (the first time synchronisation after weeks
+without power) moves nothing. When the wait is over and nothing ended the run:
+
+* another shutdown, reboot or sleep is pending: the run ends, nothing is scheduled over it;
+* Linux: a guest runs (a process named `kvm`, `qemu-kvm`, `qemu-system-...` or `lxc-start`), or the process
+  list cannot be read: the run ends, the machine stays on, also when the guest stops later;
+* an update is being installed: it waits for it, 15 minutes at most;
+* otherwise it schedules **the ordinary delayed shutdown** with `notice_s`, once. From here on that is this
+  machine's pending power action like any other: `power_control.pending` shows it (`requested_by`: `run
+  <id>`), Windows counts it down and shows its own notice with the text `Fairy: this PC was started for an
+  update by <name> and nobody confirmed it. Shutdown in <n> seconds. To keep it on: shutdown /a` (`<name>`:
+  the user name in the token of whoever signed the ticket). Linux shows no notice (as for every shutdown).
+
+**3. Keeping it on.** Any of these ends the run on the machine (armed, counting down or confirmed), and
+**nothing arms it again in this boot**: the panel's Cancel (`POST /power` with `cancel`, which needs no
+approval, as ever, and also stops the countdown); `fairy-agent helper-run cancel` on the machine (root /
+Administrator); on Windows `shutdown /a` during the countdown (the machine is still running a minute after
+the countdown ended: the run counts as cancelled). `fairy-agent helper-run show` prints what is on record.
+A changed or removed trust file ends a live run too.
+
+**4. The confirmation: `POST /approval/challenge`** with `{"verb": "run_go", "run", "to", "shutdown_delay_s",
+"within_s"}` gives a challenge like for every other request (180 s, single use), and **`POST /run/go`** with
+`{"run", "to", "shutdown_delay_s", "within_s", "approval": {...}}` is checked exactly like every approval.
+Accepted: `200 {"run", "state": "confirmed", "within_s"}`; the self-off is off, and the record now says: one
+update (to exactly `to`; none with `-`), one shutdown with exactly `shutdown_delay_s`, for `within_s` seconds
+of uptime from now, in this boot. It is also accepted on a machine that no ticket armed (the panel could not
+arm it and you confirmed all the same). It is refused (`409 run_refused`, the `reason` says which) once the
+wait of an armed run is over (`too_late`), while another run is armed or confirmed (`other_run`), a second
+time (`already_confirmed`), and for a run this machine had before and that is over here: cancelled, finished,
+or ended by a restart of the machine (`run_over`). A refusal for one of these costs no approval: the same
+refusal already answers the challenge request.
+
+**5. The one update and the one shutdown.** `POST /update {"run": "<id>"}` and `POST /power {"action":
+"shutdown", "delay_s": <shutdown_delay_s>, "run": "<id>"}`, both without `approval`, are let through once
+each. Everything else about them is as for every update and shutdown (the installer installs only a newer
+signed release; the shutdown is pending, shown and cancellable). The update installs the version the
+confirmation named or nothing: when the newest signed release is another one, nothing is downloaded,
+`self_update` says `failed` with both versions, and the run's update is spent. A second update or shutdown,
+another delay, a reboot or sleep, another run id, another boot, or a request after `within_s` is answered
+like every request without approval: `403 approval_required` (the text says why the run did not cover it).
+A request that names a run stands on the run alone: neither the fan window nor `boot_shutdown_s` is asked for
+it. The shutdown ends the run. With `approval` in the same body the approval is checked as ever and `run` is
+not looked at. On a machine without a trust file `run` is ignored and the request runs as it always did.
+
+**What the panel sees.** The `approval` block has `"runs": 1` on a machine whose checker takes runs (absent:
+an older agent or helper, Windows without the helper, an agent that cannot read the uptime), and, while there
+is one, `"run": {"id", "state", "off_at"}`: `armed` (`off_at`: when the self-off begins, Unix seconds by
+today's clock), `off_pending` (`off_at`: when the countdown ends), `confirmed`, and for the run that ended
+last in this boot `cancelled` (a cancel, a veto when the wait was over, a changed trust, a shutdown that could
+not be scheduled) or `done` (its shutdown was let through, or the confirmation's time ran out).
+
+**Refusals of the two routes.**
+
+| Status, code | `reason` | When |
+|---|---|---|
+| `409 approval_off` | | no trust file on this machine: it takes no ticket and no confirmation (and needs none) |
+| `404 approval_disabled` | | nothing here keeps runs (Windows without the helper) |
+| `404 power_control_disabled` | | `power_control` is off: a run ends with a shutdown |
+| `409 helper_too_old` | | Windows: the running helper is from before runs |
+| `503 approval_unavailable` | | the trust file cannot be used |
+| `503 run_unavailable` | | the run record cannot be read or written, or the uptime cannot be read |
+| `400` | | the body is not the route's (no `approval` for a ticket; numbers outside the limits) |
+| `403 approval_required` | | `/run/go` without `approval` |
+| `403 approval_refused` | the reason word of every refused approval (`token_signature`, `issuer`, `audience`, `user`, `amr`, `expired`, `nonce`, `entries`, `no_challenge`, ...), and for a ticket also `no_ticket` (no `run_arm` entry in the list), `ambiguous` (two for this machine), `clock` / `auth_time` (older than `valid_s`, or the clock is wrong) | the token or its list |
+| `409 run_refused` | `not_fresh`, `started_before`, `already_armed`, `run_used`, `power_pending`, `limits`, `other_run` (ticket); `limits`, `other_run`, `already_confirmed`, `too_late`, `run_over` (confirmation) | a rule of runs |
+
+**The clock.** A machine whose clock is behind refuses the ticket (`clock`: it looks signed in the future); it
+is not armed and stays on. A machine whose clock is ahead sees the ticket as older than it is and refuses it
+once that exceeds `valid_s`; within `valid_s` the "started after the signature" rule is looser by as much as
+the clock is ahead, and the 10 minutes of uptime are what bounds it.
+
+**The record.** `approval-run.json`, next to `approval-trust.json` (Windows:
+`C:\ProgramData\fairy-agent\helper\`, written by the helper; Linux: `/var/lib/fairy-agent/`, written by the
+agent), with the trust file's checks (the folder; a plain file with one name, not a link; its owner; who can
+write it; at most 8 KiB; strict JSON, every value checked) and written whole under another name, then renamed.
+It holds no token. Its live part (armed / counting down / confirmed) is taken out when it is used up, when the
+run is cancelled, when its time is over, and when the service finds it in a later boot than it was written in
+(Linux: the kernel's boot id; Windows: the uptime must not be smaller than on record and the moment of the
+start, by clock and uptime, the same within two minutes; a clock set by more than that before the helper
+restarts ends the run, which leaves the machine on). What stays is a mark that gives nothing and only
+refuses: the boot of the last ticket or cancel, the ids of the last 16 runs, how the last run ended. A record
+that cannot be read counts as no record (nothing is armed, nothing let through) and is said in the log; no
+ticket and no confirmation is accepted until it is removed (`fairy-agent helper-run cancel` removes it).
+
+**Windows and Linux.** The same routes and texts. Windows: the **helper** checks the ticket and the
+confirmation, writes the record, counts the wait and schedules the shutdown; the agent only carries (pipe verbs
+`run_arm` and `run_go`, the member `run` of `power` and `apply_update`, all version 3 frames; the agent passes
+a `cancel` on to the helper whenever the helper has a run, also with nothing pending). As with every update on
+Windows, the version check of a run's update is the agent's: it reads the record itself before it downloads,
+and the helper uses the run's one update up when it starts the installer. Linux: the agent does all of it, and
+takes the run over from the record when it restarts after the update.
+
+**The log** (Windows: `helper.log`; Linux: the agent's): `approval: run armed`, `approval: run self-off
+scheduled`, `approval: run confirmed`, `approval: run cancelled`, `approval: run done`, each with the run id,
+the `sub` and the key id, and `approval: run ticket refused` / `run confirmation refused` with the reason.
+Never a token or a piece of one.
 
 ## Updates (the panel's Update button)
 
@@ -1973,6 +2147,14 @@ on the first install and report anything odd:
     (it needs the agent's account to read `helper\approval-trust.json`; where it cannot, there is no look).
   * And still: a real Pocket ID token checked by a machine (its size and header, the clock difference on
     real PCs), and whether GetTickCount64 behaves as described for `boot_shutdown_s`;
+  * **Runs (0.9.0; TEST-ON-WINDOWS.md, section 14; none of it has run on Windows):** the helper writing and
+    reading `helper\approval-run.json` (owner and access list by inheritance, the rename over it), the agent's
+    account reading that file before a run's update, the uptime starting at zero after a wake (Fast Startup:
+    where it does not, the PC is never armed and stays on), the self-off's notice shown whole by Windows
+    (its text ends in `shutdown /a`), `shutdown /a` and the panel's Cancel during the countdown, the helper
+    taking a run over after the update restarted it, whether the updater service shows as running to the
+    helper while it installs, and `helper-run show | cancel` in an Administrator window. An ACCEPTED ticket
+    and confirmation need a panel that knows runs;
 * **0.6.0's security fixes** (TEST-ON-WINDOWS.md, section 12, is the checklist; none of this has run on
   Windows): the trust check and repair of the data folder (owners and access lists read from the objects
   themselves, the rename to `*.untrusted-<time>`, folders created with their final permissions), the updater

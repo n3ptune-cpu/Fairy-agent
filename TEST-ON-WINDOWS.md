@@ -831,6 +831,95 @@ file, so on a PC that went back with the file still in place the check is simply
 `/metrics`, step 13's shutdown is accepted) until the new program is installed again, which then enforces
 the same trust as before.
 
+## 14. Runs (0.9.0): approvals inside "Update unpowered hosts" (none of this has run on Windows)
+
+What it is: AGENT.md, "Runs". The checking code was tested on Linux with a made-up Pocket ID, the helper's
+part on an in-memory pipe. On a real PC, before a panel knows runs, only the refusals, `helper-run` and "the
+old approvals still work" can be shown (part A). An ACCEPTED ticket needs the panel (part B, later).
+
+Needs: the trust of section 13 B set, both services running, `power_control.enabled: true` and
+`self_update.enabled: true`, and `$ctl`, `$read`, `$base` as in section 13. One step is one line, in **Windows
+PowerShell as Administrator**; after `->` is what a good answer looks like. Nothing here switches the PC off.
+
+### A. Without a panel that knows runs
+
+* J1 **[KEY]** **The block says what the machine can do, and nothing else changed in it.**
+  `curl.exe -s -H "Authorization: Bearer $read" "$base/metrics" | Select-String -Pattern '"approval":\{[^}]*\}' | ForEach-Object { $_.Matches.Value }`
+  -> `"approval":{"state":"required","enforced_by":"helper","proto":2, ... ,"runs":1}`: `"proto":2` as before,
+  `"runs":1` new, no `"run"`.
+* J2 **[KEY]** **A request alone arms nothing.**
+  `curl.exe -s -w " [%{http_code}]" -H "Authorization: Bearer $ctl" -d "{}" "$base/run/arm"`
+  -> `{"error":"a run ticket is an approval: the body needs \"approval\""} [400]`
+  `Set-Content -Path "C:\fairy-selfbuilt\arm-junk.json" -Value '{"approval":{"token":"x","entries":[]}}' -Encoding ASCII`
+  `curl.exe -s -w " [%{http_code}]" -H "Authorization: Bearer $ctl" --data-binary "@C:\fairy-selfbuilt\arm-junk.json" "$base/run/arm"`
+  -> `{"code":"approval_refused","error":"approval refused (entries): the list of entries is not well-formed, ...","reason":"entries"} [403]`
+  `curl.exe -s -w " [%{http_code}]" -H "Authorization: Bearer $read" -d "{}" "$base/run/arm"` -> `{"error":"unauthorized"} [401]`
+* J3 **The challenge for a confirmation is given, the confirmation without approval is refused.**
+  `Set-Content -Path "C:\fairy-selfbuilt\go.json" -Value '{"verb":"run_go","run":"00000000000000aa","to":"-","shutdown_delay_s":60,"within_s":300}' -Encoding ASCII`
+  `curl.exe -s -w " [%{http_code}]" -H "Authorization: Bearer $ctl" --data-binary "@C:\fairy-selfbuilt\go.json" "$base/approval/challenge"`
+  -> `{"needed":true,"request":"run_go run=00000000000000aa to=- shutdown_delay_s=60 within_s=300","challenge":"...","expires_in_s":180,"issuer":"...","client_id":"..."} [200]`
+  (`shutdown_delay_s` below the PC's `power_control.min_delay_s`: `{"code":"run_refused",...,"reason":"limits"} [409]`.)
+  `Set-Content -Path "C:\fairy-selfbuilt\go2.json" -Value '{"run":"00000000000000aa","to":"-","shutdown_delay_s":60,"within_s":300}' -Encoding ASCII`
+  `curl.exe -s -w " [%{http_code}]" -H "Authorization: Bearer $ctl" --data-binary "@C:\fairy-selfbuilt\go2.json" "$base/run/go"`
+  -> `{"code":"approval_required","error":"this needs a passkey approval (Pocket ID) and the request carried none"} [403]`
+  A challenge for a ticket is never given:
+  `curl.exe -s -w " [%{http_code}]" -H "Authorization: Bearer $ctl" -d '{\"verb\":\"run_arm\",\"run\":\"00000000000000aa\",\"valid_s\":420,\"wait_s\":960,\"notice_s\":120}' "$base/approval/challenge"`
+  -> `{"error":"a run ticket (run_arm) answers no challenge: it is sent to POST /run/arm"} [400]`
+* J4 **[KEY]** **A shutdown or an update that names a run nobody confirmed is refused like one without approval.**
+  `curl.exe -s -w " [%{http_code}]" -H "Authorization: Bearer $ctl" -d '{\"action\":\"shutdown\",\"delay_s\":600,\"run\":\"00000000000000aa\"}' "$base/power"`
+  -> `{"code":"approval_required","error":"this needs a passkey approval (Pocket ID) and the request carried none; the run it names does not cover it: no run is confirmed on this machine in this boot"} [403]`
+  `curl.exe -s -w " [%{http_code}]" -H "Authorization: Bearer $ctl" -d '{\"run\":\"00000000000000aa\"}' "$base/update"`
+  -> the same `[403]`; `/metrics` does NOT show `"self_update":{"state":"downloading"`.
+  Then step 14 of section 13 (cancel) -> `[200]`, in case anything was scheduled after all.
+* J5 **`helper-run` on the PC.**
+  `& "C:\Program Files\Fairy\fairy-agent.exe" helper-run show` -> `run record:  C:\ProgramData\fairy-agent\helper\approval-run.json` and `run:  none (no record)`
+  `& "C:\Program Files\Fairy\fairy-agent.exe" helper-run cancel` -> `no run is armed or confirmed on this machine (...): nothing changed`
+  `Test-Path "C:\ProgramData\fairy-agent\helper\approval-run.json"` -> `False` (nothing above wrote a record)
+* J6 **The helper's log has the refusals and no token.**
+  `Get-Content "C:\ProgramData\fairy-agent\helper\helper.log" -Tail 20`
+  -> lines `approval: run ticket refused ... reason=entries` and `approval: required, none sent; the run named does not cover it`; `verb=run_arm` in the `request` line of J2; nowhere the `x` of the junk token as a value.
+* J7 **[KEY]** **The old approvals still work.** With the panel you have (build 14): press Shut down on the VM's
+  page, confirm with the passkey, then Cancel. -> as before: `approval: accepted` in `helper.log`, the Windows
+  notice, the cancel.
+* J8 **Without a trust file the two routes say so.** After `helper-trust clear --yes`:
+  the second line of J2 -> `{"code":"approval_off","error":"approval is off on this machine: ..."} [409]`,
+  and the first line of J4 with `"delay_s":600` -> `[200]` with `"pending"` (then cancel, step 14): `run` is
+  ignored on a machine without the check. Set the trust again (section 13 B) afterwards.
+* J9 **[KEY]** **Does the uptime start again after a wake?** The ticket arms only a PC that has been up for
+  less than 10 minutes. Shut the VM / PC down from the Start menu, wake it, and within two minutes:
+  `curl.exe -s -H "Authorization: Bearer $read" "$base/metrics" | Select-String -Pattern '"uptime_s":[0-9.]+' | ForEach-Object { $_.Matches.Value }`
+  -> a number under 600. A number of hours or days: Fast Startup keeps Windows' uptime across a shutdown on
+  this PC; such a PC is never armed by a ticket (`not_fresh`) and stays ON in a run. Please send the number.
+
+### B. With a panel that knows runs (later)
+
+Start a run for this PC only, confirm the start with the passkey, and do NOT confirm the second time.
+
+* K1 **[KEY]** When the PC is up: `Get-Content "C:\ProgramData\fairy-agent\helper\helper.log" -Tail 10`
+  -> `approval: run armed result=accepted run=<16 hex> sub=... kid=... wait_s=... notice_s=...`.
+  `& "C:\Program Files\Fairy\fairy-agent.exe" helper-run show` -> `run:  <id>, armed: this machine switches itself off in <time> ...`
+  `icacls "C:\ProgramData\fairy-agent\helper\approval-run.json"` -> the same lines as for `approval-trust.json`
+  in that folder (SYSTEM and Administrators full, the agent's account read), and
+  `Select-String -Path "C:\ProgramData\fairy-agent\helper\approval-run.json" -Pattern "eyJ"` -> nothing (no token in it).
+* K2 **[KEY]** Wait for the time `helper-run show` named. -> Windows shows its own notice, with the whole text
+  `Fairy: this PC was started for an update by <name> and nobody confirmed it. Shutdown in <n> seconds. To keep it on: shutdown /a`.
+  Please send a photo if the text is cut (it ends in `/a`). `/metrics` shows `"pending":{"action":"shutdown",...,"requested_by":"run <id>"}`.
+* K3 **[KEY]** `shutdown /a` -> the notice goes away and the PC stays on. Two minutes later:
+  `helper-run show` -> `run:  none is armed or confirmed` and `last run:  <id>, cancelled`; `helper.log` has
+  `approval: run cancelled ... why="the machine is still running after the countdown: ..."`.
+* K4 Start the same run again from the panel (the PC is on now) -> the panel reports that it could not be
+  armed; `helper.log`: `approval: run ticket refused ... reason=not_fresh` (or `already_armed`).
+* K5 **[KEY]** A second run, and this time press Cancel in the panel while the PC waits. -> `helper.log`:
+  `approval: run cancelled ... why="a cancel of the pending power action"`; the PC stays on past the time.
+* K6 **[KEY]** A third run, confirmed the second time. -> `approval: run confirmed`, then the update (the
+  helper restarts), `approval: run taken over from the record (this service was restarted)`, `approval:
+  accepted, the one shutdown of the run`, the ordinary shutdown notice, the PC goes off. Please send the
+  `helper.log` lines of the whole run.
+
+### What to send back
+
+The output of J1, J2, J4, J5, J9 and the tail of `helper.log` (J6); later K1 to K6.
+
 ## Rollback (back to build 10 / v0.4.4)
 
 0.4.4 does not know the helper or the new account, so remove 0.5's services first. Config and tokens stay, the
