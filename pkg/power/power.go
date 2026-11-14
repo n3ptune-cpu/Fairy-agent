@@ -64,12 +64,22 @@ type Check struct {
 	Scheme    string // http or https
 	Host      string // host[:port]
 	Reads     string // what is read there (homeassistant: the sensor's entity id)
+	Also      string // what else is read there, "" for nothing (homeassistant: "voltage sensor.x, energy sensor.y")
 	SecretEnv string // the environment variable the source takes its secret from
 	SecretSet bool   // that variable is set (in the environment of whoever asks)
 }
 
 // Checker is a Source that has a Check (today: homeassistant).
 type Checker interface{ Check() Check }
+
+// Partial is a Source whose reading can come without some of the values it was set up to read (today:
+// homeassistant with voltage_entity, current_entity or energy_entity). ReadPartial is Read, and says for each
+// such value why it is not in the reading: missing has the value's name in a Reading's JSON ("voltage",
+// "current", "energy_kwh_total") and a short fixed text that is safe to show. It is nil when nothing is
+// missing, and always nil with an error: a reading that failed has one reason, its error.
+type Partial interface {
+	ReadPartial(ctx context.Context, timeout time.Duration) (rs []Reading, missing map[string]string, err error)
+}
 
 // Refused reports whether err says that the device refused the secret it was sent (a token, a password): an
 // error that has, itself or in what it wraps, a method `Refused() bool` that returns true.
