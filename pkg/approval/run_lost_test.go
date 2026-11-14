@@ -171,3 +171,58 @@ func TestRecordThatAppearedIsNotMadeAnewOver(t *testing.T) {
 		t.Fatalf("a ticket on a machine whose record is from a boot before: %v", ref)
 	}
 }
+
+// A record that is made anew closes its boot by itself, not only by what the service remembers and not only
+// by refusing older tickets: the record is removed while the machine is off, the service starts five seconds
+// into the boot (it remembers nothing) and makes the record, and a ticket that is signed AFTER that, in the
+// first minute of the boot (so that the machine still counts as started for it), is refused in this boot.
+// After the next start of the machine such a ticket arms it.
+func TestRecordMadeAnewClosesItsBootForANewTicketToo(t *testing.T) {
+	r := newRunRig(t)
+	if err := os.Remove(r.files.RunPath()); err != nil {
+		t.Fatal(err)
+	}
+	r.mu.Lock()
+	r.uptime = 5 * time.Second
+	r.mu.Unlock()
+	r.restart()
+	r.w.Tick() // the record is made anew
+	if exists, err := r.files.RunRecordCheck(); !exists || err != nil {
+		t.Fatalf("no record after the service looked: %v %v", exists, err)
+	}
+	r.wait(25 * time.Second)
+	r.restart()                                       // nothing remembered: the record alone says it
+	_, ref := r.w.Arm(r.ticket(runA, 20*time.Second)) // signed 5 s after the record was made, 10 s into the boot
+	runRefused(t, "a ticket signed after the record was made anew, in the same boot", ref, 409, api.CodeRunRefused, api.RunReasonArmedThisBoot)
+	r.reboot(time.Hour, 30*time.Second)
+	if _, ref := r.w.Arm(r.ticket(runA, time.Second)); ref != nil {
+		t.Fatalf("a ticket after the next start: %v", ref)
+	}
+}
+
+// The service closes the boot itself when it finds the cancel of the administrator's command, and does not
+// leave that to the mark the command wrote: a command that could not read the id of the boot leaves a mark
+// that is told by the clock, and a clock that is set forward afterwards makes that mark look like another
+// boot's. The service's own mark names the boot, and stays with a restart of the service.
+func TestServiceClosesTheBootWhenItFindsTheCancelOnTheMachine(t *testing.T) {
+	for _, restart := range []bool{false, true} {
+		r := newRunRig(t)
+		r.armed(runA)
+		stamp := r.stamp()
+		stamp.BootID = "" // the command could not read it
+		if _, changed, err := r.files.RunCancel(stamp); err != nil || !changed {
+			t.Fatalf("helper-run cancel: %v %v", changed, err)
+		}
+		r.w.Tick() // the service finds it
+		if st := r.state(); st != api.RunCancelled {
+			t.Fatalf("the run after the cancel: %q", st)
+		}
+		r.jump(24 * time.Hour) // the clock is set (it was a day behind)
+		r.wait(5 * time.Second)
+		if restart {
+			r.restart()
+		}
+		_, ref := r.w.Arm(r.ticket(runB, r.up()+100*time.Second))
+		runRefused(t, "a second ticket in the boot of a cancel on the machine, after the clock was set", ref, 409, api.CodeRunRefused, api.RunReasonArmedThisBoot)
+	}
+}

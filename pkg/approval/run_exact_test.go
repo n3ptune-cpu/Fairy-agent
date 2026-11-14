@@ -102,3 +102,22 @@ func TestRunUpdateIsHandedTheVersionConfirmed(t *testing.T) {
 		t.Fatalf("a second update: %q %v", to, ref)
 	}
 }
+
+// A run that was confirmed without a ticket (the machine was on) is remembered by its id like one that was
+// armed: when the machine starts the next time, a ticket for that same run does not arm it (R06 of the
+// review: no fixed test held this).
+func TestRunConfirmedWithoutATicketIsRememberedByItsID(t *testing.T) {
+	r := newRunRig(t)
+	if _, ref := r.confirm(goReq(runA, "9.9.9", 30, 600)); ref != nil {
+		t.Fatal(ref)
+	}
+	if _, ref := r.g.AdmitRun(power("shutdown", 30), runA); ref != nil {
+		t.Fatal(ref)
+	}
+	r.reboot(time.Hour, 30*time.Second)
+	_, ref := r.w.Arm(r.ticket(runA, time.Second))
+	runRefused(t, "a ticket for a run this machine has confirmed before", ref, 409, api.CodeRunRefused, api.RunReasonRunUsed)
+	if _, ref := r.w.Arm(r.ticket(runB, time.Second)); ref != nil {
+		t.Fatalf("a ticket for another run: %v", ref)
+	}
+}
