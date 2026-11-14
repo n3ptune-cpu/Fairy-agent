@@ -71,6 +71,11 @@ const haMinShare = 50 * time.Millisecond
 // haNoTimeLeft is why an optional value is missing when the reading's timeout was used up before its turn.
 const haNoTimeLeft = "no time left in this reading (the requests before it took the timeout)"
 
+// haAsks is told every request of a reading just before it is made: the address and the time the request is
+// given. It does nothing. The tests of how the timeout is shared put a function here and read the times the
+// code decided on; a clock around the reading measures those and how busy the machine is at once.
+var haAsks = func(addr string, within time.Duration) {}
+
 // homeAssistant reads one sensor of a Home Assistant. It is read-only by what it can send at all, not by the
 // token: a Home Assistant token carries no limits, whoever holds it can switch everything its user can (and a
 // user that is not an administrator can switch every entity). So:
@@ -182,6 +187,7 @@ func (s *homeAssistant) ReadPartial(ctx context.Context, timeout time.Duration) 
 	}
 	deadline := time.Now().Add(timeout)
 	get := func(addr string, within time.Duration, use func(d map[string]any) error) error {
+		haAsks(addr, within)
 		hc := devices.LANClient(within)
 		if s.tr != nil {
 			hc = devices.ClientWith(within, s.tr)

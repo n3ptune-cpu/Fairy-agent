@@ -741,8 +741,83 @@ func TestHomeAssistantMaxAgeIsForEachValue(t *testing.T) {
 	}
 }
 
+// haAsked is one request of a reading as haAsks was told it.
+type haAsked struct {
+	entity string        // the sensor asked
+	within time.Duration // the time the request was given
+	at     time.Time     // when haAsks was told, just before the request was made
+}
+
+func (a haAsked) String() string { return a.entity + " with " + a.within.String() }
+
+// watchAsks records every request the homeassistant sources make until the test ends (haAsks), and returns how
+// to take what was recorded since the last time.
+func watchAsks(t *testing.T) (take func() []haAsked) {
+	t.Helper()
+	var mu sync.Mutex
+	var asks []haAsked
+	old := haAsks
+	haAsks = func(addr string, within time.Duration) {
+		mu.Lock()
+		defer mu.Unlock()
+		asks = append(asks, haAsked{addr[strings.LastIndex(addr, "/")+1:], within, time.Now()})
+	}
+	t.Cleanup(func() { haAsks = old })
+	return func() []haAsked {
+		mu.Lock()
+		defer mu.Unlock()
+		out := asks
+		asks = nil
+		return out
+	}
+}
+
+// checkShares holds the times the requests of one reading were given against the rule: the watts get the
+// reading's whole timeout, and each optional value, when its turn comes, gets an equal part of what is then
+// left of that timeout for the values still to ask (members of them at first), and at least haMinShare.
+//
+// It looks at the times the source decided on, not at a clock around the reading, so a busy machine cannot
+// make it fail. What it cannot know is the exact moment a part was worked out, only a moment before it (the
+// request before had been answered, or had taken its whole time without an answer, or at least had been made)
+// and a moment after it (haAsks was told). The part must lie between what the rule gives for those two
+// moments: on a quiet machine they are a few milliseconds apart at most, on a busy one more, and the check
+// holds for both. The reading began at start or later; answered is when the test's server sent each answer it
+// delayed, silent are the sensors that never answer.
+func checkShares(t *testing.T, what string, start time.Time, timeout time.Duration, asks []haAsked, members int, silent map[string]bool, answered map[string]time.Time) {
+	t.Helper()
+	if len(asks) == 0 || asks[0].entity != labPower || asks[0].within != timeout {
+		t.Errorf("%s: the requests were %v, want the watts first, with the reading's whole timeout of %v", what, asks, timeout)
+		return
+	}
+	earliest, latest := start.Add(timeout), asks[0].at.Add(timeout) // the end of the reading's time lies between these
+	for i, a := range asks[1:] {
+		prev := asks[i]
+		before := prev.at
+		if silent[prev.entity] {
+			before = prev.at.Add(prev.within)
+		}
+		if at, ok := answered[prev.entity]; ok && at.After(before) {
+			before = at
+		}
+		toAsk := time.Duration(members - i)
+		if toAsk < 1 {
+			t.Errorf("%s: %d requests for %d optional values", what, len(asks)-1, members)
+			return
+		}
+		least, most := max(earliest.Sub(a.at)/toAsk, haMinShare), max(latest.Sub(before)/toAsk, haMinShare)
+		if a.within < least || a.within > most {
+			t.Errorf("%s: %s was asked with %v, want 1/%d of what was left of the reading's %v then: between %v and %v",
+				what, a.entity, a.within, toAsk, timeout, least, most)
+		}
+	}
+}
+
 // The timeout is for the whole reading. What the watts leave of it is shared: a sensor that does not answer
 // is given up after its part, and the ones after it are still read. With nothing left a value is not asked for.
+//
+// The parts are checked as the source worked them out (checkShares). The clock around a reading is only held
+// against what must be true on every machine: a reading takes at least as long as the requests that got no
+// answer were given, and it ends long before the far deadline of the test's own context.
 func TestHomeAssistantExtrasShareTheTimeout(t *testing.T) {
 	hang := make(chan struct{})
 	defer close(hang)
@@ -752,25 +827,52 @@ func TestHomeAssistantExtrasShareTheTimeout(t *testing.T) {
 		case <-r.Context().Done():
 		}
 	}
-	read := func(s Partial, timeout time.Duration) ([]Reading, map[string]string, error, time.Duration) {
+	const far = 30 * time.Second // no reading here may take anywhere near this
+	read := func(s Partial, timeout time.Duration) ([]Reading, map[string]string, error, time.Time, time.Duration) {
 		// a deadline of the reading's own, far away: a source that does not keep its timeout fails here
-		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), far)
 		defer cancel()
 		start := time.Now()
 		rs, missing, err := s.ReadPartial(ctx, timeout)
-		return rs, missing, err, time.Since(start)
+		return rs, missing, err, start, time.Since(start)
+	}
+	asked := watchAsks(t)
+	given := func(asks []haAsked, entities ...string) (sum time.Duration) { // the time these sensors were asked with, together
+		for _, a := range asks {
+			if slices.Contains(entities, a.entity) {
+				sum += a.within
+			}
+		}
+		return sum
 	}
 
-	// the first of three does not answer: it is given up after a third of the time, the other two are read
-	const timeout = 1500 * time.Millisecond
-	ha, srv := startLab(t, map[string]func(w http.ResponseWriter, r *http.Request){labVoltage: silent})
-	rs, missing, err, took := read(labSource(t, srv.URL, allLabMembers, nil), timeout)
+	// the watts take a part of the time, then the first of three does not answer: it is given up after a third
+	// of what the watts left, and the other two are read with what is left then
+	const timeout, wattsTake = 3 * time.Second, 500 * time.Millisecond
+	var mu sync.Mutex
+	answered := map[string]time.Time{}
+	ha, srv := startLab(t, map[string]func(w http.ResponseWriter, r *http.Request){labVoltage: silent,
+		labPower: func(w http.ResponseWriter, _ *http.Request) {
+			time.Sleep(wattsTake)
+			mu.Lock()
+			answered[labPower] = time.Now()
+			mu.Unlock()
+			_, _ = io.WriteString(w, labState("95.5", "W", "power", "measurement", time.Now()))
+		}})
+	rs, missing, err, start, took := read(labSource(t, srv.URL, allLabMembers, nil), timeout)
+	asks := asked()
 	if err != nil || len(rs) != 1 || *rs[0].Watts != labWatts || rs[0].Voltage != nil || rs[0].Current == nil || *rs[0].Current != labAmps ||
 		rs[0].EnergyKWhTotal == nil || *rs[0].EnergyKWhTotal != labKWh || !maps.Equal(missing, map[string]string{"voltage": "timeout"}) {
 		t.Errorf("a silent voltage sensor: %s %v %v", mustJSON(rs), missing, err)
 	}
-	if took < timeout/3-100*time.Millisecond || took > timeout*2/3+200*time.Millisecond {
-		t.Errorf("a silent voltage sensor was waited for %v of a reading's %v, want about a third", took.Round(time.Millisecond), timeout)
+	mu.Lock()
+	checkShares(t, "a silent voltage sensor", start, timeout, asks, 3, map[string]bool{labVoltage: true}, answered)
+	mu.Unlock()
+	if len(asks) != 4 || asks[1].within > (timeout-wattsTake)/3 || asks[1].within < haMinShare {
+		t.Errorf("a silent voltage sensor after watts that took %v of %v: the requests were %v, want four and the voltage with a third of the rest at most", wattsTake, timeout, asks)
+	}
+	if least := wattsTake + given(asks, labVoltage); took < least || took > far/2 {
+		t.Errorf("a silent voltage sensor: the reading took %v, want %v or more (the watts and the wait for the voltage)", took.Round(time.Millisecond), least)
 	}
 	if n := len(ha.seen()); n != 4 {
 		t.Errorf("a silent voltage sensor: %d requests", n)
@@ -779,25 +881,41 @@ func TestHomeAssistantExtrasShareTheTimeout(t *testing.T) {
 
 	// the second of three: it gets half of what is left then
 	ha, srv = startLab(t, map[string]func(w http.ResponseWriter, r *http.Request){labCurrent: silent})
-	rs, missing, err, took = read(labSource(t, srv.URL, allLabMembers, nil), timeout)
+	rs, missing, err, start, took = read(labSource(t, srv.URL, allLabMembers, nil), timeout)
+	asks = asked()
 	if err != nil || len(rs) != 1 || rs[0].Voltage == nil || rs[0].Current != nil || rs[0].EnergyKWhTotal == nil ||
 		!maps.Equal(missing, map[string]string{"current": "timeout"}) {
 		t.Errorf("a silent current sensor: %s %v %v", mustJSON(rs), missing, err)
 	}
-	if took < timeout/2-150*time.Millisecond || took > timeout/2+300*time.Millisecond {
-		t.Errorf("a silent current sensor was waited for %v of a reading's %v, want about half", took.Round(time.Millisecond), timeout)
+	checkShares(t, "a silent current sensor", start, timeout, asks, 3, map[string]bool{labCurrent: true}, nil)
+	if len(asks) != 4 || asks[2].within > timeout/2 || asks[1].within > timeout/3 {
+		t.Errorf("a silent current sensor: the requests were %v, want four, the voltage with a third of %v at most and the current with half", asks, timeout)
+	}
+	if least := given(asks, labCurrent); took < least || took > far/2 {
+		t.Errorf("a silent current sensor: the reading took %v, want %v or more (the wait for the current)", took.Round(time.Millisecond), least)
+	}
+	if n := len(ha.seen()); n != 4 {
+		t.Errorf("a silent current sensor: %d requests", n)
 	}
 	srv.CloseClientConnections()
 
-	// none of the three answers: three reasons, the watts, and the reading takes its timeout and no longer
+	// none of the three answers: three reasons, the watts, and the three were given no more than the reading's
+	// timeout together
+	const short = 1200 * time.Millisecond
 	ha, srv = startLab(t, map[string]func(w http.ResponseWriter, r *http.Request){labVoltage: silent, labCurrent: silent, labEnergy: silent})
-	rs, missing, err, took = read(labSource(t, srv.URL, allLabMembers, nil), 900*time.Millisecond)
+	rs, missing, err, start, took = read(labSource(t, srv.URL, allLabMembers, nil), short)
+	asks = asked()
 	if err != nil || len(rs) != 1 || *rs[0].Watts != labWatts ||
 		!maps.Equal(missing, map[string]string{"voltage": "timeout", "current": "timeout", "energy_kwh_total": "timeout"}) {
 		t.Errorf("three silent sensors: %s %v %v", mustJSON(rs), missing, err)
 	}
-	if took < 700*time.Millisecond || took > 900*time.Millisecond+400*time.Millisecond {
-		t.Errorf("three silent sensors: the reading with a timeout of 900 ms took %v", took.Round(time.Millisecond))
+	checkShares(t, "three silent sensors", start, short, asks, 3, map[string]bool{labVoltage: true, labCurrent: true, labEnergy: true}, nil)
+	waits := given(asks, labVoltage, labCurrent, labEnergy)
+	if len(asks) != 4 || waits > short {
+		t.Errorf("three silent sensors: the requests were %v: the three were given %v together, want the reading's %v at most", asks, waits, short)
+	}
+	if took < waits || took > far/2 {
+		t.Errorf("three silent sensors: the reading with a timeout of %v took %v, want %v or a little more", short, took.Round(time.Millisecond), waits)
 	}
 	if n := len(ha.seen()); n != 4 {
 		t.Errorf("three silent sensors: %d requests", n)
@@ -805,15 +923,26 @@ func TestHomeAssistantExtrasShareTheTimeout(t *testing.T) {
 	srv.CloseClientConnections()
 
 	// the watts take nearly all of the time (less than haMinShare is left): the reading is the watts, and
-	// nothing is asked with the rest. (A machine that is busy enough can make the watts miss the timeout: then
-	// the reading is made again.)
+	// nothing is asked with the rest. The answer is sent 40 ms before the time of its request is over, counted
+	// from the moment the request was made, so it comes when less than haMinShare is left whatever the
+	// machine does. (A machine that is busy enough can make it come too late: then the reading is made again.)
 	for try := 1; ; try++ {
+		var wattsAsked atomic.Pointer[time.Time]
 		ha, srv = startLab(t, map[string]func(w http.ResponseWriter, r *http.Request){labPower: func(w http.ResponseWriter, _ *http.Request) {
-			time.Sleep(time.Second - haMinShare + 20*time.Millisecond)
+			time.Sleep(time.Until(wattsAsked.Load().Add(time.Second - haMinShare + 10*time.Millisecond)))
 			_, _ = io.WriteString(w, labState("95.5", "W", "power", "measurement", time.Now()))
 		}})
-		rs, missing, err, took = read(labSource(t, srv.URL, allLabMembers, nil), time.Second)
-		if err != nil && try < 5 {
+		old := haAsks
+		haAsks = func(addr string, within time.Duration) {
+			if now := time.Now(); strings.HasSuffix(addr, "/"+labPower) {
+				wattsAsked.Store(&now)
+			}
+			old(addr, within)
+		}
+		rs, missing, err, _, took = read(labSource(t, srv.URL, allLabMembers, nil), time.Second)
+		haAsks = old
+		asks = asked()
+		if err != nil && try < 20 {
 			continue
 		}
 		want := map[string]string{"voltage": haNoTimeLeft, "current": haNoTimeLeft, "energy_kwh_total": haNoTimeLeft}
@@ -821,19 +950,22 @@ func TestHomeAssistantExtrasShareTheTimeout(t *testing.T) {
 			rs[0].EnergyKWhTotal != nil {
 			t.Errorf("slow watts: %s %v %v", mustJSON(rs), missing, err)
 		}
-		if lines := requestLines(ha.seen()); !slices.Equal(lines, []string{"GET /api/states/" + labPower}) {
-			t.Errorf("slow watts: the requests were %v, want only the one for the watts", lines)
+		if lines := requestLines(ha.seen()); !slices.Equal(lines, []string{"GET /api/states/" + labPower}) || len(asks) != 1 {
+			t.Errorf("slow watts: the requests were %v (%v), want only the one for the watts", lines, asks)
 		}
-		if took > 1500*time.Millisecond {
+		// a value is only left out when less than haMinShare was left: the reading cannot have ended sooner
+		if took <= time.Second-haMinShare || took > far/2 {
 			t.Errorf("slow watts: the reading with a timeout of 1 s took %v", took.Round(time.Millisecond))
 		}
 		break
 	}
 	// the watts time out: the source's failure, one request
 	ha, srv = startLab(t, map[string]func(w http.ResponseWriter, r *http.Request){labPower: silent})
-	rs, missing, err, took = read(labSource(t, srv.URL, allLabMembers, nil), 200*time.Millisecond)
-	if err == nil || devices.Describe(err) != "timeout" || len(rs) != 0 || missing != nil || took > 5*time.Second || len(ha.seen()) != 1 {
-		t.Errorf("silent watts: %s %v %v after %v, %d requests", mustJSON(rs), missing, err, took.Round(time.Millisecond), len(ha.seen()))
+	rs, missing, err, _, took = read(labSource(t, srv.URL, allLabMembers, nil), 200*time.Millisecond)
+	asks = asked()
+	if err == nil || devices.Describe(err) != "timeout" || len(rs) != 0 || missing != nil || took < 200*time.Millisecond || took > far/2 || len(ha.seen()) != 1 ||
+		len(asks) != 1 || asks[0].within != 200*time.Millisecond {
+		t.Errorf("silent watts: %s %v %v after %v, %d requests (%v)", mustJSON(rs), missing, err, took.Round(time.Millisecond), len(ha.seen()), asks)
 	}
 	srv.CloseClientConnections()
 }
@@ -953,8 +1085,15 @@ func TestHomeAssistantExtrasNeverShowTheToken(t *testing.T) {
 				name := x.member + ", " + name
 				_, srv := startLab(t, map[string]func(w http.ResponseWriter, r *http.Request){x.entity: answer})
 				s := labSource(t, srv.URL, allLabMembers, map[string]any{"max_age_s": 60})
-				ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-				rs, missing, err := s.ReadPartial(ctx, 600*time.Millisecond)
+				// A reading's timeout here is far more than four answers take on a busy machine: every sensor but
+				// x must be read. Only the sensor that never answers is waited for, for its part of the timeout
+				// (a third, half or all of it), so that reading has a shorter one; a part is still a second.
+				timeout := 30 * time.Second
+				if strings.HasSuffix(name, "no answer in time") {
+					timeout = 3 * time.Second
+				}
+				ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+				rs, missing, err := s.ReadPartial(ctx, timeout)
 				cancel()
 				readings++
 				refusal := strings.HasPrefix(name, x.member+", 401") || strings.HasPrefix(name, x.member+", 403")
