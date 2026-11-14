@@ -163,6 +163,12 @@ func printRun(w io.Writer, v approval.RunView) {
 	if v.LastID != "" {
 		fmt.Fprintln(w, "last run:        "+v.LastID+", "+v.LastState)
 	}
+	if v.Clock != 0 {
+		fmt.Fprintln(w, "clock on record: "+time.Unix(v.Clock, 0).UTC().Format(time.RFC3339)+" (no ticket is taken while this machine's clock is more than 2 minutes behind it)")
+	}
+	if v.Born != 0 {
+		fmt.Fprintln(w, "record made:     "+time.Unix(v.Born, 0).UTC().Format(time.RFC3339)+" (no ticket that was signed before is taken)")
+	}
 	if v.State != "" { // whether the record is of this boot is the service's to say: it looks at the boot, this command does not
 		fmt.Fprintln(w, "                 (a record from before this machine was last started counts for nothing; the service removes it when it starts)")
 	}

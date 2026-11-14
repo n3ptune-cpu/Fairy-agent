@@ -1542,22 +1542,24 @@ the machines are up.
   request an older panel sends exactly as 0.8.0 did; `"proto"` in the `approval` block stays 2, and the only
   thing an older panel could see is one new member in that block, `"runs": 1`, which it does not read. A
   machine without the check behaves as before in a run. A machine with the check that no ticket reaches
-  behaves as before too: no file is written, nothing is counted down, every request needs its approval.
+  behaves as before too: nothing is counted down, every request needs its approval. The one new thing on its
+  disk is the run record, which then holds the clock and nothing of a run ("The record" below).
 * **Three things get slightly weaker than before, each within fixed bounds.**
   1. *One kind of approval is not the answer to a challenge of the machine.* Every approval before this
      answered 32 random bytes the machine had made up minutes earlier, so it could be used on that machine,
      once, and nowhere else. The **run ticket** cannot (the machine was off). It is signed by your passkey
      like every approval, it names the machine, and it allows exactly one thing: *this machine switches
      itself off again after the wait it names, with a notice*. For as long as it is valid (the panel's
-     default: 7 minutes; never more than 35) whoever holds it can present it. The machine takes it only when
+     default: 7 minutes; never more than 10) whoever holds it can present it. The machine takes it only when
      it has been up for less than 10 minutes, started **after** the ticket was signed, has taken no ticket
-     in this boot and none of this run before.
+     in this boot and none of this run before, and its clock was not set back ("Runs: the numbers" below
+     has the worst cases).
   2. *The panel keeps that ticket in memory until the machines are up* (up to its validity; never on disk).
      Before this it kept no token after using it. (This is the panel's part; it is named here because it
      belongs to the same change.)
   3. *After the second confirmation the machine keeps a small record on disk*: "this run may still update
      once and shut down once", for the time the confirmation names (the panel's default: 25 minutes plus its
-     settle time; never more than 60), in this boot only. It has to survive the restart of the checking
+     settle time; never more than 30), in this boot only. It has to survive the restart of the checking
      service during the update. Before this no approval outlived the service that accepted it. The record
      holds no token; it is in the folder of the trust file, with the same permissions.
   The panel alone still cannot make a checked machine switch off, update, or arm anything: both steps need
@@ -1569,8 +1571,8 @@ the machines are up.
 nonce over the same kind of list (`pkg/agent/api`: `ApprovalNonce`); only the request text of the entry is new:
 
 ```
-run_arm run=<16 hex> valid_s=<120-2100> wait_s=<120-3600> notice_s=<30-600>               the ticket
-run_go run=<16 hex> to=<version | -> shutdown_delay_s=<10-600> within_s=<300-3600>          the confirmation
+run_arm run=<16 hex> valid_s=<120-600> wait_s=<120-3600> notice_s=<30-600>                the ticket
+run_go run=<16 hex> to=<version | -> shutdown_delay_s=<10-600> within_s=<300-1800>          the confirmation
 ```
 
 `run`: 16 lower-case hex characters the panel makes up for the run. `to`: the version the update must install
@@ -1583,7 +1585,10 @@ list holds, for this machine, one entry `{"machine_id": <its id on record>, "cha
 random bytes of the panel's>, "request": "run_arm ..."}`. The checker (Windows: the helper; Linux: the agent)
 accepts it when **all** of this holds:
 
-* a trust is set on this machine (else `409 approval_off`);
+* a trust is set on this machine (else `409 approval_off`), and the checker can say which boot this is (else
+  `503 run_unavailable`: see "The boot" below);
+* the machine's clock is not more than two minutes behind the latest time it showed before (`clock_back`, see
+  "The clock");
 * exactly one `run_arm` entry of the list is this machine's: the token carries the nonce of the list with
   **this machine's own id** written into that entry (as for every approval), and the entry's challenge member
   is not a challenge this machine has open;
@@ -1594,9 +1599,11 @@ accepts it when **all** of this holds:
 * the machine has been up for less than 600 s, by its uptime;
 * it started (its clock minus its uptime) not before the ticket was signed, less those 60 s. A machine that
   was already running when you confirmed can never be armed;
-* no ticket was accepted in this boot (one per boot, whatever became of it), none of this run before (the
-  machine remembers the last 16 runs, also across restarts), no run is confirmed, and no cancel ended a run in
-  this boot;
+* the ticket was not signed before the run record was made anew (`before_record`, see "The record");
+* this boot is not closed for tickets (`already_armed`): no ticket was accepted in it (one per boot, whatever
+  became of it), no cancel ended a run in it, and the run record was not made anew in it; and no ticket of
+  this run was accepted before (the machine remembers the last 16 runs, also across restarts), and no run is
+  confirmed;
 * no shutdown, reboot or sleep of Fairy's is pending.
 
 Answer `200 {"run": "<id>", "state": "armed", "off_in_s": <wait_s>}`. The run record is written **before**
@@ -1609,19 +1616,40 @@ uptime, not on its clock**: a clock that is set while it waits (the first time s
 without power) moves nothing. When the wait is over and nothing ended the run:
 
 * another shutdown, reboot or sleep is pending: the run ends, nothing is scheduled over it;
-* Linux: a guest runs (a process named `kvm`, `qemu-kvm`, `qemu-system-...` or `lxc-start`), or the process
-  list cannot be read: the run ends, the machine stays on, also when the guest stops later;
+* Linux: a guest runs (a process named `kvm`, `qemu-kvm`, `qemu-system-...` or `lxc-start`), or nobody can
+  say that none does (the process list, or the name of one process in it, cannot be read; process 1 is not in
+  the list: `/proc` is mounted with `hidepid`, which hides root's guests from the agent's user): the run ends,
+  the machine stays on, also when the guest stops later;
 * an update is being installed: it waits for it, 15 minutes at most;
 * otherwise it schedules **the ordinary delayed shutdown** with `notice_s`, once. From here on that is this
   machine's pending power action like any other: `power_control.pending` shows it (`requested_by`: `run
   <id>`), Windows counts it down and shows its own notice with the text `Fairy: this PC was started for an
-  update by <name> and nobody confirmed it. Shutdown in <n> seconds. To keep it on: shutdown /a` (`<name>`:
-  the user name in the token of whoever signed the ticket). Linux shows no notice (as for every shutdown).
+  update by <name> and nobody confirmed it. It shuts down in <n> seconds. To keep it on: press Cancel for this
+  PC in the Fairy panel, or here press Windows+R and type: shutdown, a space, a slash and the letter a.
+  (Administrators can also run: fairy-agent helper-run cancel)` (`<name>`: the user name in the token of
+  whoever signed the ticket). Like every notice Fairy hands to Windows it has no word that begins with `-` or
+  `/` and no ASCII hyphen (each is written as U+2011, which looks the same): a real PC cut a notice at such a
+  word, so the way to stop the shutdown is said in words. Linux shows no notice (as for every shutdown).
+
+**A time that passed while nothing looked ends with the machine on, never in a late switch-off.** The ticket
+says "`wait_s` after the arming", not "whenever the service next runs". The checker looks every second; when
+it finds the wait over a minute or more ago, it was not running at that moment (the Windows helper was
+stopped, which `POST /helper/stop` does with the control token alone; a Linux agent was stopped or crashed;
+the machine slept, or was "shut down" with Fast Startup, and the uptime went on counting). Then the run is
+cancelled for good (`helper.log` / the journal: `the wait ended ... ago while nothing looked ...: no self-off
+now, the machine stays on`) and nothing arms the machine again in that boot. The one exception is the
+self-off that the same running service put off at its time because an update was being installed: it comes
+when the update is done, 15 minutes after its time at the latest, and never a minute or more after that.
+On Linux the countdown of every delayed shutdown, reboot or sleep is the agent's own timer, which stands still
+while the machine sleeps: an action that would be carried out a minute or more after its time is dropped (the
+log says `power: dropped, its time passed ...`). Windows counts its countdown down itself.
 
 **3. Keeping it on.** Any of these ends the run on the machine (armed, counting down or confirmed), and
 **nothing arms it again in this boot**: the panel's Cancel (`POST /power` with `cancel`, which needs no
 approval, as ever, and also stops the countdown); `fairy-agent helper-run cancel` on the machine (root /
-Administrator); on Windows `shutdown /a` during the countdown (the machine is still running a minute after
+Administrator; it closes the boot for tickets itself, also while the service is stopped, and it counts from
+the moment the command returns: the run's update and shutdown read the record before they are let through);
+on Windows `shutdown /a` during the countdown (the machine is still running a minute after
 the countdown ended: the run counts as cancelled). `fairy-agent helper-run show` prints what is on record.
 A changed or removed trust file ends a live run too.
 
@@ -1653,8 +1681,9 @@ not looked at. On a machine without a trust file `run` is ignored and the reques
 an older agent or helper, Windows without the helper, an agent that cannot read the uptime), and, while there
 is one, `"run": {"id", "state", "off_at"}`: `armed` (`off_at`: when the self-off begins, Unix seconds by
 today's clock), `off_pending` (`off_at`: when the countdown ends), `confirmed`, and for the run that ended
-last in this boot `cancelled` (a cancel, a veto when the wait was over, a changed trust, a shutdown that could
-not be scheduled) or `done` (its shutdown was let through, or the confirmation's time ran out).
+last in this boot `cancelled` (a cancel, a veto when the wait was over, a wait that ended while nothing
+looked, a changed trust, a shutdown that could not be scheduled) or `done` (its shutdown was let through, or
+the confirmation's time ran out).
 
 **Refusals of the two routes.**
 
@@ -1665,42 +1694,105 @@ not be scheduled) or `done` (its shutdown was let through, or the confirmation's
 | `404 power_control_disabled` | | `power_control` is off: a run ends with a shutdown |
 | `409 helper_too_old` | | Windows: the running helper is from before runs |
 | `503 approval_unavailable` | | the trust file cannot be used |
-| `503 run_unavailable` | | the run record cannot be read or written, or the uptime cannot be read |
+| `503 run_unavailable` | | the run record cannot be read or written, the uptime cannot be read, or the checker cannot say which boot this is (Windows: the helper's registry key for it cannot be made, read or believed; `helper.log` says why) |
 | `400` | | the body is not the route's (no `approval` for a ticket; numbers outside the limits) |
 | `403 approval_required` | | `/run/go` without `approval` |
 | `403 approval_refused` | the reason word of every refused approval (`token_signature`, `issuer`, `audience`, `user`, `amr`, `expired`, `nonce`, `entries`, `no_challenge`, ...), and for a ticket also `no_ticket` (no `run_arm` entry in the list), `ambiguous` (two for this machine), `clock` / `auth_time` (older than `valid_s`, or the clock is wrong) | the token or its list |
-| `409 run_refused` | `not_fresh`, `started_before`, `already_armed`, `run_used`, `power_pending`, `limits`, `other_run` (ticket); `limits`, `other_run`, `already_confirmed`, `too_late`, `run_over` (confirmation) | a rule of runs |
+| `409 run_refused` | `clock_back`, `not_fresh`, `started_before`, `before_record`, `already_armed`, `run_used`, `power_pending`, `limits`, `other_run` (ticket); `limits`, `other_run`, `already_confirmed`, `too_late`, `run_over` (confirmation) | a rule of runs. New in the list since the first 0.9.0 text: `clock_back` (the machine's clock is more than two minutes behind a time it showed before; it stays on) and `before_record` (the ticket was signed before the run record was made anew). `already_armed` also covers a boot that is closed for tickets by a cancel or by a record that was made anew in it |
 
-**The clock.** A machine whose clock is behind refuses the ticket (`clock`: it looks signed in the future); it
-is not armed and stays on. A machine whose clock is ahead sees the ticket as older than it is and refuses it
-once that exceeds `valid_s`; within `valid_s` the "started after the signature" rule is looser by as much as
-the clock is ahead, and the 10 minutes of uptime are what bounds it.
+**The clock.** A ticket answers no challenge, so three of its rules read the machine's clock: how old it is,
+that it is not from the future, and that the machine started after it was signed. A machine whose clock is
+behind refuses the ticket (`clock`: it looks signed in the future); it is not armed and stays on. A machine
+whose clock is ahead sees the ticket as older than it is and refuses it once that exceeds `valid_s`; within
+`valid_s` the "started after the signature" rule is looser by as much as the clock is ahead, and the 10
+minutes of uptime are what bounds it.
+
+A clock that was **set back** would make an old ticket that was never presented good again. So the run record
+keeps the latest time the machine's clock showed when the checker looked (`"clock"`: written when the service
+starts and stops, every ten minutes of uptime when it moved by a minute, and with every other write of the
+record), and no ticket is judged while the clock is more than two minutes behind it: `409 run_refused`,
+`clock_back`; the machine is not armed and stays on. That value only goes up, with one exception: once the
+machine has been up for 600 s (no ticket can arm it in this boot any more) the record takes the clock as it
+is. This is how a PC recovers **by itself** whose clock was wrong ahead (a clock battery, a firmware default,
+another system that keeps the hardware clock in another zone) and was put right: in that boot no ticket is
+taken; after ten minutes of uptime the record follows the clock (log: `... the clock is taken as it is from
+here on`); from the next start tickets are taken again. A PC whose clock is wrong ahead at every start, until
+its time service corrects it, is never armed while that lasts; the reason says so. What this cannot see: a
+machine that has not run at all since the ticket was signed and starts with its clock set into the ticket's
+minutes (nothing on it has seen a later time), and somebody who holds the clock back through a whole boot of
+ten minutes or more and the start after it.
+
+**The boot.** A live run counts in the boot it was accepted in and in no other, and the mark that closes a boot
+for tickets is the mark of that boot. Which boot this is, is told by an id and nothing else: on Linux the
+kernel's (`/proc/sys/kernel/random/boot_id`); on Windows a value the **helper** keeps, because Windows has
+none a service can read: 16 random bytes in the registry key `HKLM\SOFTWARE\FairyAgentBoot`, which is a
+*volatile* key (in memory only, never written to disk: gone after a restart or a full shutdown, kept through
+a restart of the services and through sleep). The helper makes it when it first needs it in a boot, with its
+own permission list (SYSTEM and Administrators change it, signed-in accounts read it, nothing inherited), and
+every read checks the key's owner and permission list the way the trust file's are checked; the helper also
+makes sure the key is volatile. A key that somebody else could have made or changed is no id, and a checker
+without an id keeps no runs (`503 run_unavailable` for a ticket, a confirmation and its challenge; nothing of
+a run is let through). An uptime that is smaller than on record ends a run whatever the id says. (Until this
+text the Windows helper guessed from the clock and the uptime: two starts within two minutes counted as one.)
+**Fast Startup** (Windows' default "shut down" on most PCs) is not a full shutdown: Windows hibernates its
+kernel, the key and the uptime come back with it, and for Windows and for Fairy the same boot goes on. Such a
+PC has been "up" since its last real start, so no ticket arms it (`not_fresh`; it stays on, and the panel
+reports it as not freshly started), and a run that was armed before the "shutdown" finds its wait long over
+and ends with the PC on. Nothing here makes a Fast Startup wake count as a new boot. To have such a PC take
+part in runs, switch Fast Startup off on it (`powercfg /h off`, or the checkbox in the power options).
 
 **The record.** `approval-run.json`, next to `approval-trust.json` (Windows:
 `C:\ProgramData\fairy-agent\helper\`, written by the helper; Linux: `/var/lib/fairy-agent/`, written by the
 agent), with the trust file's checks (the folder; a plain file with one name, not a link; its owner; who can
 write it; at most 8 KiB; strict JSON, every value checked) and written whole under another name, then renamed.
-It holds no token. Its live part (armed / counting down / confirmed) is taken out when it is used up, when the
-run is cancelled, when its time is over, and when the service finds it in a later boot than it was written in
-(Linux: the kernel's boot id; Windows: the uptime must not be smaller than on record and the moment of the
-start, by clock and uptime, the same within two minutes; a clock set by more than that before the helper
-restarts ends the run, which leaves the machine on). What stays is a mark that gives nothing and only
-refuses: the boot of the last ticket or cancel, the ids of the last 16 runs, how the last run ended. A record
-that cannot be read counts as no record (nothing is armed, nothing let through) and is said in the log; no
-ticket and no confirmation is accepted until it is removed (`fairy-agent helper-run cancel` removes it).
+It holds no token. Every reader in this program opens it so that a new record can take its name meanwhile
+(on Windows a plain open kept the rename from going through); a writer whose rename still fails because some
+other program has the file open tries again, the service for a moment and `helper-run cancel` for 3 s. Its
+live part (armed / counting down / confirmed) is taken out when it is used up, when the run is cancelled,
+when its time is over, and when the service finds it in another boot than it was written in ("The boot"). A
+live run whose times are later than the record's own time of writing is not believed. What stays gives
+nothing and only refuses: the boot of the last ticket or cancel, the ids of the last 16 runs, how the last run
+ended, the clock (`"clock"`, see "The clock"), and when the record was made anew (`"born"`).
+
+The record is on every machine with trust (the service makes it at its first look), and **nothing removes
+it**. A record that cannot be read counts as no record (nothing is armed, nothing let through) and is said in
+the log; no ticket and no confirmation is accepted until `fairy-agent helper-run cancel` has put a new one in
+its place. A record that is **made anew** (because there was none, because it was deleted, or by that command)
+knows nothing of earlier tickets, so it closes its boot for tickets (`already_armed`) and takes no ticket that
+was signed before it was made (`before_record`), in any boot. On a machine that a run wakes this never shows:
+its record is from the boot in which trust was set or this version first started. It does show in exactly
+that boot: a ticket cannot arm a machine in the boot in which its trust was set for the first time.
+
+**Runs: the numbers.** Worst cases, by the machine's own limits (a text outside them is not accepted); the
+panel's defaults in brackets. All waits are counted on the uptime.
+
+| What | At the most | Why |
+|---|---|---|
+| A ticket can be presented after it was signed for | 660 s (default 480 s) | `valid_s` <= 600 (420) plus the 60 s the clocks may differ; and never with the clock more than 120 s behind the latest time the machine has on record |
+| A machine that was already running when the ticket was signed can be armed if it started before the signature by | 60 s with a right clock; under 600 s whatever its clock says | the clock allowance; the uptime limit of 600 s |
+| An armed machine begins its self-off after | `wait_s` <= 3600 s (960 s), then at most 60 s late; 15 minutes more only while an update is being installed | then the notice counts down: `notice_s` <= 600 s (120 s) |
+| So from the signature to the switch-off | 660 + 3600 + 60 + 600 s = 82 min (480 + 960 + 60 + 120 s = 27 min) | plus the 15 minutes for an update |
+| After the confirmation the run's one update and one shutdown are let through for | `within_s` <= 1800 s (1800 s) | by the uptime, in that boot; the shutdown then has its delay of at most 600 s |
 
 **Windows and Linux.** The same routes and texts. Windows: the **helper** checks the ticket and the
 confirmation, writes the record, counts the wait and schedules the shutdown; the agent only carries (pipe verbs
 `run_arm` and `run_go`, the member `run` of `power` and `apply_update`, all version 3 frames; the agent passes
-a `cancel` on to the helper whenever the helper has a run, also with nothing pending). As with every update on
+a `cancel` on to the helper whenever the helper has a run or may have one, also with nothing pending: only a
+helper that answers at that moment and names no live run is not asked, and a cancel that cannot be delivered
+is answered `500` / `503`, never `200`). As with every update on
 Windows, the version check of a run's update is the agent's: it reads the record itself before it downloads,
-and the helper uses the run's one update up when it starts the installer. Linux: the agent does all of it, and
-takes the run over from the record when it restarts after the update.
+and the helper uses the run's one update up when it starts the installer (the agent looks at the record again
+at that moment: a run that ended meanwhile starts nothing). Linux: the agent does all of it, and takes the run
+over from the record when it restarts after the update; a cancel whose end of the run cannot be written down
+is answered `500`.
 
 **The log** (Windows: `helper.log`; Linux: the agent's): `approval: run armed`, `approval: run self-off
 scheduled`, `approval: run confirmed`, `approval: run cancelled`, `approval: run done`, each with the run id,
 the `sub` and the key id, and `approval: run ticket refused` / `run confirmation refused` with the reason.
-Never a token or a piece of one.
+Also: `approval: there was no run record; one was made anew ...`, `approval: this machine's clock is behind a
+time it showed before ...` (the record follows the clock), `approval: this machine cannot say which boot this
+is, so it keeps no runs ...` (once for each reason), and `approval: the run record was changed on the machine
+in this moment; nothing was written over it`. Never a token or a piece of one.
 
 ## Updates (the panel's Update button)
 
@@ -2148,10 +2240,13 @@ on the first install and report anything odd:
   * And still: a real Pocket ID token checked by a machine (its size and header, the clock difference on
     real PCs), and whether GetTickCount64 behaves as described for `boot_shutdown_s`;
   * **Runs (0.9.0; TEST-ON-WINDOWS.md, section 14; none of it has run on Windows):** the helper writing and
-    reading `helper\approval-run.json` (owner and access list by inheritance, the rename over it), the agent's
-    account reading that file before a run's update, the uptime starting at zero after a wake (Fast Startup:
-    where it does not, the PC is never armed and stays on), the self-off's notice shown whole by Windows
-    (its text ends in `shutdown /a`), `shutdown /a` and the panel's Cancel during the countdown, the helper
+    reading `helper\approval-run.json` (owner and access list by inheritance; the rename over it while another
+    program has it open with and without sharing), the agent's account reading that file before a run's
+    update, the registry key of the boot id (made by the helper as SYSTEM with its permission list, read by
+    the agent's account, its owner; gone after a restart, kept by a restart of the helper; what a shutdown
+    with Fast Startup, sleep and hibernation do to it and to the uptime), the uptime starting at zero after a
+    wake, the self-off's notice shown whole by Windows, stopping the shutdown at the PC and the panel's Cancel
+    during the countdown, the helper stopped over the end of the wait (the PC must stay on), the helper
     taking a run over after the update restarted it, whether the updater service shows as running to the
     helper while it installs, and `helper-run show | cancel` in an Administrator window. An ACCEPTED ticket
     and confirmation need a panel that knows runs;

@@ -872,9 +872,14 @@ PowerShell as Administrator**; after `->` is what a good answer looks like. Noth
   -> the same `[403]`; `/metrics` does NOT show `"self_update":{"state":"downloading"`.
   Then step 14 of section 13 (cancel) -> `[200]`, in case anything was scheduled after all.
 * J5 **`helper-run` on the PC.**
-  `& "C:\Program Files\Fairy\fairy-agent.exe" helper-run show` -> `run record:  C:\ProgramData\fairy-agent\helper\approval-run.json` and `run:  none (no record)`
+  `& "C:\Program Files\Fairy\fairy-agent.exe" helper-run show` -> `run record:  C:\ProgramData\fairy-agent\helper\approval-run.json`,
+  `run:  none is armed or confirmed`, a line `clock on record:` with a time of the last minutes, and `record made:` with the
+  time the helper first started with the trust set.
   `& "C:\Program Files\Fairy\fairy-agent.exe" helper-run cancel` -> `no run is armed or confirmed on this machine (...): nothing changed`
-  `Test-Path "C:\ProgramData\fairy-agent\helper\approval-run.json"` -> `False` (nothing above wrote a record)
+  `Get-Content "C:\ProgramData\fairy-agent\helper\approval-run.json"` -> one line
+  `{"version":1,"at":{"boot_id":"<32 hex>","wall":...,"up_ms":...},"arm":{...},"clock":...,"born":...}` and no `"run"`, `"used"`
+  or `"last"` in it (the record is on every PC with trust; nothing above put anything of a run into it).
+  `icacls "C:\ProgramData\fairy-agent\helper\approval-run.json"` -> the same lines as for `approval-trust.json` in that folder.
 * J6 **The helper's log has the refusals and no token.**
   `Get-Content "C:\ProgramData\fairy-agent\helper\helper.log" -Tail 20`
   -> lines `approval: run ticket refused ... reason=entries` and `approval: required, none sent; the run named does not cover it`; `verb=run_arm` in the `request` line of J2; nowhere the `x` of the junk token as a value.
@@ -891,6 +896,48 @@ PowerShell as Administrator**; after `->` is what a good answer looks like. Noth
   -> a number under 600. A number of hours or days: Fast Startup keeps Windows' uptime across a shutdown on
   this PC; such a PC is never armed by a ticket (`not_fresh`) and stays ON in a run. Please send the number.
 
+* J10 **[KEY]** **The id of the boot (new; the helper makes it, Windows has none).**
+  `reg query "HKLM\SOFTWARE\FairyAgentBoot"` -> one value: `id    REG_SZ    <32 hex characters>`, and no subkey.
+  `(Get-Acl "HKLM:\SOFTWARE\FairyAgentBoot").Owner` -> `BUILTIN\Administrators` (or `NT AUTHORITY\SYSTEM`)
+  `(Get-Acl "HKLM:\SOFTWARE\FairyAgentBoot").Access | Format-Table IdentityReference,RegistryRights,IsInherited`
+  -> three lines, none inherited: `NT AUTHORITY\SYSTEM FullControl`, `BUILTIN\Administrators FullControl`,
+  `NT AUTHORITY\Authenticated Users ReadKey`. Anything else, or `IsInherited True`: please send it.
+  `Select-String -Path "C:\ProgramData\fairy-agent\helper\helper.log" -Pattern "cannot say which boot"` -> nothing.
+  J1 again -> still `"runs":1` (the agent's own account can read the key: it shows the helper's block either way,
+  so also do J4 again: its text must still be `... no run is confirmed on this machine in this boot`).
+* J11 **[KEY]** **The id stays through a restart of the services and is another one after a restart of Windows.**
+  Note the id of J10. `Restart-Service fairy-agent-helper; Restart-Service fairy-agent`, then `reg query` again -> the same id.
+  `Restart-Computer`, then `reg query` again -> ANOTHER id (the key is in memory only). The same id after a
+  restart would be a fault: please send both outputs.
+* J12 **[KEY]** **Fast Startup, sleep, hibernation.** Three times: note the id and `uptime_s` (J9), then
+  (a) Start menu > Sleep, wake it; (b) `shutdown /h` (hibernate), switch it on; (c) with Fast Startup ON (Control
+  Panel > Power Options > "Choose what the power buttons do" > "Turn on fast startup"), Start menu > Shut down,
+  switch it on. Each time `reg query` and `uptime_s` again.
+  -> by Microsoft's documentation all three keep BOTH the id and the uptime (it goes on counting, also through the
+  time the PC was off): for Windows this is the same boot. Such a PC is then not armed by a ticket (`not_fresh`)
+  and stays ON in a run, which is the safe side. If (c) shows another id or an `uptime_s` near zero, please send
+  it: then a wake after a Fast Startup shutdown is a new start for Fairy on this PC, and the notes in AGENT.md
+  ("The boot") are too careful for it. `shutdown /s /t 0` with Fast Startup OFF (or `shutdown /s /f /t 0` and
+  `powercfg /h off`) -> another id and an `uptime_s` under 600, as after J11's restart.
+* J13 **The record can be written while somebody reads it.** In a second Administrator window:
+  `$f = [System.IO.File]::Open("C:\ProgramData\fairy-agent\helper\approval-run.json","Open","Read","ReadWrite,Delete")`
+  Wait two minutes, then in the first window `Restart-Service fairy-agent-helper` (it writes the clock into the
+  record when it stops and starts), then `Select-String -Path "C:\ProgramData\fairy-agent\helper\helper.log" -Pattern "could not be written" | Select-Object -Last 2`
+  -> no new line: the new record took the name although the file was open. `$f.Close()`.
+  The same once more with `"ReadWrite"` in the place of `"ReadWrite,Delete"` (a program that does not share for
+  delete) -> now a line `approval: the run record could not be written` is expected while the file is held;
+  `$f.Close()`, `Restart-Service fairy-agent-helper` again -> written, and J1 still shows `"runs":1`. Please send
+  what the first half showed: if the rename fails there too, Windows does not let a file take the name of one
+  that is open even with sharing, and we need to know.
+* J14 **A record that cannot be read is replaced, not removed.**
+  `Stop-Service fairy-agent-helper`
+  `Set-Content -Path "C:\ProgramData\fairy-agent\helper\approval-run.json" -Value "{broken" -Encoding ASCII`
+  `& "C:\Program Files\Fairy\fairy-agent.exe" helper-run show` -> `run:  the record cannot be used: ...`
+  `& "C:\Program Files\Fairy\fairy-agent.exe" helper-run cancel` -> `the run record could not be read (...) and was replaced by a new one. ...`
+  `& "C:\Program Files\Fairy\fairy-agent.exe" helper-run show` -> `run:  none is armed or confirmed`, `record made:` with the time of now.
+  `icacls "C:\ProgramData\fairy-agent\helper\approval-run.json"` -> the same lines as for `approval-trust.json`.
+  `Start-Service fairy-agent-helper`, J1 -> `"runs":1`; `helper.log` has no `the run record cannot be used` after the start.
+
 ### B. With a panel that knows runs (later)
 
 Start a run for this PC only, confirm the start with the passkey, and do NOT confirm the second time.
@@ -902,8 +949,9 @@ Start a run for this PC only, confirm the start with the passkey, and do NOT con
   in that folder (SYSTEM and Administrators full, the agent's account read), and
   `Select-String -Path "C:\ProgramData\fairy-agent\helper\approval-run.json" -Pattern "eyJ"` -> nothing (no token in it).
 * K2 **[KEY]** Wait for the time `helper-run show` named. -> Windows shows its own notice, with the whole text
-  `Fairy: this PC was started for an update by <name> and nobody confirmed it. Shutdown in <n> seconds. To keep it on: shutdown /a`.
-  Please send a photo if the text is cut (it ends in `/a`). `/metrics` shows `"pending":{"action":"shutdown",...,"requested_by":"run <id>"}`.
+  `Fairy: this PC was started for an update by <name> and nobody confirmed it. It shuts down in <n> seconds. To keep it on: press Cancel for this PC in the Fairy panel, or here press Windows+R and type: shutdown, a space, a slash and the letter a. (Administrators can also run: fairy-agent helper-run cancel)`.
+  Please send a photo: whether the text is shown whole (it is about 310 characters), and whether the two
+  hyphens of `fairy-agent helper-run` look like hyphens (they are the non-breaking kind, U+2011). `/metrics` shows `"pending":{"action":"shutdown",...,"requested_by":"run <id>"}`.
 * K3 **[KEY]** `shutdown /a` -> the notice goes away and the PC stays on. Two minutes later:
   `helper-run show` -> `run:  none is armed or confirmed` and `last run:  <id>, cancelled`; `helper.log` has
   `approval: run cancelled ... why="the machine is still running after the countdown: ..."`.
@@ -914,11 +962,29 @@ Start a run for this PC only, confirm the start with the passkey, and do NOT con
 * K6 **[KEY]** A third run, confirmed the second time. -> `approval: run confirmed`, then the update (the
   helper restarts), `approval: run taken over from the record (this service was restarted)`, `approval:
   accepted, the one shutdown of the run`, the ordinary shutdown notice, the PC goes off. Please send the
-  `helper.log` lines of the whole run.
+  `helper.log` lines of the whole run. (If the update is refused with `... no run is confirmed on this machine
+  in this boot` although `helper.log` says `run confirmed`: the agent's own account could not read the key of
+  the boot id, J10. Please send the `Access` list of J10 then.)
+
+* K7 **[KEY]** **The helper stopped over the end of the wait: the PC stays on.** A fourth run, not confirmed. While
+  the PC waits (`helper-run show` names the time): `Stop-Service fairy-agent-helper`. Wait until three minutes
+  after that time. `Start-Service fairy-agent-helper`. -> NO notice and no shutdown, now or later;
+  `helper.log`: `approval: run cancelled ... why="the wait ended ... ago while nothing looked (...): no self-off now, the machine stays on"`;
+  `helper-run show` -> `last run:  <id>, cancelled`.
+* K8 **The panel's Cancel while the helper is stopped is not "cancelled".** A run, not confirmed; while the PC
+  waits: `Stop-Service fairy-agent-helper`, then Cancel in the panel. -> the panel shows an error (the agent
+  answers `503 helper_stopped`), not "cancelled". `Start-Service fairy-agent-helper`, Cancel again -> cancelled,
+  `helper.log`: `approval: run cancelled ... why="a cancel of the pending power action"`.
+* K9 **A second ticket in the same boot is refused after a clock change.** After K5 (cancelled, PC on): set
+  the PC's clock forward by ten minutes (`Set-Date (Get-Date).AddMinutes(10)`), `Restart-Service
+  fairy-agent-helper`, start a new run for it from the panel. -> not armed; `helper.log`:
+  `approval: run ticket refused ... reason=not_fresh` or `reason=already_armed`. Set the clock right again
+  (`w32tm /resync`). Then set it BACK by ten minutes and try once more -> `reason=clock_back` (or one of the
+  two before); it stays on. Set it right again.
 
 ### What to send back
 
-The output of J1, J2, J4, J5, J9 and the tail of `helper.log` (J6); later K1 to K6.
+The output of J1, J2, J4, J5, J9 to J14 and the tail of `helper.log` (J6); later K1 to K9.
 
 ## Rollback (back to build 10 / v0.4.4)
 
