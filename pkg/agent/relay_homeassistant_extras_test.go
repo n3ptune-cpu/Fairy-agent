@@ -354,22 +354,22 @@ func TestRelayRowHasMissingOnlyWithAReadingAndAReason(t *testing.T) {
 // "current", "energy_kwh_total", null when unknown), so no panel has to learn a new name for them. The one new
 // member is "missing", and only in a row that lacks a value.
 //
-// The panel does not decode an agent's answer into a struct that could refuse an unknown member. In the
-// released panel (build 13, commit 45f6206 of Fairy-dashboard) and in the candidate for build 14 (69b9d8a) the
-// code is the same:
+// The panel does not decode an agent's answer into a struct that could refuse an unknown member. The released
+// panel (build 13 of Fairy-dashboard) and the panel's code for build 14, as it was when this test was written,
+// read the row in the same way. The places, by file and function:
 //
-//   - internal/poller/httpbackend.go:165-173, decodeJSON: json.Unmarshal into a map (jsonx.M), no
-//     DisallowUnknownFields; getJSON (:184-226) returns that map; agentMetrics (:566) asks only for
-//     "agent_version" as text and "platform" as an object;
-//   - internal/poller/agents.go:205 (build 13) / :278 (candidate): jsonx.Objs(payload["power_sources"]), the
-//     rows as maps (internal/jsonx/jsonx.go:127);
-//   - internal/power/remote.go:98-148 (build 13) / :139-194 (candidate), remoteState: reads row["id"], "name",
-//     "type", "ok", "error", "system_hint", "watts", "voltage", "current", "energy_kwh_total" by name and
-//     nothing else; a number is taken only when it is a JSON number (jsonNumber, :181 / :227);
-//   - internal/power/manager.go:75-88 (build 13) / :88-101 (candidate), cleanReadings: watts, volts and amperes
-//     within +-1e9, the energy within +-1e12, else dropped; watts outside make the row a failed one;
-//   - internal/web/static/app.js:1590 (build 13) / :1615 (candidate): the Power page's table shows
-//     readings[0].voltage, .current and .energy_kwh_total in its columns Volts, Amps and kWh.
+//   - internal/poller/httpbackend.go, decodeJSON: json.Unmarshal into a map (jsonx.M), no
+//     DisallowUnknownFields; getJSON returns that map; agentMetrics asks only for "agent_version" as text and
+//     "platform" as an object;
+//   - internal/poller/agents.go, pollAgent: jsonx.Objs(payload["power_sources"]), the rows as maps
+//     (internal/jsonx/jsonx.go, Objs);
+//   - internal/power/remote.go, remoteState: reads row["id"], "name", "type", "ok", "error", "system_hint",
+//     "watts", "voltage", "current", "energy_kwh_total" by name and nothing else; a number is taken only when
+//     it is a JSON number (jsonNumber);
+//   - internal/power/manager.go, cleanReadings: watts, volts and amperes within +-1e9, the energy within
+//     +-1e12, else dropped; watts outside make the row a failed one;
+//   - internal/web/static/app.js, pagePower (the Power page) and the function it has for one row of its table:
+//     the table shows readings[0].voltage, .current and .energy_kwh_total in its columns Volts, Amps and kWh.
 //
 // panelReads below is that path, copied: a row with the new values and with "missing" is read by it as a good
 // reading with all four numbers, and "missing" changes nothing.
@@ -471,14 +471,14 @@ func TestPanelsOfBuild13And14ReadTheRow(t *testing.T) {
 	}
 }
 
-// What follows is a copy of the panel's reader of an agent's power rows, as it is in build 13 (45f6206) and in
-// the candidate for build 14 (69b9d8a) of Fairy-dashboard; the comment of TestPanelsOfBuild13And14ReadTheRow
-// names the files and lines. Only what decides about a row is copied: the limits on the number of rows and on
-// the length of texts are left out.
+// What follows is a copy of the panel's reader of an agent's power rows, as it is in build 13 of Fairy-dashboard
+// and in the panel's code for build 14 when this was written; the comment of TestPanelsOfBuild13And14ReadTheRow
+// names the files and functions. Only what decides about a row is copied: the limits on the number of rows and
+// on the length of texts are left out.
 
 const (
-	panelMaxReading   = 1e9  // internal/normalise/finite.go:18, MaxReading
-	panelMaxEnergyKWh = 1e12 // internal/normalise/finite.go:28, MaxEnergyKWh
+	panelMaxReading   = 1e9  // internal/normalise/finite.go, MaxReading
+	panelMaxEnergyKWh = 1e12 // internal/normalise/finite.go, MaxEnergyKWh
 )
 
 type panelRow struct {
