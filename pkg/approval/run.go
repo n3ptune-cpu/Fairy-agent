@@ -1,6 +1,7 @@
 package approval
 
 import (
+	"errors"
 	"slices"
 	"strconv"
 	"strings"
@@ -249,7 +250,13 @@ func (g *Gate) runWrite(now time.Time, up time.Duration) error {
 	m := &g.rs
 	m.file.At = g.bootRef(now, up)
 	m.file.Clock = max(m.file.Clock, now.Unix()) // never back by a write that is made for something else (runClockKeep)
-	sum, err := g.o.Files.writeRun(m.file)
+	// over what this process knows to be there, and over nothing else: a cancel that the administrator's
+	// command wrote in this moment is not written over (the next look takes it)
+	sum, err := g.o.Files.writeRunOver(m.file, &runOnDisk{exists: m.exists, sum: m.sum})
+	if errors.Is(err, errRunChanged) {
+		g.o.Log.Warn("approval: the run record was changed on the machine in this moment; nothing was written over it", "error", firstLine(err.Error()))
+		return err
+	}
 	if err != nil {
 		m.dirty = true
 		g.o.Log.Error("approval: the run record could not be written", "error", firstLine(err.Error()))
@@ -683,6 +690,10 @@ func (g *Gate) runCover(req api.ApprovalRequest, id string, now time.Time) (*run
 	if !ok {
 		return nil, "this machine cannot say how long it has been up"
 	}
+	// The record as it is on disk at this moment, not as this process remembers it from its last look: a
+	// cancel made on the machine (fairy-agent helper-run cancel) counts from the moment the command returned,
+	// not from the next look of the watch up to a second later.
+	g.runSync(now, up)
 	live := g.runNow(now, up)
 	switch {
 	case g.rs.bad != "":

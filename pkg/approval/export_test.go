@@ -2,6 +2,7 @@ package approval
 
 import (
 	"encoding/json"
+	"time"
 
 	"github.com/n3ptune-cpu/Fairy-agent/pkg/agent/api"
 )
@@ -69,3 +70,10 @@ const (
 	BootSlack     = bootSlack
 	RunClockEvery = runClockEvery
 )
+
+// SetRunCancelSettle sets how long RunCancel waits before it looks at the record again, and returns the old value.
+func SetRunCancelSettle(d time.Duration) time.Duration {
+	old := runCancelSettle
+	runCancelSettle = d
+	return old
+}

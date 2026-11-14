@@ -214,7 +214,24 @@ func (f Files) readRun() (rec *runFile, sum [32]byte, exists bool, err error) {
 // writeRun writes the run record: the complete content goes into a temporary file in the same (checked)
 // folder, is synced, and takes the record's name in one step, replacing what is there (a link under that name
 // is replaced, never followed). It returns the hash of what was written.
-func (f Files) writeRun(rec *runFile) (sum [32]byte, err error) {
+func (f Files) writeRun(rec *runFile) (sum [32]byte, err error) { return f.writeRunOver(rec, nil) }
+
+// errRunChanged: the record on disk is not the one the writer last read or wrote: somebody else wrote it in
+// between (the administrator's command). Nothing was written.
+var errRunChanged = errors.New("the run record was changed by somebody else in this moment")
+
+// runOnDisk is what a writer knows to be on disk: nothing, or a file with this hash.
+type runOnDisk struct {
+	exists bool
+	sum    [32]byte
+}
+
+// writeRunOver is writeRun for a writer that keeps the record in memory (the service): over says what it last
+// read or wrote, and the new content takes the record's name only if that is still what is there. Otherwise
+// nothing is written (errRunChanged), and the writer reads the record again. The look and the rename are two
+// steps with nothing slow between them; the administrator's command, which is the other writer, looks again
+// after it wrote (RunCancel).
+func (f Files) writeRunOver(rec *runFile, over *runOnDisk) (sum [32]byte, err error) {
 	path := f.runPath()
 	dir := filepath.Dir(path)
 	if _, err := os.Lstat(dir); errors.Is(err, os.ErrNotExist) {
@@ -249,6 +266,17 @@ func (f Files) writeRun(rec *runFile) (sum [32]byte, err error) {
 	}
 	if err == nil && f.Prepare != nil {
 		err = f.Prepare(tmp.Name())
+	}
+	if err == nil && over != nil {
+		now, rerr := os.ReadFile(path)
+		switch {
+		case errors.Is(rerr, os.ErrNotExist):
+			if over.exists {
+				err = errRunChanged
+			}
+		case rerr != nil || !over.exists || sha256.Sum256(now) != over.sum:
+			err = errRunChanged
+		}
 	}
 	if err == nil {
 		err = os.Rename(tmp.Name(), path)
@@ -358,10 +386,24 @@ func (f Files) RunCancel(at RunStamp) (was RunView, changed bool, err error) {
 	if rec == nil || rec.Run == nil {
 		return was, false, nil
 	}
-	mark := at.ref()
-	rec.Last, rec.Run, rec.Arm = &runLast{ID: rec.Run.ID, State: api.RunCancelled}, nil, &mark
-	if _, err := f.writeRun(rec); err != nil {
-		return was, false, err
+	// The service writes the record too. It never writes over a record it has not read (writeRunOver), but
+	// between its look and its write there is a moment; so after the cancel is written this looks again, and
+	// cancels again if the run is back.
+	for try := 0; ; try++ {
+		mark := at.ref()
+		rec.Last, rec.Run, rec.Arm = &runLast{ID: rec.Run.ID, State: api.RunCancelled}, nil, &mark
+		if _, err := f.writeRun(rec); err != nil {
+			return was, false, err
+		}
+		time.Sleep(runCancelSettle)
+		again, _, _, err := f.readRun()
+		if err != nil || again == nil || again.Run == nil || try == 5 {
+			break
+		}
+		rec = again
 	}
 	return was, true, nil
 }
+
+// runCancelSettle is how long RunCancel waits before it looks at the record again.
+var runCancelSettle = 100 * time.Millisecond
