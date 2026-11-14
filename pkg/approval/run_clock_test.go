@@ -1,6 +1,7 @@
 package approval_test
 
 import (
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -247,6 +248,39 @@ func TestConfirmedRunDoesNotCrossAQuickRestartOfTheMachine(t *testing.T) {
 		}
 		if st := r.state(); st != "" {
 			t.Errorf("boot id %q: the run of the boot before is %q in this boot", bootID, st)
+		}
+	}
+}
+
+// What the watch costs a machine every second: nothing it did not cost before. Without trust it reads no
+// record and asks for no boot id (on Windows that is a look into the registry); with trust and no run it does
+// neither between two looks at the clock, ten minutes apart.
+func TestWatchReadsNothingEverySecond(t *testing.T) {
+	for _, trust := range []bool{false, true} {
+		r := newRunRig(t)
+		if !trust {
+			if err := os.Remove(r.files.Path); err != nil {
+				t.Fatal(err)
+			}
+		}
+		folder, boots := 0, 0
+		r.files.CheckDir = func(string) error { folder++; return nil }
+		r.restart()
+		g := approval.NewGate(approval.Options{Files: r.files, EnforcedBy: api.EnforcedByHelper, Now: r.Now, Runs: true,
+			Uptime: func() (time.Duration, error) { return r.up(), nil },
+			BootID: func() (string, error) { boots++; return "boot-1", nil }})
+		w := approval.NewRunWatch(g, approval.RunHooks{})
+		w.Tick() // the start of the service
+		folder, boots = 0, 0
+		for i := 0; i < 590; i++ {
+			r.wait(time.Second)
+			w.Tick()
+		}
+		if folder > 590/5+5 {
+			t.Errorf("trust %v: %d looks at the folder in 590 s without a run (the trust file is looked at every 5 s, nothing else)", trust, folder)
+		}
+		if boots > 2 {
+			t.Errorf("trust %v: the id of the boot was asked for %d times in 590 s without a run", trust, boots)
 		}
 	}
 }

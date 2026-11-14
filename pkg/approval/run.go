@@ -837,15 +837,12 @@ func (g *Gate) runPoll() (live *runLive, up time.Duration, stop bool) {
 		g.reload(false)
 		g.runRead(now, up)
 	}
-	if ok && g.bootID() != "" {
-		if m.file != nil && m.clockKept && up >= m.clockAt && up < m.clockAt+runClockEvery {
-			// not now (the common case, once a second: nothing is read)
-		} else {
-			g.reload(false)
-			g.runSync(now, up) // first the file as it is now: a record that is there is never made anew over
-			g.runEnsure(now, up)
-			g.runClockKeep(now, up, false)
-		}
+	if m.file != nil && m.clockKept && up >= m.clockAt && up < m.clockAt+runClockEvery {
+		// not now (the common case, once a second: nothing is read, and nobody is asked which boot this is)
+	} else if g.reload(false); ok && g.state == api.ApprovalRequired && g.bootID() != "" {
+		g.runSync(now, up) // first the file as it is now: a record that is there is never made anew over
+		g.runEnsure(now, up)
+		g.runClockKeep(now, up, false)
 	}
 	if m.file == nil || m.file.Run == nil { // nothing live: no file is read, and nothing else is done
 		if m.dirty {
