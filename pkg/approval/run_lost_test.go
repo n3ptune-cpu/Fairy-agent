@@ -226,3 +226,45 @@ func TestServiceClosesTheBootWhenItFindsTheCancelOnTheMachine(t *testing.T) {
 		runRefused(t, "a second ticket in the boot of a cancel on the machine, after the clock was set", ref, 409, api.CodeRunRefused, api.RunReasonArmedThisBoot)
 	}
 }
+
+// When the record was made anew does not follow the clock down, as the clock on record does after ten minutes
+// of uptime: a ticket that was taken before the record was lost stays refused, also when the clock is set back
+// behind its signature afterwards and held there through a whole boot and the start after it (which is what
+// makes the clock on record follow, see run_clock_test.go). The other side of this: a record that was made
+// while the clock was ahead refuses every ticket until the clock has got there; AGENT.md says what to do then.
+func TestRecordMadeAnewKeepsItsTimeWhenTheClockIsSetBackLater(t *testing.T) {
+	r := newRunRig(t)
+	tk := r.ticket(runA, r.up()+100*time.Second)
+	if _, ref := r.w.Arm(tk); ref != nil {
+		t.Fatal(ref)
+	}
+	if _, err := r.w.Cancel("x"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(r.files.RunPath()); err != nil {
+		t.Fatal(err)
+	}
+	r.restart()
+	r.w.Tick() // made anew, with the clock right
+	made := r.files.RunShow().Born
+	if made != r.Now().Unix() {
+		t.Fatalf("record made: %d, clock %d", made, r.Now().Unix())
+	}
+	r.jump(-20 * time.Minute) // behind the ticket's signature
+	r.reboot(30*time.Second, 30*time.Second)
+	_, ref := r.w.Arm(tk)
+	runRefused(t, "the ticket in the boot after the clock was set back", ref, 409, api.CodeRunRefused, api.RunReasonClockBack)
+	r.ticks(21 * time.Minute) // the clock on record follows the clock down
+	if seen := r.files.RunClockSeen(); seen > r.Now().Unix() {
+		t.Fatalf("the clock on record did not follow after 21 minutes of uptime: %d, clock %d", seen, r.Now().Unix())
+	}
+	if born := r.files.RunShow().Born; born != made {
+		t.Errorf("the time the record was made went from %d to %d", made, born)
+	}
+	r.reboot(30*time.Second, 30*time.Second)
+	_, ref = r.w.Arm(tk) // by the machine's clock: five minutes old, signed before this start
+	runRefused(t, "a ticket from before the record was lost, with the clock held back", ref, 409, api.CodeRunRefused, api.RunReasonBeforeRecord)
+	if r.state() == api.RunArmed {
+		t.Error("armed")
+	}
+}

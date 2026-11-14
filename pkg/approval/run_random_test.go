@@ -26,8 +26,10 @@ import (
 //     machine that started not more than 60 s before it was signed, both by the real clock but for what the
 //     machine's own clock is off at that moment; never while the machine's clock is more than two minutes
 //     behind the latest time on its record; never one signed before the record was made anew; at most once
-//     per boot; never twice the same ticket, whatever happened in between; never after a cancel in that boot,
-//     or after the record was lost in it; never while a power action is pending;
+//     per boot; never twice the same ticket (but where the machine cannot know better: its record was lost
+//     in between AND the one made anew is, by the machine's clock, not later than the ticket's signature);
+//     never after a cancel in that boot, or after the record was lost in it; never while a power action is
+//     pending;
 //  2. the clock on record never goes back while the machine can still be armed in that boot;
 //  3. the machine switches itself off only in a boot in which a ticket was taken, not before that ticket's
 //     wait is over by the uptime and not a minute or more after it (but for a self-off that waited for an
@@ -87,6 +89,7 @@ type ticketSeen struct {
 	notice int
 	mine   bool
 	taken  bool
+	lost   bool // the record was lost after it was taken: the machine does not know this ticket any more
 }
 
 func randomRunSequence(t *testing.T, seed int64) bool {
@@ -177,7 +180,10 @@ func randomRunSequence(t *testing.T, seed int64) bool {
 			return fail("took a ticket and cannot say which boot this is")
 		case !tk.mine:
 			return fail("took a ticket for another machine")
-		case tk.taken:
+		case tk.taken && !(tk.lost && born != 0 && born <= tk.signed.Unix()):
+			// Twice only where the machine cannot know better: its record was lost in between, and the one
+			// that was made anew is, by the machine's clock, not later than the ticket's signature (the clock
+			// was behind the signature when the record was made, or was held back for a whole boot since).
 			return fail("took the same ticket a second time")
 		case up >= 600*time.Second:
 			return fail("took a ticket after %s of uptime", up)
@@ -249,6 +255,9 @@ func randomRunSequence(t *testing.T, seed int64) bool {
 		closed[boot] = true
 		if a := armsInBoot[boot]; a != nil {
 			a.lost = true
+		}
+		for _, tk := range tickets {
+			tk.lost = tk.lost || tk.taken
 		}
 		everArmed = map[string]bool{}
 		gos = map[string]*goSeen{}

@@ -1774,6 +1774,15 @@ knows nothing of earlier tickets, so it closes its boot for tickets (`already_ar
 was signed before it was made (`before_record`), in any boot. On a machine that a run wakes this never shows:
 its record is from the boot in which trust was set or this version first started. It does show in exactly
 that boot: a ticket cannot arm a machine in the boot in which its trust was set for the first time.
+"Before it was made" is read from the machine's clock at that moment, and that time stays as it is (it does
+not follow the clock down as `"clock"` does). Two things follow. A record that was made while the clock was
+**ahead** refuses every ticket (`before_record`) until the clock has got there: hours for a clock that was
+hours ahead; for one that was years ahead, set the clock right, delete `approval-run.json` (as root / an
+administrator) and start the machine again: the service makes a new record with the right time, and from the
+start after that tickets are taken. And what this cannot see: a record that is lost while the clock is
+already **behind** a ticket's signature, and stays there until the next start: nothing on the machine then
+knows that ticket or a later time, and a ticket that was used before can arm it once more (the random test
+found this; it takes an administrator twice, for the file and for the clock, on the machine itself).
 
 **Runs: the numbers.** Worst cases, by the machine's own limits (a text outside them is not accepted); the
 panel's defaults in brackets. All waits are counted on the uptime.
