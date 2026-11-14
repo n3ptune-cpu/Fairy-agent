@@ -1065,6 +1065,108 @@ func TestHomeAssistantExtrasCarryTheReadingsToken(t *testing.T) {
 	}
 }
 
+// The variable is read once for a reading, when it begins: when it changes while the reading is on its way,
+// the requests still to make carry the token the watts were asked with, and the next reading carries the new
+// one. (TestHomeAssistantExtrasCarryTheReadingsToken changes the variable between readings only: a source
+// that read it again for every request passed it.)
+func TestHomeAssistantReadingKeepsItsToken(t *testing.T) {
+	first, second := fakeHAToken(), strings.Join([]string{"another", "made", "up", "token"}, "-")
+	sensors := []string{labPower, labVoltage, labCurrent, labEnergy}
+	for _, changesAt := range sensors[:3] { // the variable changes while this sensor's request is being answered
+		var mu sync.Mutex
+		var seen []string
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			mu.Lock()
+			seen = append(seen, r.Header.Get("Authorization")+" "+r.URL.Path)
+			mu.Unlock()
+			if r.URL.Path == "/api/states/"+changesAt {
+				os.Setenv(haTokenEnv, second) // before the answer: the next request is made after it
+			}
+			_, _ = io.WriteString(w, map[string]string{"/api/states/" + labPower: labState("95.5", "W", "power", "", time.Now()),
+				"/api/states/" + labVoltage: labState("229.8", "V", "voltage", "", time.Now()),
+				"/api/states/" + labCurrent: labState("0.41", "A", "current", "", time.Now()),
+				"/api/states/" + labEnergy:  labState("12.5", "kWh", "energy", "total", time.Now())}[r.URL.Path])
+		}))
+		t.Setenv(haTokenEnv, first) // put back when the test ends, whatever the server set
+		s := labSource(t, srv.URL, allLabMembers, nil)
+		var want []string
+		for _, tok := range []string{first, second} {
+			rs, missing, err := s.ReadPartial(context.Background(), 30*time.Second)
+			if err != nil || len(rs) != 1 || missing != nil || rs[0].Voltage == nil || rs[0].Current == nil || rs[0].EnergyKWhTotal == nil {
+				t.Fatalf("%s %v %v", mustJSON(rs), missing, err)
+			}
+			for _, entity := range sensors {
+				want = append(want, "Bearer "+tok+" /api/states/"+entity)
+			}
+		}
+		srv.Close()
+		if got := os.Getenv(haTokenEnv); got != second {
+			t.Fatalf("the variable was not changed during the first reading")
+		}
+		mu.Lock()
+		if !slices.Equal(seen, want) {
+			var with []string // which token each request carried, not the tokens
+			for _, line := range seen {
+				tok, path, _ := strings.Cut(strings.TrimPrefix(line, "Bearer "), " ")
+				with = append(with, map[string]string{first: "the first token", second: "the second token"}[tok]+" for "+strings.TrimPrefix(path, "/api/states/"))
+			}
+			t.Errorf("the variable changed while %s was asked: the requests were %q, want the first token for the four of the first reading and the second for the four of the next",
+				changesAt, with)
+		}
+		mu.Unlock()
+	}
+}
+
+// A reading that is cancelled while an optional value is being asked ends then: it does not wait for that
+// sensor's part of the timeout, and nothing more is asked. What was read before stays in the reading. (The
+// reading's context goes into every request, not only into the one for the watts.)
+func TestHomeAssistantExtrasEndWhenTheReadingIsCancelled(t *testing.T) {
+	hang := make(chan struct{})
+	defer close(hang)
+	// the reading's timeout: the sensor that is being asked at the cancel has 20 s of it or more, so a reading
+	// that goes on is told from one that ends by a wide margin
+	const timeout, prompt = 60 * time.Second, 10 * time.Second
+	for i, x := range labExtras {
+		asked := make(chan struct{})
+		ha, srv := startLab(t, map[string]func(w http.ResponseWriter, r *http.Request){x.entity: func(_ http.ResponseWriter, r *http.Request) {
+			close(asked) // the request has arrived: the reading is cancelled now, while it waits for the answer
+			select {
+			case <-hang:
+			case <-r.Context().Done():
+			}
+		}})
+		ctx, cancel := context.WithCancel(context.Background())
+		go func() {
+			<-asked
+			cancel()
+		}()
+		start := time.Now()
+		rs, missing, err := labSource(t, srv.URL, allLabMembers, nil).ReadPartial(ctx, timeout)
+		took := time.Since(start)
+		cancel()
+		if took > prompt {
+			t.Fatalf("cancelled while %s was asked: the reading went on for %v (its timeout is %v)", x.member, took.Round(time.Millisecond), timeout)
+		}
+		want := []string{"GET /api/states/" + labPower}
+		for _, y := range labExtras[:i+1] {
+			want = append(want, "GET /api/states/"+y.entity)
+		}
+		if lines := requestLines(ha.seen()); !slices.Equal(lines, want) {
+			t.Errorf("cancelled while %s was asked: the requests were %v, want %v and none after the cancel", x.member, lines, want)
+		}
+		if err != nil || len(rs) != 1 || rs[0].Watts == nil || *rs[0].Watts != labWatts {
+			t.Fatalf("cancelled while %s was asked: %s %v %v", x.member, mustJSON(rs), missing, err)
+		}
+		for j, y := range labExtras {
+			v, reason := labValues(rs[0])[y.value], missing[y.value]
+			if read := j < i; read != (v != nil) || read != (reason == "") || !(read || fixedMissing(reason)) {
+				t.Errorf("cancelled while %s was asked: %s is %s with the reason %q", x.member, y.value, show(v), reason)
+			}
+		}
+		srv.CloseClientConnections()
+	}
+}
+
 // With an https url every request of a reading is made with the checked certificate: a server that cannot
 // show it is sent none of them.
 func TestHomeAssistantExtrasHTTPS(t *testing.T) {
