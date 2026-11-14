@@ -1007,7 +1007,9 @@ decide, use `power_links:` in the panel's agent entry (`power_links: {<device id
 
 A plug the agent cannot ask itself (a Tuya plug, a Zigbee plug, anything else) can still be read when a
 Home Assistant on the same network knows it: the agent asks that Home Assistant for the plug's power sensor.
-It reads the watts and nothing else. Nothing is switched, and nothing is written to Home Assistant.
+It reads the watts, and the plug's volts, amperes and energy total when the entry names the sensors for them
+([below](#volts-amperes-and-the-energy-total-voltage_entity-current_entity-energy_entity)), and nothing else.
+Nothing is switched, and nothing is written to Home Assistant.
 `type: homeassistant` belongs in an agent's `power_sources:`; do not put it into the panel's own
 `power_sources:` (the long wait after a refused token exists only in the agent).
 
@@ -1020,6 +1022,9 @@ power_sources:
     url: "http://192.168.1.10:8123"        # Home Assistant itself: http(s)://host[:port], nothing after it
     token_env: HA_TOKEN                    # the NAME of the variable in env_file, never the token itself
     entity: sensor.desk_plug_power         # the plug's power sensor; only an id that begins with "sensor." is accepted
+    # voltage_entity: sensor.desk_plug_voltage   # optional, see "Volts, amperes and the energy total" below
+    # current_entity: sensor.desk_plug_current
+    # energy_entity: sensor.desk_plug_energy
     # max_age_s: 900                       # a value Home Assistant last got longer ago is no reading (0, the default: not checked; else 1 to 604800)
     # interval: 10                         # seconds between two readings (default 10, never below 5)
     # ca_file: /etc/fairy-agent/ha.pem     # https only: the certificate Home Assistant shows, or its CA
@@ -1038,7 +1043,7 @@ begins a YAML escape, and the agent does not start (`found unknown escape charac
 > **A Home Assistant token is never read-only.** Home Assistant's tokens carry no limits: a long-lived
 > access token is the user it was made for. Also a user that is *not* an administrator can switch every
 > plug, light and lock of that Home Assistant, so whoever holds the token can control everything in it.
-> Fairy itself only ever sends one request with it, `GET /api/states/<the sensor>`, and refuses in
+> Fairy itself only ever sends one kind of request with it, `GET /api/states/<a sensor>`, and refuses in
 > `config.yaml` every entity that is not a `sensor.`; but the token in `env_file` can do more than Fairy does
 > with it, in the hands of anybody who can read that file. So: use a Home Assistant (or at least a Home
 > Assistant user made only for Fairy) that has nothing but the plugs in it, keep the token only in `env_file`,
@@ -1090,16 +1095,19 @@ back on this machine (an older installer, Re-pair from a panel that still instal
 the entry out of `config.yaml` first. The older agent does not start with it.
 
 What exactly is sent: for every reading one `GET <url>/api/states/<entity>` with the header
-`Authorization: Bearer <the token>`, to the address in `url` only. A redirect is not followed. With an
+`Authorization: Bearer <the token>`, to the address in `url` only, and one more such request for each of
+`voltage_entity`, `current_entity` and `energy_entity` that the entry has (at most four for a reading). A
+redirect is not followed. With an
 `http://` address the token crosses that network unencrypted with every reading, as a Tasmota password does;
 with `https://` the certificate is always checked (against the system's authorities, or `ca_file`; for a
 self-signed certificate put that certificate into `ca_file`), and there is no setting to switch the check
 off. The token is never logged, never part of an error message and never sent to the panel: the row in
-`/metrics` holds the id, the name, the type, the watts and, when there is no reading, one of the texts below.
+`/metrics` holds the id, the name, the type, the watts (with the optional members also the volts, the amperes
+and the energy total) and, when there is no reading, one of the texts below.
 
 | The source shows | Meaning |
 | --- | --- |
-| `home assistant refused the token` | Home Assistant answered 401 or 403: the token is wrong or was deleted, or its user is disabled or may not read this entity. After this answer the agent asks again only after 5 minutes, then after 15 minutes, then once an hour, instead of every `interval`: Home Assistant counts each such request as a failed login and, with `ip_ban_enabled`, bans the address they come from after a number of them. The text stays meanwhile. Only a reading that succeeds brings the normal interval back, so once the token is in order again (a new one stored with `fairy-agent secret set HA_TOKEN`, or its user enabled again in Home Assistant), restart the agent: it then asks at once, because a restart starts the waits anew, and a new token is only read at a restart anyway. Without the restart the next reading can be up to an hour away |
+| `home assistant refused the token` (with the optional members also `... (asked for voltage_entity)`, see below) | Home Assistant answered 401 or 403: the token is wrong or was deleted, or its user is disabled or may not read this entity. After this answer the agent asks again only after 5 minutes, then after 15 minutes, then once an hour, instead of every `interval`: Home Assistant counts each such request as a failed login and, with `ip_ban_enabled`, bans the address they come from after a number of them. The text stays meanwhile. Only a reading that succeeds brings the normal interval back, so once the token is in order again (a new one stored with `fairy-agent secret set HA_TOKEN`, or its user enabled again in Home Assistant), restart the agent: it then asks at once, because a restart starts the waits anew, and a new token is only read at a restart anyway. Without the restart the next reading can be up to an hour away |
 | `entity not found` | 404: no such entity id (renamed in Home Assistant?) |
 | `home assistant: the sensor is unavailable` / `... state is unknown` | Home Assistant has no value: the plug does not answer it, or it has just started |
 | `home assistant: the sensor's state is not a number` | the entity is not a measurement |
@@ -1118,6 +1126,101 @@ plug's reporting interval, e.g. 900), look at the plug for a day, and leave it o
 max_age_s" while the plug is fine. The age is Home Assistant's time stamp against this machine's clock, so
 both need the right time. A plug that Home Assistant itself has lost is shown as `unavailable` without
 `max_age_s`.
+
+##### Volts, amperes and the energy total (`voltage_entity`, `current_entity`, `energy_entity`)
+
+Home Assistant has a sensor of its own for each value of a plug. With `entity` alone the agent reads the
+watts. Three optional members name the plug's other sensors; the agent then reads those as well, and the
+panel's Power page shows them in its columns Volts, Amps and kWh, where a Shelly's are (the panel needs no
+update for this: it has always taken these three values from an agent).
+
+```yaml
+power_sources:
+  - id: desk-plug
+    type: homeassistant
+    name: "Desk plug"
+    url: "http://192.168.1.10:8123"
+    token_env: HA_TOKEN
+    entity: sensor.desk_plug_power             # the watts: the reading itself
+    voltage_entity: sensor.desk_plug_voltage   # volts
+    current_entity: sensor.desk_plug_current   # amperes
+    energy_entity: sensor.desk_plug_energy     # the energy total (a counter in kWh), not a power
+```
+
+The rules:
+
+- **Each member is optional**, in any combination. A member that is there must be the entity id of a sensor
+  by the rule of `entity` (`sensor.` and then small letters, digits and `_`); an empty one is refused, so
+  leave out the member of a sensor the plug does not have. No two members of an entry may name the same
+  sensor (`voltage_entity names the same sensor as entity: each value has a sensor of its own`). Every other
+  member is refused as before (`field power_entity not found`). `check-config` names the sensors:
+
+  ```
+  power source "desk-plug": homeassistant, host 192.168.1.10:8123 (http), sensor.desk_plug_power, voltage sensor.desk_plug_voltage, current sensor.desk_plug_current, energy sensor.desk_plug_energy, token: present (HA_TOKEN)
+  ```
+
+- **What each sensor must be**, as strictly as the watts are read:
+
+  | Member | Unit (converted) | Accepted | Not accepted |
+  | --- | --- | --- | --- |
+  | `voltage_entity` | V (mV) | 0 to 1000 V | any other unit; without a unit only a sensor whose device class is `voltage` |
+  | `current_entity` | A (mA) | 0 to 1000 A | any other unit; without a unit only a sensor whose device class is `current` |
+  | `energy_entity` | kWh (Wh, MWh) | 0 to 1 000 000 000 kWh | a power (W, kW) and every other unit; a sensor without a unit; a sensor whose state class is there and is not `total` or `total_increasing` |
+
+  A sensor that has the right unit and says it is something else (a device class that is not `voltage`,
+  `current` or `energy`: kWh is also the unit of a battery's capacity) is not accepted either. Every
+  negative number is no value. A converted number is rounded to three places. `unavailable`, `unknown` and a
+  state that is not a number are no value, as for the watts. Whether a sensor resets (an "energy today") the
+  agent cannot tell: name the plug's running total.
+- **`max_age_s` is for each value by itself.** Every sensor is judged by its own time (`last_reported`, or
+  `last_updated` on an older Home Assistant), by the same rule as the watts. A voltage that Home Assistant
+  last wrote an hour ago is left out while the watts next to it are shown; an energy total that changes only
+  now and then can look old on a Home Assistant without `last_reported`, like every value that does not
+  change (see the paragraph above).
+- **The watts are the reading.** A sensor of an optional value that fails, in whatever way (unavailable, the
+  wrong unit, renamed, a timeout), never turns a good watts reading into an error: the plug stays `ok` with
+  its watts, the value is empty (`–` in the panel), and the other values are read as if nothing had happened.
+  The reason is in the agent's own answer, in the plug's row of `/metrics` (`curl -H "Authorization: Bearer
+  <token>" http://<agent>:9101/metrics`), in a member the row has only then:
+  `"missing": {"voltage": "the sensor is unavailable"}`. The names in it are the row's (`voltage`, `current`,
+  `energy_kwh_total`), and the texts are fixed ones, the table below; nothing Home Assistant sent is repeated
+  in them. A panel up to build 14 does not show `missing`; it shows the empty value.
+- **When the watts fail, the source fails**, with the watts' text from the table above, and the other sensors
+  are not asked: a volts value without watts is not shown.
+- **A refusal is the whole source's.** When Home Assistant answers 401 or 403 for one of the optional sensors
+  (the token's user may read the power sensor and not this one, or the token was deleted a moment ago), the
+  plug shows `home assistant refused the token (asked for voltage_entity)`, without its watts, and the agent
+  waits 5 minutes, 15 minutes, then an hour before it asks again, exactly as after a refusal for the watts.
+  Home Assistant has counted a failed login, and a plug that went on showing its watts would be asked again
+  every `interval` and count one more each time. Nothing more is asked in that reading. Allow the user to
+  read the sensor (or take the member out), then restart the agent.
+- **How the requests are made.** One after the other, the watts first, then voltage, current, energy: one
+  `GET /api/states/<sensor>` each, with the same token, to the same address, on the connection of the first.
+  Not at the same time, so that a token Home Assistant does not accept is sent once in a reading and not four
+  times at once. The time of a reading (the `interval`, at most 10 s) is for all of them together: the watts
+  may use all of it, as before; what they leave is shared equally among the optional sensors, so that one
+  sensor that does not answer cannot take the others' time, and a value for which less than 50 ms are left is
+  not asked for (`no time left in this reading ...`). (Like every program written in Go, the agent sends a
+  request once more on a new connection when the connection it had kept turns out to be dead before any
+  answer came; a request that was answered, a refused one too, is never sent again.)
+
+| `missing` says | Meaning |
+| --- | --- |
+| `the sensor is unavailable` / `the sensor's state is unknown` / `the sensor has no state` | Home Assistant has no value for this sensor |
+| `the sensor's state is not a number` | the entity is not a measurement |
+| `the sensor's unit is not a unit of voltage (V, mV)` / `... of current (A, mA)` / `... of energy (kWh, Wh, MWh)` | the wrong entity for this member (the power sensor named as the energy, two members swapped) |
+| `the sensor has no unit and is not a voltage sensor` / `... a current sensor` / `the sensor has no unit (an energy total needs kWh, Wh or MWh)` | a number without a unit |
+| `the sensor is not a voltage sensor` / `... a current sensor` / `... an energy sensor` | the unit fits, the device class says otherwise |
+| `the sensor is not a total (its state_class is not total or total_increasing)` | `energy_entity` names a measurement, not a counter |
+| `the sensor's value is not a possible voltage (0 to 1000 V)` / `... current (0 to 1000 A)` / `... energy total (0 to 1e9 kWh)` | negative, or far too large |
+| `the sensor's value is older than max_age_s` / `the sensor's state has no time (max_age_s is set)` | only with `max_age_s` |
+| `entity not found` | 404: no such entity id (a typing mistake, or renamed in Home Assistant) |
+| `no time left in this reading (the requests before it took the timeout)` | Home Assistant answered the earlier requests of this reading too slowly |
+| `timeout`, `connection failed`, `http 500`, `invalid JSON from device`, `answer from device is too large ...` | as for every plug |
+
+An agent up to 0.8.0 does not know the three members and does not start with an entry that has one (`field
+voltage_entity not found`): update the agent first, then add them, and take them out again before you put an
+agent of 0.8.0 or older back on this machine.
 
 ## Passkey approval of fan, power and update requests (Pocket ID)
 
