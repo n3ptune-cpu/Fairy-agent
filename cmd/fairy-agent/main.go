@@ -16,6 +16,7 @@
 //	fairy-agent helper-status              Windows: the helper service and what it serves
 //	fairy-agent remove-helper              Windows: remove the helper service
 //	fairy-agent helper-trust set|show|clear  which Pocket ID this machine believes for passkey approvals (root / Administrator)
+//	fairy-agent helper-run show|cancel     the run this machine is in (wake, update, shut down); cancel keeps it on
 //	fairy-agent version
 package main
 
@@ -100,6 +101,10 @@ const usage = `fairy-agent: reports this machine's metrics to the Fairy panel (s
                                             can set it once, while there is none; every later change is made here
                                             (root / Administrator). "fairy-agent helper-trust" lists the options.
                                             Windows: checked by the helper. Linux: by the agent, same command
+  fairy-agent helper-run show | cancel  [--config PATH]
+                                            the run this machine is in (the panel's "Update unpowered hosts"): is
+                                            it armed to switch itself off again, or confirmed. cancel (root /
+                                            Administrator) keeps it on and ends the run here
   fairy-agent version
 `
 
@@ -175,6 +180,8 @@ func main() {
 		os.Exit(helperStatus())
 	case "helper-trust":
 		os.Exit(helperTrustCmd(args, os.Stdin, os.Stdout, os.Stderr))
+	case "helper-run":
+		os.Exit(helperRunCmd(args, os.Stdout, os.Stderr))
 	case "remove-helper":
 		if err := removeHelper(); err != nil {
 			fmt.Fprintln(os.Stderr, "remove-helper failed:", err)
