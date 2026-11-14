@@ -15,10 +15,11 @@ import (
 // ApprovalFiles is the approval trust file of this machine. Windows: in the helper's own folder
 // (C:\ProgramData\fairy-agent\helper), which only Administrators and SYSTEM may change and the agent's account
 // may only read; the folder and the file are checked like the helper's other files (collect.TrustedFolder,
-// collect.TrustedFile) before the file counts.
+// collect.TrustedFile) before the file counts. The lock of the run record's writers in that folder is a file
+// the agent's account cannot even open (collect.TrustedLockFile).
 func ApprovalFiles(cfg *Config) approval.Files {
 	return approval.Files{Path: filepath.Join(cfg.Dir(), "helper", approval.TrustFileName),
-		CheckDir: collect.TrustedFolder, CheckFile: collect.TrustedFile}
+		CheckDir: collect.TrustedFolder, CheckFile: collect.TrustedFile, CheckLock: collect.TrustedLockFile}
 }
 
 // SystemUptime is the time since Windows started (GetTickCount64, the same clock as "uptime_s" of /metrics).
@@ -35,5 +36,5 @@ func SystemBootIDOwner() (string, error) { return bootIDFrom(winBootKey{}, nil, 
 
 // ApprovalAdminFiles is ApprovalFiles for the administrator's command (fairy-agent helper-trust). A file
 // created in the helper's folder inherits its permissions: Administrators and SYSTEM change it, the agent's
-// account reads it.
+// account reads it. (The lock of the run record's writers does not inherit: approval.lockFile.)
 func ApprovalAdminFiles(cfg *Config) approval.Files { return ApprovalFiles(cfg) }

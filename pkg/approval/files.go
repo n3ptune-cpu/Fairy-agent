@@ -28,6 +28,10 @@ type Files struct {
 	// CheckFile must accept the file before it is read (nil: no check). Windows: collect.TrustedFile.
 	// Elsewhere: UnixCheckFile.
 	CheckFile func(path string) error
+	// CheckLock must accept the lock file of the run record's writers (RunLockName) each time it was opened and
+	// before it is locked (nil: no check beyond lockFile's own). Windows: collect.TrustedLockFile, because
+	// there whoever can open the file can hold the lock. Elsewhere lockFile itself makes and checks the file.
+	CheckLock func(path string) error
 	// Prepare, when set, is called with the temporary file before it gets its final name (the administrator's
 	// command on Linux gives the file to root, readable by the agent's group).
 	Prepare func(tmp string) error

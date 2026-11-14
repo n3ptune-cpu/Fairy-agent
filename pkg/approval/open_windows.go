@@ -4,8 +4,10 @@ package approval
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"time"
+	"unsafe"
 
 	"golang.org/x/sys/windows"
 )
@@ -34,26 +36,56 @@ func renameBusy(err error) bool {
 	return errors.Is(err, windows.ERROR_SHARING_VIOLATION) || errors.Is(err, windows.ERROR_LOCK_VIOLATION) || errors.Is(err, windows.ERROR_ACCESS_DENIED)
 }
 
+// lockSDDL is the security descriptor the lock file is made with: owned by Administrators, a permission list
+// of its own that takes nothing from the folder (D:P, SE_DACL_PROTECTED), and in it everything (FA,
+// FILE_GENERIC_ALL) for SYSTEM (SY) and Administrators (BA) and nothing for anybody else. The strings are
+// those of "Security Descriptor String Format", "ACE Strings" and "SID Strings" on learn.microsoft.com.
+const lockSDDL = "O:BAD:P(A;;FA;;;SY)(A;;FA;;;BA)"
+
 // lockFile takes the lock that the two writers of the run record hold while they write (runLock): the first
-// byte of the file at path, exclusively (LockFileEx), tried again until wait is over while somebody else
-// holds it. The lock ends with unlock, and at the latest with the process. Any other failure is said at once.
+// byte of the file at path, exclusively (LockFileEx), tried again until wait is over. The lock ends with
+// unlock, and at the latest with the process ("If a process terminates with a portion of a file locked or
+// closes a file that has outstanding locks, the locks are unlocked by the operating system").
 //
-// The file holds nothing and is never removed. It is made when it is missing and has the owner and the access
-// list its folder hands on (the helper's folder: SYSTEM and Administrators), which is what both writers are;
-// admin changes nothing here. It is opened so that nobody is kept from opening it too.
-func lockFile(path string, wait time.Duration, admin bool) (unlock func(), err error) {
+// LockFileEx asks nothing of its caller but a handle "created with either the GENERIC_READ or GENERIC_WRITE
+// access right". The helper's folder hands on a read entry for the agent's account to every file made in it,
+// so a lock file made the plain way could be held for ever by that low-privilege account, and by nobody's
+// intent the helper would then write nothing: no ticket taken, every cancel an error (second review of the
+// runs, U3). So the file is made with its own protected permission list (lockSDDL) in the create call itself
+// (CREATE_NEW: "CreateFile ignores the lpSecurityDescriptor member when opening an existing file"), a file
+// that is there already is opened as it is, and in both cases check (Files.CheckLock: owner and permission
+// list, read from the file) must accept it before it is locked. A lock file that somebody else could open is
+// not used: the helper then keeps no runs and says why, and an administrator deletes the file while the helper
+// is stopped (TEST-ON-WINDOWS.md). The file holds nothing and is never removed by this program.
+//
+// The documentation names no error for a lock that is held when LOCKFILE_FAIL_IMMEDIATELY is given (it is
+// ERROR_LOCK_VIOLATION as far as known), so every failure of LockFileEx is tried again until wait is over,
+// and the last error is the one that is said. admin changes nothing here.
+func lockFile(path string, wait time.Duration, admin bool, check func(path string) error) (unlock func(), err error) {
 	p, err := windows.UTF16PtrFromString(path)
 	if err != nil {
 		return nil, err
 	}
-	h, err := windows.CreateFile(p, windows.GENERIC_READ|windows.GENERIC_WRITE, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
-		nil, windows.OPEN_ALWAYS, windows.FILE_ATTRIBUTE_NORMAL, 0)
+	const access, share = windows.GENERIC_READ | windows.GENERIC_WRITE, windows.FILE_SHARE_READ | windows.FILE_SHARE_WRITE | windows.FILE_SHARE_DELETE
+	h, err := lockCreate(p, access, share, lockSDDL)
+	if errors.Is(err, windows.ERROR_INVALID_OWNER) { // this account may not name Administrators as the owner: without one (check looks at the result)
+		h, err = lockCreate(p, access, share, lockSDDL[len("O:BA"):])
+	}
+	if errors.Is(err, windows.ERROR_FILE_EXISTS) || errors.Is(err, windows.ERROR_ALREADY_EXISTS) {
+		h, err = windows.CreateFile(p, access, share, nil, windows.OPEN_EXISTING, windows.FILE_ATTRIBUTE_NORMAL, 0)
+	}
 	if err != nil {
 		return nil, &os.PathError{Op: "open", Path: path, Err: err}
 	}
+	if check != nil {
+		if err := check(path); err != nil {
+			_ = windows.CloseHandle(h)
+			return nil, fmt.Errorf("the lock file is not used: %w", err)
+		}
+	}
 	deadline := time.Now().Add(wait)
 	for {
-		var ol windows.Overlapped
+		var ol windows.Overlapped // the offset of the range: 0
 		err = windows.LockFileEx(h, windows.LOCKFILE_EXCLUSIVE_LOCK|windows.LOCKFILE_FAIL_IMMEDIATELY, 0, 1, 0, &ol)
 		if err == nil {
 			return func() {
@@ -62,10 +94,20 @@ func lockFile(path string, wait time.Duration, admin bool) (unlock func(), err e
 				_ = windows.CloseHandle(h)
 			}, nil
 		}
-		if !errors.Is(err, windows.ERROR_LOCK_VIOLATION) && !errors.Is(err, windows.ERROR_IO_PENDING) || !time.Now().Before(deadline) {
+		if !time.Now().Before(deadline) {
 			_ = windows.CloseHandle(h)
 			return nil, &os.PathError{Op: "lock", Path: path, Err: err}
 		}
 		time.Sleep(lockStep)
 	}
+}
+
+// lockCreate makes the lock file, which must not exist, with sddl as its security descriptor.
+func lockCreate(p *uint16, access, share uint32, sddl string) (windows.Handle, error) {
+	sd, err := windows.SecurityDescriptorFromString(sddl)
+	if err != nil {
+		return windows.InvalidHandle, err
+	}
+	sa := &windows.SecurityAttributes{Length: uint32(unsafe.Sizeof(windows.SecurityAttributes{})), SecurityDescriptor: sd}
+	return windows.CreateFile(p, access, share, sa, windows.CREATE_NEW, windows.FILE_ATTRIBUTE_NORMAL, 0)
 }

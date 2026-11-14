@@ -938,23 +938,34 @@ PowerShell as Administrator**; after `->` is what a good answer looks like. Noth
   `& "C:\Program Files\Fairy\fairy-agent.exe" helper-run show` -> `run:  none is armed or confirmed`, `record made:` with the time of now.
   `icacls "C:\ProgramData\fairy-agent\helper\approval-run.json"` -> the same lines as for `approval-trust.json`.
   `Start-Service fairy-agent-helper`, J1 -> `"runs":1`; `helper.log` has no `the run record cannot be used` after the start.
-* J15 **The lock of the record's two writers.**
+* J15 **[KEY]** **The lock of the record's two writers: a file only SYSTEM and Administrators can open.**
   `Get-Item "C:\ProgramData\fairy-agent\helper\approval-run.lock" | Format-List Length,CreationTime` -> `Length : 0`
   (the helper made it when it first wrote the record), and
-  `icacls "C:\ProgramData\fairy-agent\helper\approval-run.lock"` -> the same lines as for `approval-trust.json`.
-  Now hold it as a third program would:
+  `icacls "C:\ProgramData\fairy-agent\helper\approval-run.lock"` -> exactly two lines of rights,
+  `NT AUTHORITY\SYSTEM:(F)` and `BUILTIN\Administrators:(F)`: no `(I)` in them (nothing handed on by the
+  folder), and NO line for the agent's account (`NT SERVICE\fairy-agent`), unlike `approval-trust.json` next to
+  it. `(Get-Acl "C:\ProgramData\fairy-agent\helper\approval-run.lock").Owner` -> `BUILTIN\Administrators`
+  (or `NT AUTHORITY\SYSTEM`).
+  `Select-String -Path "C:\ProgramData\fairy-agent\helper\helper.log" -Pattern "lock file is not used|could not be written" | Select-Object -Last 3`
+  -> nothing. If there IS a line `... the lock file is not used: ...` or `the lock of the run record
+  (approval-run.lock) cannot be taken`, the helper keeps no runs on this PC: please send the whole line and the
+  `icacls` output. (A lock file from an earlier test build has the folder's list, with the agent's account in
+  it, and is refused in just this way: `Stop-Service fairy-agent-helper`, delete the file,
+  `Start-Service fairy-agent-helper`, and look again.)
+  The same for a file the command makes: `Stop-Service fairy-agent-helper`,
+  `Remove-Item "C:\ProgramData\fairy-agent\helper\approval-run.lock"`,
+  `& "C:\Program Files\Fairy\fairy-agent.exe" helper-run cancel`, then the `icacls` and `Get-Acl` lines again
+  -> the same two lines and owner. `Start-Service fairy-agent-helper` -> no `lock file is not used` line.
+  Now hold the lock as another administrator's program would:
   `$l = [System.IO.File]::Open("C:\ProgramData\fairy-agent\helper\approval-run.lock","Open","ReadWrite","ReadWrite"); $l.Lock(0,1)`
   `Restart-Service fairy-agent-helper`, wait ten seconds,
   `Select-String -Path "C:\ProgramData\fairy-agent\helper\helper.log" -Pattern "could not be written" | Select-Object -Last 1`
-  -> a new line `approval: the run record could not be written error="the lock of the run record (approval-run.lock) cannot be taken: ..."`
-  (the helper writes nothing while somebody else holds the lock).
+  -> ONE new line `approval: the run record could not be written. Until it can, ... error="the lock of the run record (approval-run.lock) cannot be taken: ..."`
+  (the helper writes nothing while somebody else holds the lock, and says so once).
   `Measure-Command { & "C:\Program Files\Fairy\fairy-agent.exe" helper-run cancel }` -> about 3 seconds, and no
   error (the command waits for the lock and then goes on without it).
-  `$l.Unlock(0,1); $l.Close()`, `Restart-Service fairy-agent-helper` -> no new `could not be written` line after
-  this start, and J1 still shows `"runs":1`. Please send the two `helper.log` lines and the measured time: if
-  the FIRST start of the helper (before anything held the lock) already logged `the lock of the run record ...
-  cannot be taken`, the lock does not work on Windows as written, the helper then keeps no runs, and we need
-  the whole line.
+  `$l.Unlock(0,1); $l.Close()`, wait 20 seconds -> a line `approval: the run record is written again`, and J1
+  still shows `"runs":1`. Please send the `helper.log` lines and the measured time.
 
 ### B. With a panel that knows runs (later)
 

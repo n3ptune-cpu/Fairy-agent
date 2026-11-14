@@ -28,7 +28,9 @@ func renameBusy(error) bool { return false }
 // folder, mode 0640, as it does with the record it writes (UnixAdminPrepare): the service's user can then
 // open it. That is done on the open file, not by its name, and only when the command is root; the service
 // itself never changes an owner (UnixCanKeep says why it must not even try).
-func lockFile(path string, wait time.Duration, admin bool) (unlock func(), err error) {
+//
+// check, when set, must accept the file after it was opened and before it is locked (Files.CheckLock).
+func lockFile(path string, wait time.Duration, admin bool, check func(path string) error) (unlock func(), err error) {
 	f, err := os.OpenFile(path, os.O_RDONLY|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW, 0o600)
 	made := err == nil
 	if errors.Is(err, os.ErrExist) {
@@ -47,6 +49,12 @@ func lockFile(path string, wait time.Duration, admin bool) (unlock func(), err e
 		if err := lockHandOn(f, filepath.Dir(path)); err != nil && made {
 			_ = f.Close()
 			return nil, err
+		}
+	}
+	if check != nil {
+		if err := check(path); err != nil {
+			_ = f.Close()
+			return nil, fmt.Errorf("the lock file is not used: %w", err)
 		}
 	}
 	deadline := time.Now().Add(wait)

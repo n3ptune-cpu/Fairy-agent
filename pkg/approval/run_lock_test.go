@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -284,5 +285,57 @@ func TestServiceThatCouldNotWriteTakesTheCancelOnTheMachine(t *testing.T) {
 	r.reboot(time.Hour, 60*time.Second)
 	if _, ref := r.w.Arm(r.ticket(runB, r.up()+100*time.Second)); ref != nil {
 		t.Errorf("a ticket in the next boot: %v", ref)
+	}
+}
+
+// On Windows whoever can open the lock file can hold the lock (LockFileEx asks for a handle that can read,
+// no more), and a file made the plain way in the helper's folder can be read by the agent's account. So the
+// file is made with a permission list of its own, and every time it was opened and before it is locked
+// Files.CheckLock looks at it (Windows: collect.TrustedLockFile, whose rule is tested there). A lock file that
+// does not pass is not used: the service writes nothing and so takes nothing of a run, and says why once; the
+// administrator's cancel is written all the same, without waiting (second review of the runs, U3).
+func TestRunRecordLockFileThatDoesNotPassIsNotUsed(t *testing.T) {
+	r := newRunRig(t)
+	var asked []string
+	var bad error
+	r.files.CheckLock = func(path string) error { asked = append(asked, path); return bad }
+	r.restart()
+	r.armed(runA) // a write under the lock: the check was asked, with the lock's path
+	if len(asked) == 0 || asked[0] != lockPath(r) {
+		t.Fatalf("the lock file was used without a look at it: %v", asked)
+	}
+	n := len(asked)
+	if _, ref := r.confirm(goReq(runA, "9.9.9", 30, 600)); ref != nil {
+		t.Fatal(ref)
+	}
+	if len(asked) == n {
+		t.Fatal("the second write did not look at the lock file again")
+	}
+
+	bad = errors.New(lockPath(r) + " has an entry for S-1-5-80-1 (access 0x1200a9)")
+	n = len(asked)
+	if _, ref := r.g.AdmitRun(update, runA); ref == nil {
+		t.Error("the run's update was let through although nothing could be written under a lock")
+	}
+	if len(asked) == n {
+		t.Fatal("no look at the lock file")
+	}
+	if log := r.log.String(); !strings.Contains(log, "the lock file is not used") || !strings.Contains(log, "has an entry for") {
+		t.Errorf("the log does not say why:\n%s", log)
+	}
+	start := time.Now()
+	was, changed, err := r.files.RunCancel(r.stamp())
+	if err != nil || !changed || was.State != api.RunConfirmed || time.Since(start) > time.Second {
+		t.Fatalf("helper-run cancel with a lock file that is not used: %+v %v %v after %s", was, changed, err, time.Since(start))
+	}
+	if v := r.files.RunShow(); v.ID != "" || v.LastState != api.RunCancelled {
+		t.Errorf("the record: %+v", v)
+	}
+	r.reboot(time.Hour, 30*time.Second)
+	_, ref := r.w.Arm(r.ticket(runB, time.Second))
+	runRefused(t, "a ticket on a machine whose lock file is not used", ref, 503, api.CodeRunUnavailable, "")
+	bad = nil
+	if _, ref := r.w.Arm(r.ticket(runB, time.Second)); ref != nil {
+		t.Errorf("a ticket once the lock file is right: %v", ref)
 	}
 }

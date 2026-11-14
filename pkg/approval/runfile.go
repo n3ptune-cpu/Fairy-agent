@@ -286,7 +286,7 @@ func (f Files) runLock(wait time.Duration) (unlock func(), err error) {
 			return nil, fmt.Errorf("the folder of the run record is not safe: %w", err)
 		}
 	}
-	unlock, err = lockFile(filepath.Join(dir, RunLockName), wait, f.Prepare != nil)
+	unlock, err = lockFile(filepath.Join(dir, RunLockName), wait, f.Prepare != nil, f.CheckLock)
 	if err != nil {
 		return nil, fmt.Errorf("the lock of the run record (%s) cannot be taken: %w", RunLockName, err)
 	}
