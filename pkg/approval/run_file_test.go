@@ -58,7 +58,7 @@ func TestRunRecordFile(t *testing.T) {
 	}
 	live, _ := m["run"].(map[string]any)
 	for k := range live {
-		if !strings.Contains(" id state sub name kid go_up_ms within_s to shutdown_delay_s update shutdown ", " "+k+" ") {
+		if !strings.Contains(" id state trust sub name kid go_up_ms within_s to shutdown_delay_s update shutdown ", " "+k+" ") {
 			t.Errorf("member %q in the live run", k)
 		}
 	}

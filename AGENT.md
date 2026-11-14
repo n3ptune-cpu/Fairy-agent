@@ -1758,7 +1758,10 @@ Administrator; it closes the boot for tickets itself, also while the service is 
 the moment the command returns: the run's update and shutdown read the record before they are let through);
 on Windows `shutdown /a` during the countdown (the machine is still running a minute after
 the countdown ended: the run counts as cancelled). `fairy-agent helper-run show` prints what is on record.
-A changed or removed trust file ends a live run too.
+A changed or removed trust file ends a live run too: the service that is running sees the change at its next
+look, and a service that starts finds it in the record, which names the trust file the run was accepted under
+(the SHA-256 of its bytes; a run under another trust file, or one that names none, is ended and not taken
+over). The machine stays on, and the boot is closed as after a cancel.
 
 **4. The confirmation: `POST /approval/challenge`** with `{"verb": "run_go", "run", "to", "shutdown_delay_s",
 "within_s"}` gives a challenge like for every other request (180 s, single use), and **`POST /run/go`** with

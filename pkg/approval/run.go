@@ -1,6 +1,7 @@
 package approval
 
 import (
+	"encoding/hex"
 	"errors"
 	"slices"
 	"strconv"
@@ -174,6 +175,7 @@ func (g *Gate) maybeThisBoot(ref bootRef, now time.Time, up time.Duration) bool 
 // live run that is not of this boot is taken out; one that is, is taken over. Caller holds g.mu.
 func (g *Gate) runRead(now time.Time, up time.Duration) {
 	m := &g.rs
+	g.reload(false) // a live run is taken over only under the trust file as it is now
 	f, sum, exists, err := g.o.Files.readRun()
 	m.loaded, m.dirty = true, false
 	if err != nil {
@@ -199,11 +201,26 @@ func (g *Gate) runRead(now time.Time, up time.Duration) {
 		return
 	}
 	m.epoch = g.epoch
+	if f.Run.Trust != g.trustSum() {
+		// The run was accepted under another trust file than the one in place (it was changed while this
+		// service was not running, or in the seconds before it was started again), or the record does not say
+		// under which. It is not taken over: ended, as the service that accepted it would have ended it. The
+		// machine stays on, and the boot is closed for tickets.
+		if g.o.ReadOnly { // a gate that only reads does not count it either; the owner of the file ends it
+			f.Run = nil
+			return
+		}
+		g.runEnd(api.RunCancelled, "the approval trust of this machine is not the one this run was accepted under (it was changed while this service was not running)", now, up)
+		return
+	}
 	if !g.o.ReadOnly {
 		g.o.Log.Warn("approval: run taken over from the record (this service was restarted)", "run", f.Run.ID, "state", f.Run.State,
 			"sub", f.Run.Sub, "kid", f.Run.Kid)
 	}
 }
+
+// trustSum names the trust file as this gate read it last, for runLive.Trust. Caller holds g.mu, after g.reload.
+func (g *Gate) trustSum() string { return hex.EncodeToString(g.rawSum[:]) }
 
 // runSync brings this process's copy of the record up to date with the file, for the steps that must see what
 // was done on the machine in the meantime (helper-run cancel; a record that was removed). After the first look
@@ -643,7 +660,7 @@ func (g *Gate) Arm(ap *api.Approval, pending bool) (api.RunAnswer, *Refusal) {
 	}
 	at, prev, nf := g.bootRef(now, up), g.rs.file, *f
 	nf.Arm, nf.Used, nf.Last = &at, append(slices.Clone(f.Used), id), nil
-	nf.Run = &runLive{ID: id, State: api.RunArmed, Sub: cl.Sub, Name: cl.Name, Kid: cl.Kid, ArmedUpMS: up.Milliseconds(), WaitS: *req.WaitS, NoticeS: *req.NoticeS}
+	nf.Run = &runLive{ID: id, State: api.RunArmed, Trust: g.trustSum(), Sub: cl.Sub, Name: cl.Name, Kid: cl.Kid, ArmedUpMS: up.Milliseconds(), WaitS: *req.WaitS, NoticeS: *req.NoticeS}
 	g.rs.file, g.rs.epoch = &nf, g.epoch
 	if err := g.runWrite(now, up); err != nil { // not recorded: not armed
 		g.rs.file, g.rs.dirty = prev, false
@@ -740,7 +757,7 @@ func (g *Gate) Go(req api.ApprovalRequest, ap *api.Approval) (api.RunAnswer, *Re
 	if !slices.Contains(f.Used, id) {
 		nf.Used = append(slices.Clone(f.Used), id)
 	}
-	nf.Run = &runLive{ID: id, State: api.RunConfirmed, Sub: cl.Sub, Name: cl.Name, Kid: cl.Kid, GoUpMS: up.Milliseconds(),
+	nf.Run = &runLive{ID: id, State: api.RunConfirmed, Trust: g.trustSum(), Sub: cl.Sub, Name: cl.Name, Kid: cl.Kid, GoUpMS: up.Milliseconds(),
 		WithinS: *req.WithinS, To: *req.To, ShutdownDelayS: *req.ShutdownDelayS, Shutdown: 1}
 	if *req.To != api.RunNoUpdate {
 		nf.Run.Update = 1

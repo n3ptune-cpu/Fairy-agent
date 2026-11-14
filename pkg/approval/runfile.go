@@ -57,6 +57,11 @@ type runLast struct {
 type runLive struct {
 	ID    string `json:"id"`
 	State string `json:"state"` // api.RunArmed | api.RunOffPending | api.RunConfirmed
+	// Trust names the trust file this run was accepted under: the SHA-256 of its bytes, in hex (Gate.trustSum).
+	// A live run counts only under that trust. The service that accepted it ends it when the file changes; a
+	// service that starts and finds the run in the record ends it when the file is another one by now, or when
+	// the run names none (Gate.runRead).
+	Trust string `json:"trust,omitempty"`
 	// Who signed the token this state rests on: for the log and, the name, for the notice.
 	Sub  string `json:"sub,omitempty"`
 	Name string `json:"name,omitempty"`
@@ -126,6 +131,9 @@ func (f *runFile) validate() error {
 		return nil
 	}
 	if len(r.Sub) > 255 || len(r.Name) > 64 || len(r.Kid) > 128 || r.ArmedUpMS < 0 || r.OffUpMS < 0 || r.GoUpMS < 0 {
+		return no
+	}
+	if r.Trust != "" && !isSumHex(r.Trust) {
 		return no
 	}
 	// Each of these was the uptime at a moment at or before the one this record was written at, and that
@@ -501,3 +509,16 @@ func (f Files) RunCancel(at RunStamp) (was RunView, changed bool, err error) {
 // runCancelSettle is how long RunCancel waits before it looks at the record again when it wrote without the
 // writers' lock.
 var runCancelSettle = 100 * time.Millisecond
+
+// isSumHex reports whether s is a SHA-256 as this program writes it: 64 characters, 0-9 and a-f.
+func isSumHex(s string) bool {
+	if len(s) != 64 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if c := s[i]; (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
+}
