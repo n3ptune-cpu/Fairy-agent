@@ -8,7 +8,9 @@ import (
 	"log/slog"
 	"net"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -50,6 +52,11 @@ type cancelRig struct {
 	now    time.Time
 	up     time.Duration
 	client *agent.HelperClient
+	files  approval.Files
+	audit  *logBuf // the helper's log
+	// agentStarts is the agent starting again in front of the same helper: it has kept nothing of the helper's
+	// status, as in the first moments of every start of the agent.
+	agentStarts func()
 }
 
 func (r *cancelRig) clock() time.Time { r.mu.Lock(); defer r.mu.Unlock(); return r.now }
@@ -87,7 +94,8 @@ func newCancelRig(t *testing.T) *cancelRig {
 	}
 	r := &cancelRig{t: t, iss: approvaltest.New(), exec: &agenttest.PowerExec{}, now: time.Now(), up: 60 * time.Second}
 	files := approval.Files{Path: filepath.Join(t.TempDir(), approval.TrustFileName)}
-	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	r.files, r.audit = files, &logBuf{}
+	log := slog.New(slog.NewTextHandler(r.audit, nil))
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	boot := func() (string, error) { return "0f1e2d3c4b5a69788796a5b4c3d2e1f0", nil } // the helper's volatile registry key
@@ -103,14 +111,17 @@ func newCancelRig(t *testing.T) *cancelRig {
 		go func() { r.srv.ServeConn(ctx, a, "test"); a.Close() }()
 		return cutConn{c, &r.cut}, nil
 	}
-	r.client = agent.NewHelperClient(dial, scm, true) // Every 2 s, Timeout 5 s, as in the agent
-	hp := r.client.Power()
-	d := agent.Deps{Collector: agenttest.NewCollector(), Version: "test", Helper: r.client,
-		Power: agent.NewPowerForRuns(hp, 30, hp.RunLive), HelperSources: []string{api.FeaturePower}}
-	d.Approval = approval.NewGate(approval.Options{EnforcedBy: api.EnforcedByAgent, Files: files, ReadOnly: true, Now: r.clock, Uptime: r.uptime, BootID: boot, Log: log})
-	hs := httptest.NewServer(agent.New(cfg, agent.Tokens{Read: readTok, Control: ctlTok}, d).Handler())
-	t.Cleanup(hs.Close)
-	r.base = hs.URL
+	r.agentStarts = func() {
+		r.client = agent.NewHelperClient(dial, scm, true) // Every 2 s, Timeout 5 s, as in the agent
+		hp := r.client.Power()
+		d := agent.Deps{Collector: agenttest.NewCollector(), Version: "test", Helper: r.client,
+			Power: agent.NewPowerForRuns(hp, 30, hp.RunLive), HelperSources: []string{api.FeaturePower}}
+		d.Approval = approval.NewGate(approval.Options{EnforcedBy: api.EnforcedByAgent, Files: files, ReadOnly: true, Now: r.clock, Uptime: r.uptime, BootID: boot, Log: log})
+		hs := httptest.NewServer(agent.New(cfg, agent.Tokens{Read: readTok, Control: ctlTok}, d).Handler())
+		t.Cleanup(hs.Close)
+		r.base = hs.URL
+	}
+	r.agentStarts()
 	if st, b := r.post(api.PathApprovalTrust, provenTrust(t, r.base, r.iss, r.iss.Init())); st != 200 {
 		t.Fatalf("trust: %d %v", st, b)
 	}
@@ -201,5 +212,72 @@ func TestWindowsCancelWithoutARunIsWhatItWas(t *testing.T) {
 	}
 	if r.exec.Cancels != 0 {
 		t.Errorf("the system was asked to cancel %d times with nothing pending", r.exec.Cancels)
+	}
+}
+
+// "Cannot tell" counts as "the helper may have a run", in the two cases no test held (A09 and A28 of the
+// second review of the runs).
+//
+// The agent has just started and the helper has not answered it yet: the agent has kept nothing of the
+// helper's status. The helper holds an armed run from before the agent started. A cancel is not answered
+// 200 "nothing pending" by the agent itself.
+func TestWindowsCancelFromAnAgentThatHasNoAnswerOfTheHelperYet(t *testing.T) {
+	r := newCancelRig(t)
+	r.arm(hRunA, 120, 30)
+	r.cut.Store(true)
+	r.agentStarts() // the agent starts again; the helper does not answer its first questions
+	// asked directly: "may the helper have a run?" is yes while nobody has heard from it. (Over HTTP a second
+	// rule answers first, "cannot tell whether a shutdown is pending", which is why no test held this one.)
+	if !r.client.Power().RunLive() {
+		t.Error("an agent that has not heard from the helper says the helper has no run")
+	}
+	st, b := r.post("/power", map[string]any{"action": "cancel"})
+	if st == 200 {
+		t.Fatalf("an agent that has not heard from the helper answered the cancel itself: %d %v", st, b)
+	}
+	if st != 500 && st != 503 {
+		t.Errorf("a cancel that could not be delivered: %d %v, want 500 or 503", st, b)
+	}
+	r.cut.Store(false)
+	r.client.Every, r.client.Timeout = 0, 0
+	if st, b := r.post("/power", map[string]any{"action": "cancel"}); st != 200 {
+		t.Fatalf("the cancel once the helper answers: %d %v", st, b)
+	}
+	r.pass(130 * time.Second)
+	r.pass(time.Second)
+	if len(r.exec.Scheduled) != 0 {
+		t.Fatalf("the PC switched itself off after a cancel that was answered 200: %v", r.exec.Scheduled)
+	}
+}
+
+// The helper answers, and says that its trust file cannot be used: whether it still holds a run it accepted
+// while the file was good is not in that answer. The cancel goes to the helper (which ends the run it has, and
+// cancels what is pending), and is not answered by the agent on its own.
+func TestWindowsCancelGoesToAHelperWhoseTrustCannotBeUsed(t *testing.T) {
+	r := newCancelRig(t)
+	r.arm(hRunA, 120, 30)
+	if err := os.WriteFile(r.files.Path, []byte("{not a trust file"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	r.mu.Lock()
+	r.now = r.now.Add(6 * time.Second) // the helper reads the trust file again (every five seconds)
+	r.up += 6 * time.Second
+	r.mu.Unlock()
+	r.client.Every, r.client.Timeout = 0, 0
+	if _, m := do(t, r.base, "GET", "/metrics", readTok, nil); m["approval"].(map[string]any)["state"] != api.ApprovalBroken {
+		t.Fatalf("the approval block with a trust file that cannot be read: %v", m["approval"])
+	}
+	st, b := r.post("/power", map[string]any{"action": "cancel"})
+	if st != 200 {
+		t.Fatalf("cancel: %d %v", st, b)
+	}
+	// the helper ended the run because of the cancel, at once, and not a look later because of the trust
+	if log := r.audit.String(); !strings.Contains(log, "approval: run cancelled") || !strings.Contains(log, "a cancel of the pending power action") {
+		t.Errorf("the cancel never reached the helper: the agent answered it itself although the helper could not say whether it holds a run\n%s", log)
+	}
+	r.pass(130 * time.Second)
+	r.pass(time.Second)
+	if len(r.exec.Scheduled) != 0 {
+		t.Fatalf("the PC switched itself off: %v", r.exec.Scheduled)
 	}
 }
