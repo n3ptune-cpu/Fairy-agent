@@ -634,8 +634,15 @@ func TestRunWithAHelperFromBeforeRuns(t *testing.T) {
 	r := newRunsRig(t, true)
 	r.startChecker(false)
 	r.trusted()
-	time.Sleep(50 * time.Millisecond)
-	if blk := r.block(); blk["runs"] != nil || blk["run"] != nil {
+	// the agent asks the helper's status again all the time; until it has, it shows what the helper before said
+	var blk map[string]any
+	for i := 0; i < 500; i++ {
+		if blk = r.block(); blk["runs"] == nil {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if blk["runs"] != nil || blk["run"] != nil {
 		t.Fatalf("block %v", blk)
 	}
 	st, b := r.post(api.PathRunArm, map[string]any{"approval": r.ticket(hRunA, 160*time.Second)})
