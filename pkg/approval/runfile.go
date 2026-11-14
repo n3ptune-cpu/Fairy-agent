@@ -128,6 +128,12 @@ func (f *runFile) validate() error {
 	if len(r.Sub) > 255 || len(r.Name) > 64 || len(r.Kid) > 128 || r.ArmedUpMS < 0 || r.OffUpMS < 0 || r.GoUpMS < 0 {
 		return no
 	}
+	// Each of these was the uptime at a moment at or before the one this record was written at, and that
+	// uptime is in the record: a later one is not from this program (and the largest numbers would make the
+	// end of the wait, or of the confirmation, overflow).
+	if r.ArmedUpMS > f.At.UpMS || r.OffUpMS > f.At.UpMS || r.GoUpMS > f.At.UpMS {
+		return no
+	}
 	valid := api.RunValidMinS
 	switch r.State {
 	case api.RunArmed, api.RunOffPending:
