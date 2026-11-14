@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -727,4 +728,40 @@ func TestRunRoutesOnAnAgentThatKeepsNoRuns(t *testing.T) {
 	}
 	st, b = do(t, srv.URL, "POST", "/power", ctlTok, map[string]any{"action": "shutdown", "delay_s": 30, "run": hRunA})
 	wantRefusal(t, "a shutdown that names a run", st, b, 403, api.CodeApprovalRequired)
+}
+
+// The answer to a challenge request with a verb nobody knows is what v0.8.0 answered, byte for byte: a panel
+// (or a person) that knows that sentence still gets it. The two verbs of a run are not in it: run_go is a verb
+// that is known and answered, and run_arm has an answer of its own.
+func TestUnknownChallengeVerbAnswersAsBefore(t *testing.T) {
+	const v080 = `{"error":"not a request that can be approved: verb must be fan_set, fan_mode, power, apply_update or trust_set"}`
+	bothKinds(t, func(t *testing.T, r *rrig) {
+		for _, trusted := range []bool{false, true} {
+			if trusted {
+				r.trusted()
+			}
+			for _, body := range []string{`{"verb":"format_disk"}`, `{"verb":""}`, `{}`, `{"verb":"RUN_GO"}`, `{"verb":"run"}`} {
+				st, b := rawPost(t, r.base, api.PathApprovalChallenge, ctlTok, body)
+				if st != 400 || strings.TrimSpace(b) != v080 {
+					t.Errorf("trust set %v, %s: %d %s", trusted, body, st, b)
+				}
+			}
+		}
+	})
+}
+
+func rawPost(t *testing.T, base, path, tok, body string) (int, string) {
+	t.Helper()
+	req, err := http.NewRequest("POST", base+path, strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer "+tok)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	b, _ := io.ReadAll(resp.Body)
+	return resp.StatusCode, string(b)
 }

@@ -393,7 +393,8 @@ func (r ApprovalRequest) Canonical() (string, error) {
 		}
 		return "run_go run=" + *r.Run + " to=" + *r.To + " shutdown_delay_s=" + strconv.Itoa(*r.ShutdownDelayS) + " within_s=" + strconv.Itoa(*r.WithinS), nil
 	}
-	return "", errors.New("verb must be fan_set, fan_mode, power, apply_update, trust_set, run_arm or run_go")
+	// the sentence of v0.8.0, byte for byte (the two verbs of a run are known verbs and never get here)
+	return "", errors.New("verb must be fan_set, fan_mode, power, apply_update or trust_set")
 }
 
 // ParseRunRequest reads the canonical text of a run request (run_arm or run_go) back into the request. It
