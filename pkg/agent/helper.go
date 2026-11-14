@@ -636,23 +636,45 @@ func (p *HelperPower) ScheduleRun(action string, delay time.Duration, who, run s
 	return p.call(req)
 }
 
-// RunLive asks the helper at this moment whether it has a run that a cancel must end: armed, counting down
-// or confirmed. It asks only a helper whose approval check is on and that knows runs; for every other
-// machine the answer is no without a question, and a cancel is what it always was.
+// RunLive says whether a cancel must be passed on to the helper although nothing is on record as pending: the
+// helper has, or may have, a run that a cancel must end (armed, counting down or confirmed).
+//
+// The answer is "no" only when that is known: no helper is installed; or the helper that answered last (the
+// agent's kept status, a few seconds old at most) keeps no runs or has the approval check off, and then
+// nothing can be armed on this machine without this agent carrying the ticket and throwing that status away
+// (RunArm, RunGo); or the helper, asked at this moment, answers and names no live run. Everything else is
+// "cannot tell" and counts as yes: the helper is not running, has not answered since this agent started, does
+// not answer the question now (its pipe is busy, it is starting again, it refuses a read because too many
+// were asked this minute), or says that its trust file cannot be used. The cancel then goes to the helper,
+// which ends the run, or the request fails with the helper's error (503 / 500 from Power.Handle). It is never
+// answered 200 "nothing pending" on a guess: a PC whose run stayed armed behind such an answer switched
+// itself off (review of fd6d3be, T1).
 func (p *HelperPower) RunLive() bool {
 	c := p.c
 	ctx := context.Background()
-	if !c.runsKnown(ctx) {
+	hs := c.Status(ctx)
+	if hs.State == api.HelperNotInstalled {
 		return false
 	}
 	c.stMu.Lock()
-	on := c.last.Approval != nil && c.last.Approval.State == api.ApprovalRequired
+	answered := hs.Running() && c.hasLast
+	checks := c.checksLocked()
+	runs := checks && c.last.Approval.Runs >= api.ApprovalRuns
+	off := checks && c.last.Approval.State == api.ApprovalOff
 	c.stMu.Unlock()
-	if !on {
-		return false
+	switch {
+	case !answered:
+		return true // nobody can say what the helper holds
+	case !runs:
+		return false // a helper from before runs (or from before approvals): it keeps none
+	case off:
+		return false // no trust: no ticket and no confirmation is taken
 	}
 	st, known := c.ApprovalNow(ctx)
-	return known && st.Run != nil && (st.Run.State == api.RunArmed || st.Run.State == api.RunOffPending || st.Run.State == api.RunConfirmed)
+	if !known || st.State != api.ApprovalRequired {
+		return true
+	}
+	return st.Run != nil && (st.Run.State == api.RunArmed || st.Run.State == api.RunOffPending || st.Run.State == api.RunConfirmed)
 }
 
 // Cancel cancels a pending action.
