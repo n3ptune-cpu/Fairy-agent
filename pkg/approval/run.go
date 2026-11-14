@@ -42,16 +42,28 @@ const RunClockBack = 2 * time.Minute
 // runClockEvery is how much uptime passes between two looks at the clock for the record (runClockKeep).
 const runClockEvery = 10 * time.Minute
 
+// runRetryEvery is how long the service waits, by the uptime, before it tries by itself to write a record again
+// that it could not write (runRetry). A request that needs the record does not wait for it.
+const runRetryEvery = 15 * time.Second
+
 // runMem is what this process knows of the run record.
 type runMem struct {
 	loaded bool
 	file   *runFile // nil: there is no record, or it cannot be used (bad)
 	sum    [32]byte // of the file's bytes as this process read or wrote them last
+	disk   *runLive // the live run in the file as this process read or wrote it last (nil: none), see runStatus
 	exists bool
 	bad    string // why the record cannot be used ("": it can)
 	said   string // the bad that was logged last
 	epoch  uint64 // Gate.epoch when the live run was accepted or taken over
-	dirty  bool   // the last write failed: the file is behind file; every step tries again
+	dirty  bool   // the last write failed: the file is behind file; it is tried again (runRetry)
+	// A write that failed: said in the log once, and once when a write works again (failSaid, fails); tried
+	// again by the service itself only every runRetryEvery of uptime (failAt: the uptime of the last failure;
+	// failWait: it is waited for. A request that needs the record clears failWait and so tries at once).
+	failSaid bool
+	fails    int
+	failAt   time.Duration
+	failWait bool
 	// lostPending: a run that was counting down ended in another way than by a cancel that stops the countdown
 	// itself (the record was changed on the machine, the trust was changed). The watcher stops the countdown.
 	lostPending bool
@@ -174,6 +186,7 @@ func (g *Gate) runRead(now time.Time, up time.Duration) {
 		return
 	}
 	m.file, m.sum, m.exists, m.bad, m.said = f, sum, exists, "", ""
+	m.disk = liveCopy(f)
 	if f == nil || f.Run == nil {
 		return
 	}
@@ -202,7 +215,7 @@ func (g *Gate) runSync(now time.Time, up time.Duration) {
 		g.runRead(now, up)
 		return
 	}
-	if m.dirty && g.runWrite(now, up) != nil {
+	if m.dirty && g.runRetry(now, up) != nil {
 		// This process is ahead of the file and still cannot write. While the file is the one it knows, it
 		// stays ahead, and the file is not looked at further. A file that somebody else changed in between
 		// (the administrator's command) wins: what this process was ahead with is dropped, and below a live
@@ -234,6 +247,7 @@ func (g *Gate) runSync(now time.Time, up time.Duration) {
 		return
 	}
 	m.file, m.sum, m.exists, m.bad, m.said = f, sum, exists, "", ""
+	m.disk = liveCopy(f)
 	if f != nil && f.Run != nil {
 		g.runEnd(api.RunCancelled, "the run record was changed by somebody else: its live run is not this service's", now, up)
 		return
@@ -267,11 +281,60 @@ func (g *Gate) runWrite(now time.Time, up time.Duration) error {
 	}
 	if err != nil {
 		m.dirty = true
-		g.o.Log.Error("approval: the run record could not be written", "error", firstLine(err.Error()))
+		m.fails, m.failAt, m.failWait = m.fails+1, up, true
+		if !m.failSaid { // once, not at every try (a full disk made some seventy lines a minute)
+			m.failSaid = true
+			g.o.Log.Error("approval: the run record could not be written. Until it can, nothing is armed and nothing of a run is let through; it is tried again every "+
+				strconv.Itoa(int(runRetryEvery/time.Second))+" s and with every request of a run, and this is said again only after it has worked in between",
+				"error", firstLine(err.Error()))
+		}
 		return err
 	}
+	if m.failSaid {
+		g.o.Log.Warn("approval: the run record is written again", "failed_tries", m.fails)
+	}
 	m.sum, m.exists, m.dirty = sum, true, false
+	m.disk = liveCopy(m.file)
+	m.failSaid, m.fails, m.failWait = false, 0, false
 	return nil
+}
+
+// liveCopy is a copy of the live run in f (nil: none).
+func liveCopy(f *runFile) *runLive {
+	if f == nil || f.Run == nil {
+		return nil
+	}
+	c := *f.Run
+	return &c
+}
+
+// errRunLater: the record is behind, and the last try to write it is less than runRetryEvery back.
+var errRunLater = errors.New("the run record could not be written a moment ago; it is tried again shortly")
+
+// runRetry writes the record when this process is ahead of the file (a write failed). The looks the service
+// makes by itself (once a second, and at every status question) try only every runRetryEvery; whoever must
+// not wait calls runAsked first. nil: the file is as this process holds it. Caller holds g.mu.
+func (g *Gate) runRetry(now time.Time, up time.Duration) error {
+	m := &g.rs
+	if !m.dirty {
+		return nil
+	}
+	if m.failWait && up >= m.failAt && up < m.failAt+runRetryEvery {
+		return errRunLater
+	}
+	return g.runWrite(now, up)
+}
+
+// runAsked is called by what is asked of the gate from outside and needs the record (a ticket, a confirmation,
+// the run's update or shutdown, a cancel, the stop of the service): the next write is tried at once, whenever
+// the last one failed. Caller holds g.mu.
+func (g *Gate) runAsked() { g.rs.failWait = false }
+
+// runLiveOnDisk reports whether the record on disk holds a live run. Not knowing (it cannot be read) counts
+// as yes.
+func (g *Gate) runLiveOnDisk() bool {
+	f, _, _, err := g.o.Files.readRun()
+	return err != nil || (f != nil && f.Run != nil)
 }
 
 // runClockKeep keeps the record's "clock": the latest time this machine's clock showed when the checker looked.
@@ -355,6 +418,7 @@ func (g *Gate) RunStop() {
 	if !ok || g.bootID() == "" {
 		return
 	}
+	g.runAsked()
 	g.runClockKeep(g.o.Now(), up, true)
 }
 
@@ -369,9 +433,7 @@ func (g *Gate) runNow(now time.Time, up time.Duration) *runLive {
 	if m.file == nil {
 		return nil
 	}
-	if m.dirty {
-		g.runWrite(now, up)
-	}
+	g.runRetry(now, up)
 	r := m.file.Run
 	if r == nil {
 		return nil
@@ -439,6 +501,7 @@ func (g *Gate) runGate() (now time.Time, up time.Duration, ref *Refusal) {
 		// a live run counts in the boot it was accepted in and in no other, and that is told by the id alone
 		return now, up, runUnavailable("this machine cannot say which boot this is (Windows: the helper's registry key for it cannot be made, read or believed; helper.log says why)")
 	}
+	g.runAsked()
 	g.runSync(now, up) // as the file is now: an administrator may have cancelled or removed it
 	g.runEnsure(now, up)
 	g.runClockKeep(now, up, false)
@@ -704,6 +767,7 @@ func (g *Gate) runCover(req api.ApprovalRequest, id string, now time.Time) (*run
 	// The record as it is on disk at this moment, not as this process remembers it from its last look: a
 	// cancel made on the machine (fairy-agent helper-run cancel) counts from the moment the command returned,
 	// not from the next look of the watch up to a second later.
+	g.runAsked()
 	g.runSync(now, up)
 	live := g.runNow(now, up)
 	switch {
@@ -804,7 +868,10 @@ func (g *Gate) runAdmit(req api.ApprovalRequest, id string, use bool) (string, *
 // DisarmRun ends the live run: the machine does not switch itself off, and nothing of the run is let through
 // any more. Nothing arms again in this boot (the mark stays). was is the state the run was in ("": there was
 // none, and nothing changed); with api.RunOffPending the caller stops the countdown. An error: the record
-// could not be written; the run is over for this process, and a restart of the service would find it again.
+// could not be written AND the file still holds a live run (or nobody can say what it holds): the run is over
+// for this process, and a restart of the service would find it again. A write that failed for something else
+// (this process is behind with a note of the clock, on a full disk) is no error of a cancel: there is no run
+// to end, here or in the file.
 func (g *Gate) DisarmRun(why string) (was string, err error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -816,15 +883,19 @@ func (g *Gate) DisarmRun(why string) (was string, err error) {
 	if !g.rs.loaded {
 		g.runRead(now, up)
 	}
+	g.runAsked()
 	if g.rs.file == nil || g.rs.file.Run == nil {
-		if g.rs.dirty {
-			return "", g.runWrite(now, up)
+		if err := g.runRetry(now, up); err != nil && g.runLiveOnDisk() {
+			return "", err
 		}
 		return "", nil
 	}
 	was = g.rs.file.Run.State
 	err = g.runEnd(api.RunCancelled, why, now, up)
 	g.rs.lostPending = false // the caller stops the countdown
+	if err != nil && !g.runLiveOnDisk() {
+		err = nil // the file holds no live run either (the administrator's command ended it in this moment)
+	}
 	return was, err
 }
 
@@ -853,9 +924,7 @@ func (g *Gate) runPoll() (live *runLive, up time.Duration, stop bool) {
 		g.runClockKeep(now, up, false)
 	}
 	if m.file == nil || m.file.Run == nil { // nothing live: no file is read, and nothing else is done
-		if m.dirty {
-			g.runWrite(now, up)
-		}
+		g.runRetry(now, up)
 		return nil, up, false
 	}
 	g.reload(false)
@@ -923,6 +992,14 @@ func (g *Gate) runStatus() *api.RunStatus {
 	now := g.o.Now()
 	r := g.runNow(now, up)
 	f := g.rs.file
+	if r == nil && g.rs.dirty && g.rs.disk != nil {
+		// The run is over for this process, and its end could not be written: the file still says it is live,
+		// and a service that started again now would find it so. It is shown as the file has it until its end
+		// is written, and not as "cancelled": the panel sees a run that is not ended yet (its cancel was
+		// answered with an error), and a Windows agent goes on handing a cancel to the helper
+		// (agent.HelperPower.RunLive) instead of answering 200 itself.
+		r = g.rs.disk
+	}
 	if r == nil {
 		if f != nil && f.Last != nil && g.maybeThisBoot(f.At, now, up) {
 			return &api.RunStatus{ID: f.Last.ID, State: f.Last.State}

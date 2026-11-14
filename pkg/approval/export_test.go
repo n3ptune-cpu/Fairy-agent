@@ -98,3 +98,6 @@ func SetRunLockWait(service, command time.Duration) (restore func()) {
 // RunLockHold takes the writers' lock of the run record as a third program would and holds it until the
 // returned function is called.
 func (f Files) RunLockHold() (release func(), err error) { return f.runLock(time.Second) }
+
+// RunRetryEvery is how long the service waits before it tries a write of the record again by itself.
+const RunRetryEvery = runRetryEvery

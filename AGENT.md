@@ -1911,16 +1911,27 @@ is answered `500` / `503`, never `200`). As with every update on
 Windows, the version check of a run's update is the agent's: it reads the record itself before it downloads,
 and the helper uses the run's one update up when it starts the installer (the agent looks at the record again
 at that moment: a run that ended meanwhile starts nothing). Linux: the agent does all of it, and takes the run
-over from the record when it restarts after the update; a cancel whose end of the run cannot be written down
-is answered `500`.
+over from the record when it restarts after the update.
+
+**A record that cannot be written** (a full disk, a read-only file system, its lock not to be had). Nothing is
+armed and nothing of a run is let through while that lasts (`503 run_unavailable`); the checker tries again
+every 15 s and with every request of a run. On both systems a `cancel` then answers by what the record holds:
+with no run in it, `200` as always (the pending action is stopped, and there is no run to end); with a run in
+it whose end could not be written down, `500` (`... the end of the run could not be written down ...; cancel
+again`), every time until it is written. The checker that took such a cancel does not switch the machine off
+and lets nothing of the run through; but the file still says the run is live, and a checker that starts again
+would find it. So until the end is written the `run` of the approval block shows that run as the file has it
+(`armed`, `off_pending`, `confirmed`), not `cancelled`.
 
 **The log** (Windows: `helper.log`; Linux: the agent's): `approval: run armed`, `approval: run self-off
 scheduled`, `approval: run confirmed`, `approval: run cancelled`, `approval: run done`, each with the run id,
 the `sub` and the key id, and `approval: run ticket refused` / `run confirmation refused` with the reason.
 Also: `approval: there was no run record; one was made anew ...`, `approval: this machine's clock is behind a
 time it showed before ...` (the record follows the clock), `approval: this machine cannot say which boot this
-is, so it keeps no runs ...` (once for each reason), and `approval: the run record was changed on the machine
-in this moment; nothing was written over it`. Never a token or a piece of one.
+is, so it keeps no runs ...` (once for each reason), `approval: the run record was changed on the machine
+in this moment; nothing was written over it`, and `approval: the run record could not be written. ...` with
+the error, once, then `approval: the run record is written again` once it works (not a line for every try).
+Never a token or a piece of one.
 
 ## Updates (the panel's Update button)
 

@@ -925,8 +925,9 @@ PowerShell as Administrator**; after `->` is what a good answer looks like. Noth
   record when it stops and starts), then `Select-String -Path "C:\ProgramData\fairy-agent\helper\helper.log" -Pattern "could not be written" | Select-Object -Last 2`
   -> no new line: the new record took the name although the file was open. `$f.Close()`.
   The same once more with `"ReadWrite"` in the place of `"ReadWrite,Delete"` (a program that does not share for
-  delete) -> now a line `approval: the run record could not be written` is expected while the file is held;
-  `$f.Close()`, `Restart-Service fairy-agent-helper` again -> written, and J1 still shows `"runs":1`. Please send
+  delete) -> now ONE line `approval: the run record could not be written. Until it can, ...` is expected while
+  the file is held (one, not one for every try); `$f.Close()`, wait 20 seconds -> a line `approval: the run
+  record is written again`, and J1 still shows `"runs":1`. Please send
   what the first half showed: if the rename fails there too, Windows does not let a file take the name of one
   that is open even with sharing, and we need to know.
 * J14 **A record that cannot be read is replaced, not removed.**
