@@ -1754,6 +1754,18 @@ live run whose times are later than the record's own time of writing is not beli
 nothing and only refuses: the boot of the last ticket or cancel, the ids of the last 16 runs, how the last run
 ended, the clock (`"clock"`, see "The clock"), and when the record was made anew (`"born"`).
 
+The record has two writers: the service, and `fairy-agent helper-run cancel` in an administrator's hands.
+Neither writes over what the other wrote without having read it. The service keeps the record in memory and
+gives a new one the record's name only if the file is still the one it last read or wrote; the look and the
+rename are one step under a lock that the command holds for its whole read, change and write (an empty file
+`approval-run.lock` in the same folder, locked with `flock` / `LockFileEx`; it is never removed, never taken
+through a link, the service's own (0600) or, made by the command as root, root's with the folder's group and
+0640, like the record the command writes). So a cancel on the machine cannot fall between the service's look
+and its write and be lost. A service that cannot get the lock writes nothing (it tries again at its next
+look, and until then takes nothing of a run); the command waits 3 s for it and then writes its cancel all
+the same. A service that could not write and then finds the file changed by the command drops what it meant
+to write and takes the file.
+
 The record is on every machine with trust (the service makes it at its first look), and **nothing removes
 it**. A record that cannot be read counts as no record (nothing is armed, nothing let through) and is said in
 the log; no ticket and no confirmation is accepted until `fairy-agent helper-run cancel` has put a new one in
@@ -2241,7 +2253,8 @@ on the first install and report anything odd:
     real PCs), and whether GetTickCount64 behaves as described for `boot_shutdown_s`;
   * **Runs (0.9.0; TEST-ON-WINDOWS.md, section 14; none of it has run on Windows):** the helper writing and
     reading `helper\approval-run.json` (owner and access list by inheritance; the rename over it while another
-    program has it open with and without sharing), the agent's account reading that file before a run's
+    program has it open with and without sharing), the writers' lock `helper\approval-run.lock` (made by the
+    helper or by `helper-run cancel`, `LockFileEx` between the two), the agent's account reading that file before a run's
     update, the registry key of the boot id (made by the helper as SYSTEM with its permission list, read by
     the agent's account, its owner; gone after a restart, kept by a restart of the helper; what a shutdown
     with Fast Startup, sleep and hibernation do to it and to the uptime), the uptime starting at zero after a

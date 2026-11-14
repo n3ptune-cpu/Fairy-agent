@@ -937,6 +937,23 @@ PowerShell as Administrator**; after `->` is what a good answer looks like. Noth
   `& "C:\Program Files\Fairy\fairy-agent.exe" helper-run show` -> `run:  none is armed or confirmed`, `record made:` with the time of now.
   `icacls "C:\ProgramData\fairy-agent\helper\approval-run.json"` -> the same lines as for `approval-trust.json`.
   `Start-Service fairy-agent-helper`, J1 -> `"runs":1`; `helper.log` has no `the run record cannot be used` after the start.
+* J15 **The lock of the record's two writers.**
+  `Get-Item "C:\ProgramData\fairy-agent\helper\approval-run.lock" | Format-List Length,CreationTime` -> `Length : 0`
+  (the helper made it when it first wrote the record), and
+  `icacls "C:\ProgramData\fairy-agent\helper\approval-run.lock"` -> the same lines as for `approval-trust.json`.
+  Now hold it as a third program would:
+  `$l = [System.IO.File]::Open("C:\ProgramData\fairy-agent\helper\approval-run.lock","Open","ReadWrite","ReadWrite"); $l.Lock(0,1)`
+  `Restart-Service fairy-agent-helper`, wait ten seconds,
+  `Select-String -Path "C:\ProgramData\fairy-agent\helper\helper.log" -Pattern "could not be written" | Select-Object -Last 1`
+  -> a new line `approval: the run record could not be written error="the lock of the run record (approval-run.lock) cannot be taken: ..."`
+  (the helper writes nothing while somebody else holds the lock).
+  `Measure-Command { & "C:\Program Files\Fairy\fairy-agent.exe" helper-run cancel }` -> about 3 seconds, and no
+  error (the command waits for the lock and then goes on without it).
+  `$l.Unlock(0,1); $l.Close()`, `Restart-Service fairy-agent-helper` -> no new `could not be written` line after
+  this start, and J1 still shows `"runs":1`. Please send the two `helper.log` lines and the measured time: if
+  the FIRST start of the helper (before anything held the lock) already logged `the lock of the run record ...
+  cannot be taken`, the lock does not work on Windows as written, the helper then keeps no runs, and we need
+  the whole line.
 
 ### B. With a panel that knows runs (later)
 
@@ -984,7 +1001,7 @@ Start a run for this PC only, confirm the start with the passkey, and do NOT con
 
 ### What to send back
 
-The output of J1, J2, J4, J5, J9 to J14 and the tail of `helper.log` (J6); later K1 to K9.
+The output of J1, J2, J4, J5, J9 to J15 and the tail of `helper.log` (J6); later K1 to K9.
 
 ## Rollback (back to build 10 / v0.4.4)
 

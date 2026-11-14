@@ -203,7 +203,15 @@ func (g *Gate) runSync(now time.Time, up time.Duration) {
 		return
 	}
 	if m.dirty && g.runWrite(now, up) != nil {
-		return // this process is ahead of the file: the file is not looked at
+		// This process is ahead of the file and still cannot write. While the file is the one it knows, it
+		// stays ahead, and the file is not looked at further. A file that somebody else changed in between
+		// (the administrator's command) wins: what this process was ahead with is dropped, and below a live
+		// run in a file that is not this process's is ended, so nothing comes back by that.
+		_, sum, exists, err := g.o.Files.readRun()
+		if err == nil && exists == m.exists && (!exists || sum == m.sum) {
+			return
+		}
+		m.dirty = false
 	}
 	had := (*runLive)(nil)
 	if m.file != nil {

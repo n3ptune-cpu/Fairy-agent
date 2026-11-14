@@ -86,3 +86,15 @@ func SetRunRename(rename func(from, to string) error, busy func(error) bool, ser
 	runRename, runRenameBusy, runRenameWait, runCancelWait, runRenameStep = rename, busy, service, command, step
 	return func() { runRename, runRenameBusy, runRenameWait, runCancelWait, runRenameStep = r, b, s, c, st }
 }
+
+// SetRunLockWait sets how long the service and the administrator's command wait for the writers' lock of the
+// run record; the returned function puts it back.
+func SetRunLockWait(service, command time.Duration) (restore func()) {
+	s, c := runLockWaitService, runLockWait
+	runLockWaitService, runLockWait = service, command
+	return func() { runLockWaitService, runLockWait = s, c }
+}
+
+// RunLockHold takes the writers' lock of the run record as a third program would and holds it until the
+// returned function is called.
+func (f Files) RunLockHold() (release func(), err error) { return f.runLock(time.Second) }

@@ -60,7 +60,7 @@ func TestRunRecordWritersTryAgainWhileTheFileIsOpenElsewhere(t *testing.T) {
 	}
 	ents, _ := os.ReadDir(r.files.RunPath() + "/..")
 	for _, e := range ents {
-		if e.Name() != approval.RunFileName && e.Name() != approval.TrustFileName {
+		if e.Name() != approval.RunFileName && e.Name() != approval.TrustFileName && e.Name() != approval.RunLockName {
 			t.Errorf("left behind: %s", e.Name())
 		}
 	}

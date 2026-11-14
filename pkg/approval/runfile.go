@@ -249,6 +249,42 @@ func renameFor(from, to string, wait time.Duration) error {
 	}
 }
 
+// RunLockName is the file next to the run record that its two writers lock while they write: the service
+// (the look at what is there and the rename are one step under it) and the administrator's command (its
+// whole read, change and write). It holds nothing. Without it the command's cancel could land between the
+// service's look and its rename and be written over, however short that moment was made.
+const RunLockName = "approval-run.lock"
+
+// lockStep is how often a writer tries the lock again while the other one holds it; runLockWait how long
+// the administrator's command tries, runLockWaitService how long the service does (it holds the lock for one
+// look and one rename, the command for one read and one write; the service waits with the gate closed to
+// every other request, so it gives up sooner and tries again at its next step).
+var (
+	lockStep           = 5 * time.Millisecond
+	runLockWait        = 3 * time.Second
+	runLockWaitService = time.Second
+)
+
+// runLock takes the writers' lock. Whoever cannot get it does not write under it: for the service that is a
+// write that failed (it is tried again at the next step, and until then nothing of a run is taken); the
+// administrator's command writes its cancel all the same (RunCancel).
+func (f Files) runLock(wait time.Duration) (unlock func(), err error) {
+	dir := filepath.Dir(f.runPath())
+	if _, err := os.Lstat(dir); err != nil {
+		return nil, err
+	}
+	if f.CheckDir != nil {
+		if err := f.CheckDir(dir); err != nil {
+			return nil, fmt.Errorf("the folder of the run record is not safe: %w", err)
+		}
+	}
+	unlock, err = lockFile(filepath.Join(dir, RunLockName), wait, f.Prepare != nil)
+	if err != nil {
+		return nil, fmt.Errorf("the lock of the run record (%s) cannot be taken: %w", RunLockName, err)
+	}
+	return unlock, nil
+}
+
 // errRunChanged: the record on disk is not the one the writer last read or wrote: somebody else wrote it in
 // between (the administrator's command). Nothing was written.
 var errRunChanged = errors.New("the run record was changed by somebody else in this moment")
@@ -261,9 +297,10 @@ type runOnDisk struct {
 
 // writeRunOver is writeRun for a writer that keeps the record in memory (the service): over says what it last
 // read or wrote, and the new content takes the record's name only if that is still what is there. Otherwise
-// nothing is written (errRunChanged), and the writer reads the record again. The look and the rename are two
-// steps with nothing slow between them; the administrator's command, which is the other writer, looks again
-// after it wrote (RunCancel).
+// nothing is written (errRunChanged), and the writer reads the record again. The look and the rename are one
+// step under the writers' lock (runLock), which the administrator's command holds for its whole read, change
+// and write: neither writes over what the other wrote without having read it. A caller with over == nil holds
+// the lock already (RunCancel) or is the only writer there is (a test).
 func (f Files) writeRunOver(rec *runFile, over *runOnDisk, wait time.Duration) (sum [32]byte, err error) {
 	path := f.runPath()
 	dir := filepath.Dir(path)
@@ -301,6 +338,13 @@ func (f Files) writeRunOver(rec *runFile, over *runOnDisk, wait time.Duration) (
 		err = f.Prepare(tmp.Name())
 	}
 	if err == nil && over != nil {
+		// from here to the rename under the writers' lock
+		unlock, lerr := f.runLock(runLockWaitService)
+		if lerr != nil {
+			_ = os.Remove(tmp.Name())
+			return sum, lerr
+		}
+		defer unlock()
 		var now []byte
 		fh, rerr := openShared(path)
 		if rerr == nil {
@@ -404,6 +448,14 @@ func (s RunStamp) ref() bootRef {
 // live run in a good one, it changes nothing (the service makes the record when it is missing).
 // It returns what the record held before, and whether it was changed.
 func (f Files) RunCancel(at RunStamp) (was RunView, changed bool, err error) {
+	// The service writes the record too. Under the writers' lock this command reads what the service wrote
+	// last, and the service writes nothing over what this command wrote without having read it. If the lock
+	// cannot be had (the lock file cannot be made or opened, or somebody holds it for seconds),
+	// the cancel is written all the same: keeping the machine on comes first.
+	unlock, lerr := f.runLock(runLockWait)
+	if lerr == nil {
+		defer unlock()
+	}
 	rec, _, exists, rerr := f.readRun()
 	was = f.runView(rec)
 	was.Exists, was.Err = exists, rerr
@@ -424,24 +476,28 @@ func (f Files) RunCancel(at RunStamp) (was RunView, changed bool, err error) {
 	if rec == nil || rec.Run == nil {
 		return was, false, nil
 	}
-	// The service writes the record too. It never writes over a record it has not read (writeRunOver), but
-	// between its look and its write there is a moment; so after the cancel is written this looks again, and
-	// cancels again if the run is back.
-	for try := 0; ; try++ {
-		mark := at.ref()
-		rec.Last, rec.Run, rec.Arm = &runLast{ID: rec.Run.ID, State: api.RunCancelled}, nil, &mark
-		if _, err := f.writeRunOver(rec, nil, runCancelWait); err != nil {
-			return was, false, err
+	mark := at.ref()
+	rec.Last, rec.Run, rec.Arm = &runLast{ID: rec.Run.ID, State: api.RunCancelled}, nil, &mark
+	if _, err := f.writeRunOver(rec, nil, runCancelWait); err != nil {
+		return was, false, err
+	}
+	if lerr != nil {
+		// without the lock: look again after a moment, and cancel again should the service have written over it
+		for try := 0; try < 5; try++ {
+			time.Sleep(runCancelSettle)
+			again, _, _, err := f.readRun()
+			if err != nil || again == nil || again.Run == nil {
+				break
+			}
+			again.Last, again.Run, again.Arm = &runLast{ID: again.Run.ID, State: api.RunCancelled}, nil, &mark
+			if _, err := f.writeRunOver(again, nil, runCancelWait); err != nil {
+				break
+			}
 		}
-		time.Sleep(runCancelSettle)
-		again, _, _, err := f.readRun()
-		if err != nil || again == nil || again.Run == nil || try == 5 {
-			break
-		}
-		rec = again
 	}
 	return was, true, nil
 }
 
-// runCancelSettle is how long RunCancel waits before it looks at the record again.
+// runCancelSettle is how long RunCancel waits before it looks at the record again when it wrote without the
+// writers' lock.
 var runCancelSettle = 100 * time.Millisecond
