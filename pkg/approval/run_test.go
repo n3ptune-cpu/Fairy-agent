@@ -622,7 +622,14 @@ func TestNoTokenInLogStatusRecordOrAnswers(t *testing.T) {
 	_, ref := r.w.Arm(r.ticket(runA, -61*time.Second)) // refused
 	say(ref)
 	bad := r.ticket(runA, 160*time.Second)
-	bad.Token = bad.Token[:len(bad.Token)-2] + "AA"
+	// a wrong signature, surely: its first character is another one (the last two characters hold the last
+	// byte and four bits nobody reads, so "AA" in their place was the same signature once in 256 runs)
+	sig := strings.LastIndex(bad.Token, ".") + 1
+	other := "A"
+	if bad.Token[sig] == 'A' {
+		other = "B"
+	}
+	bad.Token = bad.Token[:sig] + other + bad.Token[sig+1:]
 	r.tokens = append(r.tokens, bad.Token)
 	_, ref = r.w.Arm(bad)
 	say(ref)
