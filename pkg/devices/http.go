@@ -25,6 +25,13 @@ import (
 // GitHub about 5 KiB. 64 KiB leaves all of them more than ten times that.
 const MaxResponseHeaderBytes = 64 << 10
 
+// lanTransport is the transport of this package's clients: no proxy, connections kept, and HTTP/1.1 only (a
+// dialer of its own and no ForceAttemptHTTP2; TLSTransport copies it. TestDeviceClientsSpeakHTTP1Only).
+//
+// Nothing here can stop one line that net/http's client writes to the log by itself: when a host sends bytes
+// on a kept connection that no request waits for, the line repeats them, and a host that sends a request back
+// so shows that request's token or password. The program's log setup rewrites that line (pkg/agent,
+// GuardStdLog); a program that uses this package and sets a log up must do the same.
 var lanTransport = &http.Transport{Proxy: nil, MaxIdleConnsPerHost: 2, IdleConnTimeout: 90 * time.Second,
 	MaxResponseHeaderBytes: MaxResponseHeaderBytes,
 	DialContext:            (&net.Dialer{Timeout: 5 * time.Second}).DialContext}

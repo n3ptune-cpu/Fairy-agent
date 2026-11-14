@@ -67,7 +67,8 @@ func Run(ctx context.Context, cfg *agent.Config, version string, logErr func(str
 	if closer != nil {
 		defer closer.Close()
 	}
-	slog.SetDefault(audit) // the BMC reader and the fan controller log through slog
+	// the BMC reader and the fan controller log through slog; SetLog also guards what Go's own packages write
+	agent.SetLog(audit)
 	parts, closeParts, err := FromConfig(cfg, version, audit)
 	if err != nil {
 		audit.Error("helper cannot start", "error", err.Error())

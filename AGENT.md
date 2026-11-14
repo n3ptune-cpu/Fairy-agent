@@ -2165,7 +2165,10 @@ are lists of devices: edit those in the file.
 * **Logs.** Windows: `Get-Content C:\ProgramData\fairy-agent\logs\agent.log -Tail 30` (start-up problems also go
   to the Event Viewer, Windows Logs > Application, source "fairy-agent"); the helper's:
   `C:\ProgramData\fairy-agent\helper\helper.log` (source "fairy-agent-helper"). Linux: `journalctl -u fairy-agent`.
-  Logs never contain tokens or passwords.
+  Logs never contain tokens or passwords. When a device (or something between it and the agent) sends more
+  than the answer it was asked for, the log has the line
+  `http: a host sent data nobody asked for on a kept connection (text not shown)` and nothing of what was
+  sent: a device that sends a request back could otherwise put that request's token or password there.
 * **Ask it directly** (from the panel machine):
   `curl -H "Authorization: Bearer <token>" http://100.64.0.10:9101/metrics`
 * **Panel shows the machine offline**: check the firewall rule, that Tailscale is up on both sides, and that the

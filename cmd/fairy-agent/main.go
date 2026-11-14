@@ -109,6 +109,8 @@ const usage = `fairy-agent: reports this machine's metrics to the Fairy panel (s
 `
 
 func main() {
+	// every command, before anything else: no line of Go's HTTP client shows what a host sent
+	agent.GuardStdLog()
 	if isService() { // started by the Windows service manager
 		os.Exit(runService())
 	}
@@ -236,8 +238,9 @@ func setupLogging(cfg *agent.Config, interactive bool) (io.Closer, error) {
 			w = io.MultiWriter(f, os.Stderr)
 		}
 	}
-	// one message at most 30 times a minute (repeats are counted, not written): nothing can flood the log
-	slog.SetDefault(slog.New(agent.RateLimitLog(slog.NewTextHandler(w, &slog.HandlerOptions{Level: slog.LevelInfo}), 30)))
+	// one message at most 30 times a minute (repeats are counted, not written): nothing can flood the log.
+	// SetLog, not slog.SetDefault: what Go's own packages write to this log is guarded (agent.GuardStdLog)
+	agent.SetLog(slog.New(agent.RateLimitLog(slog.NewTextHandler(w, &slog.HandlerOptions{Level: slog.LevelInfo}), 30)))
 	return closer, nil
 }
 
