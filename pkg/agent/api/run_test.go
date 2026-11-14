@@ -24,10 +24,10 @@ func TestRunCanonical(t *testing.T) {
 	}{
 		{runArm(testRun, 420, 960, 120), "run_arm run=0123456789abcdef valid_s=420 wait_s=960 notice_s=120"},
 		{runArm(testRun, 120, 120, 30), "run_arm run=0123456789abcdef valid_s=120 wait_s=120 notice_s=30"},
-		{runArm(testRun, 2100, 3600, 600), "run_arm run=0123456789abcdef valid_s=2100 wait_s=3600 notice_s=600"},
+		{runArm(testRun, 600, 3600, 600), "run_arm run=0123456789abcdef valid_s=600 wait_s=3600 notice_s=600"},
 		{runGo(testRun, "19-abc1234", 30, 1500), "run_go run=0123456789abcdef to=19-abc1234 shutdown_delay_s=30 within_s=1500"},
 		{runGo(testRun, "-", 10, 300), "run_go run=0123456789abcdef to=- shutdown_delay_s=10 within_s=300"},
-		{runGo(testRun, "v0.9.0_x+y", 600, 3600), "run_go run=0123456789abcdef to=v0.9.0_x+y shutdown_delay_s=600 within_s=3600"},
+		{runGo(testRun, "v0.9.0_x+y", 600, 1800), "run_go run=0123456789abcdef to=v0.9.0_x+y shutdown_delay_s=600 within_s=1800"},
 	} {
 		got, err := c.req.Canonical()
 		if err != nil || got != c.want {
@@ -46,7 +46,7 @@ func TestRunCanonical(t *testing.T) {
 		}
 	}
 	long := strings.Repeat("9", MaxRunVersion)
-	if got, err := runGo(testRun, long, 600, 3600).Canonical(); err != nil || len(got) > MaxApprovalRequest {
+	if got, err := runGo(testRun, long, 600, 1800).Canonical(); err != nil || len(got) > MaxApprovalRequest {
 		t.Errorf("the longest confirmation: %d bytes, %v", len(got), err)
 	}
 	extra := runArm(testRun, 420, 960, 120)
@@ -146,5 +146,49 @@ func TestApprovalProtoStaysAndRunsIsOne(t *testing.T) {
 	}
 	if ApprovalRuns != 1 {
 		t.Errorf("ApprovalRuns = %d, want 1", ApprovalRuns)
+	}
+}
+
+// The ceilings the owner was told: a ticket is good for 7 minutes by default and never for more than 10, the
+// confirmation on disk for 30 minutes at most. (The agent took valid_s up to 2100 and within_s up to 3600:
+// review of fd6d3be, T4.)
+func TestRunCeilings(t *testing.T) {
+	if RunValidMinS != 120 || RunValidMaxS != 600 || RunWithinMinS != 300 || RunWithinMaxS != 1800 {
+		t.Fatalf("valid_s %d-%d, within_s %d-%d; want 120-600 and 300-1800", RunValidMinS, RunValidMaxS, RunWithinMinS, RunWithinMaxS)
+	}
+	if RunWaitMinS != 120 || RunWaitMaxS != 3600 || RunNoticeMinS != 30 || RunNoticeMaxS != 600 || RunShutdownDelayMinS != 10 || RunShutdownDelayMaxS != 600 || RunArmUptimeS != 600 {
+		t.Fatal("a limit that was not to change has changed")
+	}
+	run := "00000000000000aa"
+	arm := func(valid, wait, notice int) error {
+		_, err := ApprovalRequest{Verb: ApproveRunArm, Run: &run, ValidS: &valid, WaitS: &wait, NoticeS: &notice}.Canonical()
+		return err
+	}
+	goes := func(delay, within int) error {
+		to := "-"
+		_, err := ApprovalRequest{Verb: ApproveRunGo, Run: &run, To: &to, ShutdownDelayS: &delay, WithinS: &within}.Canonical()
+		return err
+	}
+	for _, c := range []struct {
+		what string
+		err  error
+		ok   bool
+	}{
+		{"valid_s 119", arm(119, 960, 120), false}, {"valid_s 120", arm(120, 960, 120), true}, {"valid_s 600", arm(600, 960, 120), true},
+		{"valid_s 601", arm(601, 960, 120), false}, {"valid_s 2100", arm(2100, 960, 120), false},
+		{"within_s 299", goes(30, 299), false}, {"within_s 300", goes(30, 300), true}, {"within_s 1800", goes(30, 1800), true},
+		{"within_s 1801", goes(30, 1801), false}, {"within_s 3600", goes(30, 3600), false},
+		// what the panel sends by default fits: a ticket valid for 7 minutes, a wait of 16 minutes (and up to
+		// 300 + 1800 + 60 s with its longest confirm_wait_s), a notice of 2 minutes, 30 minutes for the confirmation
+		{"the panel's defaults", arm(420, 960, 120), true}, {"the panel's longest wait", arm(420, 2160, 600), true}, {"the panel's confirmation", goes(30, 1800), true},
+	} {
+		if (c.err == nil) != c.ok {
+			t.Errorf("%s: %v, want ok %v", c.what, c.err, c.ok)
+		}
+	}
+	for _, text := range []string{"run_arm run=00000000000000aa valid_s=601 wait_s=960 notice_s=120", "run_go run=00000000000000aa to=- shutdown_delay_s=30 within_s=1801"} {
+		if _, err := ParseRunRequest(text); err == nil {
+			t.Errorf("%q has a canonical form", text)
+		}
 	}
 }

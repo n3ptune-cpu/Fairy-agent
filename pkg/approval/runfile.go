@@ -32,7 +32,7 @@ const RunFileName = "approval-run.json"
 const (
 	// maxRunFile bounds the run record (a full one is under 1 KiB).
 	maxRunFile = 8 << 10
-	// runUsedMax is how many run ids the mark remembers. A ticket is good for 35 minutes at most, so the id of
+	// runUsedMax is how many run ids the mark remembers. A ticket is good for 11 minutes at most, so the id of
 	// a run falls out of the list only after sixteen later runs were accepted on this machine.
 	runUsedMax     = 16
 	runTempPattern = ".approval-run-*.tmp"

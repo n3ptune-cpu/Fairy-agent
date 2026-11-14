@@ -97,7 +97,7 @@ func TestRunRecordThatCannotBeUsed(t *testing.T) {
 	good := func(t *testing.T) (*runRig, []byte) { // a machine with a confirmed run, and its record
 		r := newRunRig(t)
 		r.armed(runA)
-		if _, ref := r.confirm(goReq(runA, "19-abc", 30, 3600)); ref != nil {
+		if _, ref := r.confirm(goReq(runA, "19-abc", 30, 1800)); ref != nil {
 			t.Fatal(ref)
 		}
 		return r, r.record(t)
@@ -127,7 +127,7 @@ func TestRunRecordThatCannotBeUsed(t *testing.T) {
 			os.WriteFile(r.files.RunPath(), replace(rec, `"shutdown_delay_s":30`, `"shutdown_delay_s":0`), 0o600)
 		},
 		"within_s of a day": func(t *testing.T, r *runRig, rec []byte) {
-			os.WriteFile(r.files.RunPath(), replace(rec, `"within_s":3600`, `"within_s":86400`), 0o600)
+			os.WriteFile(r.files.RunPath(), replace(rec, `"within_s":1800`, `"within_s":86400`), 0o600)
 		},
 		"a state it has not": func(t *testing.T, r *runRig, rec []byte) {
 			os.WriteFile(r.files.RunPath(), replace(rec, `"state":"confirmed"`, `"state":"always"`), 0o600)
@@ -384,7 +384,7 @@ func TestRunCancelOnTheMachine(t *testing.T) {
 func TestRunRecordFromOutsideIsNotBelieved(t *testing.T) {
 	donor := newRunRig(t)
 	donor.armed(runA)
-	if _, ref := donor.confirm(goReq(runA, "19-abc", 30, 3600)); ref != nil {
+	if _, ref := donor.confirm(goReq(runA, "19-abc", 30, 1800)); ref != nil {
 		t.Fatal(ref)
 	}
 	planted := donor.record(t)
@@ -425,7 +425,7 @@ func TestRunRecordRemembersSixteenRuns(t *testing.T) {
 	tickets := make([]*api.Approval, len(ids))
 	for i := range ids {
 		ids[i] = runA[:14] + string("0123456789abcdefg"[i/16]) + string("0123456789abcdef"[i%16])
-		tickets[i] = r.signed(r.Now(), ticketEntry("test-machine-AAAAAAAAAAAA", ids[i], 2100, 120, 30))
+		tickets[i] = r.signed(r.Now(), ticketEntry("test-machine-AAAAAAAAAAAA", ids[i], 600, 120, 30))
 		r.reboot(time.Second, 20*time.Second)
 		if _, ref := r.w.Arm(tickets[i]); ref != nil {
 			t.Fatalf("run %d: %v", i, ref)

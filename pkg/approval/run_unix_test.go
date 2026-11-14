@@ -25,7 +25,7 @@ func TestRunRecordUnixChecks(t *testing.T) {
 		r.files.CheckDir, r.files.CheckFile = u.CheckDir, u.CheckFile
 		r.restart()
 		r.armed(runA)
-		if _, ref := r.confirm(goReq(runA, "19-abc", 30, 3600)); ref != nil {
+		if _, ref := r.confirm(goReq(runA, "19-abc", 30, 1800)); ref != nil {
 			t.Fatal(ref)
 		}
 		if exists, err := r.files.RunRecordCheck(); !exists || err != nil {

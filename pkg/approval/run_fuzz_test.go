@@ -33,7 +33,7 @@ func FuzzRunTicket(f *testing.F) {
 	add("a.b.c", e)
 	add("", e)
 	wide := e
-	wide.Request = armText(runA, 2100, 120, 30)
+	wide.Request = armText(runA, 600, 120, 30)
 	add(tok, wide)
 	c, _ := r.g.Challenge(power("shutdown", 60))
 	add(r.iss.Approve(r.Now(), approvaltest.Entry(approvaltest.MachineID, c)).Token, approvaltest.Entry(approvaltest.MachineID, c))

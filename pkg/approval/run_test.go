@@ -293,7 +293,7 @@ func TestArmRefusals(t *testing.T) {
 		}, status: 403, code: api.CodeApprovalRefused, reason: approval.ReasonNonce},
 		{name: "a longer validity than the one signed", ticket: func(r *runRig) *api.Approval {
 			ap := good(r)
-			ap.Entries[0].Request = armText(runA, 2100, 960, 120)
+			ap.Entries[0].Request = armText(runA, 600, 960, 120)
 			return ap
 		}, status: 403, code: api.CodeApprovalRefused, reason: approval.ReasonNonce},
 		{name: "a shorter wait than the one signed", ticket: func(r *runRig) *api.Approval {
@@ -355,7 +355,7 @@ func TestArmRefusals(t *testing.T) {
 		}, status: 403, code: api.CodeApprovalRefused, reason: approval.ReasonEntries},
 		{name: "up for 600 s", setup: func(r *runRig) { r.wait(540 * time.Second) },
 			ticket: func(r *runRig) *api.Approval {
-				return r.signed(r.Now().Add(-700*time.Second), ticketEntry(approvaltest.MachineID, runA, 2100, 960, 120))
+				return r.signed(r.Now().Add(-650*time.Second), ticketEntry(approvaltest.MachineID, runA, 600, 960, 120))
 			},
 			status: 409, code: api.CodeRunRefused, reason: api.RunReasonNotFresh, lost: true},
 		{name: "already running when the ticket was signed", ticket: func(r *runRig) *api.Approval { return r.ticket(runA, -1*time.Second) }, // up 60 s, signed 1 s from now: 61 s after the start
@@ -414,14 +414,14 @@ func TestArmUptimeAndStartLimits(t *testing.T) {
 	r := newRunRig(t)
 	r.wait(539 * time.Second)
 	wide := func(r *runRig, run string, age time.Duration) *api.Approval {
-		return r.signed(r.Now().Add(-age), ticketEntry(approvaltest.MachineID, run, 2100, 960, 120))
+		return r.signed(r.Now().Add(-age), ticketEntry(approvaltest.MachineID, run, 600, 960, 120))
 	}
-	if _, ref := r.w.Arm(wide(r, runA, 700*time.Second)); ref != nil {
+	if _, ref := r.w.Arm(wide(r, runA, 650*time.Second)); ref != nil {
 		t.Errorf("up for 599 s: %v", ref)
 	}
 	r = newRunRig(t)
 	r.wait(540 * time.Second)
-	_, ref := r.w.Arm(wide(r, runA, 700*time.Second))
+	_, ref := r.w.Arm(wide(r, runA, 650*time.Second))
 	runRefused(t, "up for 600 s", ref, 409, api.CodeRunRefused, api.RunReasonNotFresh)
 
 	// signed 60 s after the machine started (the clock allowance): taken. 61 s: not.

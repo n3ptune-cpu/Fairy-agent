@@ -115,10 +115,10 @@ const ApprovalRuns = 1
 //
 // Limits of the numbers (a text outside them has no canonical form, so nothing can be signed or accepted for it).
 const (
-	RunValidMinS, RunValidMaxS                 = 120, 2100 // valid_s: how old a ticket may be when it is presented
+	RunValidMinS, RunValidMaxS                 = 120, 600  // valid_s: how old a ticket may be when it is presented (the panel signs 420)
 	RunWaitMinS, RunWaitMaxS                   = 120, 3600 // wait_s: from the arming to the start of the self-off
 	RunNoticeMinS, RunNoticeMaxS               = 30, 600   // notice_s: the countdown of the self-off (never below power_control.min_delay_s)
-	RunWithinMinS, RunWithinMaxS               = 300, 3600 // within_s: how long the confirmation's one update and one shutdown stay good
+	RunWithinMinS, RunWithinMaxS               = 300, 1800 // within_s: how long the confirmation's one update and one shutdown stay good
 	RunShutdownDelayMinS, RunShutdownDelayMaxS = 10, 600   // shutdown_delay_s: the delay of that shutdown (never below power_control.min_delay_s)
 	// RunArmUptimeS: a ticket arms only a machine that has been up for less than this.
 	RunArmUptimeS = 600
@@ -288,8 +288,8 @@ type ApprovalRequest struct {
 //	power action=<shutdown|reboot|sleep> delay_s=<0-86400>
 //	apply_update
 //	trust_set hash=<43 characters: TrustHash of the proposed trust>
-//	run_arm run=<16 hex> valid_s=<120-2100> wait_s=<120-3600> notice_s=<30-600>
-//	run_go run=<16 hex> to=<version | -> shutdown_delay_s=<10-600> within_s=<300-3600>
+//	run_arm run=<16 hex> valid_s=<120-600> wait_s=<120-3600> notice_s=<30-600>
+//	run_go run=<16 hex> to=<version | -> shutdown_delay_s=<10-600> within_s=<300-1800>
 //
 // ASCII, single spaces, numbers in decimal without sign or leading zeros, the fields in exactly this order.
 // Every value is a small number, one word of a fixed list, 43 characters of the base64url alphabet, 16 hex

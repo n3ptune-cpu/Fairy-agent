@@ -474,7 +474,7 @@ func TestRunEndsWithTheBoot(t *testing.T) {
 				r.armed(runA)
 				switch state {
 				case api.RunConfirmed:
-					if _, ref := r.confirm(goReq(runA, "19-abc", 30, 3600)); ref != nil {
+					if _, ref := r.confirm(goReq(runA, "19-abc", 30, 1800)); ref != nil {
 						t.Fatal(ref)
 					}
 				case api.RunOffPending:
@@ -742,7 +742,7 @@ func TestRunEndsWhenTheTrustChanges(t *testing.T) {
 			case api.RunOffPending:
 				r.ticks(960 * time.Second)
 			case api.RunConfirmed:
-				if _, ref := r.confirm(goReq(runA, "19-abc", 30, 3600)); ref != nil {
+				if _, ref := r.confirm(goReq(runA, "19-abc", 30, 1800)); ref != nil {
 					t.Fatal(ref)
 				}
 			}
@@ -936,7 +936,7 @@ func TestRunGateThatOnlyReads(t *testing.T) {
 	// another boot
 	r2 := newRunRig(t)
 	r2.armed(runA)
-	if _, ref := r2.confirm(goReq(runA, "19-abc", 30, 3600)); ref != nil {
+	if _, ref := r2.confirm(goReq(runA, "19-abc", 30, 1800)); ref != nil {
 		t.Fatal(ref)
 	}
 	r2.readOnly = true
