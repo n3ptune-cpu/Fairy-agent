@@ -52,7 +52,7 @@ func TestRunRecordFile(t *testing.T) {
 		t.Fatal(err)
 	}
 	for k := range m {
-		if !strings.Contains(" version at arm used last run ", " "+k+" ") {
+		if !strings.Contains(" version at arm used last run clock ", " "+k+" ") {
 			t.Errorf("member %q in the record", k)
 		}
 	}
@@ -245,8 +245,8 @@ func TestRunRecordIsWrittenBeforeTheAnswer(t *testing.T) {
 	if len(r.scheduled) != 0 || r.run() != nil {
 		t.Fatalf("armed without a record: %+v", r.scheduled)
 	}
-	if exists, _ := r.files.RunRecordCheck(); exists {
-		t.Fatal("a record")
+	if r.touched() {
+		t.Fatal("something of the ticket is in the record")
 	}
 	// nothing was used up by it
 	r = newRunRig(t)

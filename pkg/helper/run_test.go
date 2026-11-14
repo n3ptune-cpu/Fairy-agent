@@ -37,7 +37,8 @@ func newRunHelper(t *testing.T, power bool) *runHelper {
 	files := approval.Files{Path: filepath.Join(t.TempDir(), approval.TrustFileName)}
 	p := Parts{Version: "test", MinDelayS: 30, Audit: log,
 		Approval: approval.NewGate(approval.Options{Files: files, EnforcedBy: api.EnforcedByHelper, Log: log, Runs: true, MinDelayS: 30,
-			Now: func() time.Time { return h.now }, Uptime: func() (time.Duration, error) { return h.up, nil }})}
+			Now: func() time.Time { return h.now }, Uptime: func() (time.Duration, error) { return h.up, nil },
+			BootID: func() (string, error) { return "0f1e2d3c4b5a69788796a5b4c3d2e1f0", nil }})}
 	if power {
 		p.Power = agent.RememberPower(h.exec, nil, nil, nil)
 	}

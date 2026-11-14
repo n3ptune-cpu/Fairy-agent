@@ -52,8 +52,8 @@ func FuzzRunTicket(f *testing.F) {
 		if ans, ref := r.w.Arm(&ap); ref == nil {
 			t.Fatalf("armed %+v by %q", ans, raw)
 		}
-		if exists, _ := r.files.RunRecordCheck(); exists {
-			t.Fatalf("a record after %q", raw)
+		if r.touched() {
+			t.Fatalf("something in the record after %q", raw)
 		}
 	})
 }

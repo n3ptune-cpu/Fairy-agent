@@ -113,6 +113,18 @@ func (r *runRig) jump(d time.Duration) {
 
 func (r *runRig) up() time.Duration { r.mu.Lock(); defer r.mu.Unlock(); return r.uptime }
 
+// touched: the record holds something of a run, or this boot is closed for tickets (the record itself is there
+// on every machine with trust: the checker keeps the clock in it).
+func (r *runRig) touched() bool {
+	r.mu.Lock()
+	id := r.bootID
+	r.mu.Unlock()
+	return r.files.RunRecordTouched(id)
+}
+
+// winBoot is a boot id as the Windows helper keeps one: 32 hex characters from its registry key.
+const winBoot = "5f0c1d2e3a4b59687766554433221100"
+
 func randomChallenge() string {
 	var b [32]byte
 	if _, err := rand.Read(b[:]); err != nil {
@@ -371,8 +383,8 @@ func TestArmRefusals(t *testing.T) {
 				t.Errorf("a refusal with an answer: %+v", ans)
 			}
 			r.dirErr = nil
-			if exists, _ := r.files.RunRecordCheck(); exists {
-				t.Error("a refused ticket left a run record")
+			if r.touched() {
+				t.Error("a refused ticket left something in the run record")
 			}
 			if run := r.run(); run != nil {
 				t.Errorf("a refused ticket left a run: %+v", run)

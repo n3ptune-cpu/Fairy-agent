@@ -127,7 +127,7 @@ func FromConfig(cfg *agent.Config, version string, audit *slog.Logger) (Parts, f
 	// own folder, next to the trust file). The notice of a self-off and the delay of a run's shutdown are never
 	// shorter than the shortest delay it accepts for any shutdown.
 	p.Approval = approval.NewGate(approval.Options{Files: agent.ApprovalFiles(cfg), EnforcedBy: api.EnforcedByHelper,
-		Uptime: agent.SystemUptime, BootID: agent.SystemBootID, Log: audit,
+		Uptime: agent.SystemUptime, BootID: agent.SystemBootIDOwner, Log: audit, // the helper makes the id of the boot (agent/bootid.go)
 		Runs: true, MinDelayS: max(cfg.PowerControl.MinDelayS, proto.MinDelayS)})
 	closer := func() {}
 	if cfg.Sensors.CoreTemp {
@@ -219,6 +219,7 @@ func (s *Server) Start(ctx context.Context) {
 // stops with the helper, so no fixed duty is left without it). Call it when the service stops or Windows
 // shuts down.
 func (s *Server) Shutdown(ctx context.Context) {
+	s.p.Approval.RunStop() // the clock goes into the run record (approval.Gate.runClockKeep)
 	if s.p.Fan == nil {
 		s.p.Audit.Info("helper stopping")
 		return

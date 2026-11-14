@@ -75,6 +75,7 @@ func (w *RunWatch) Run(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
+			w.g.RunStop()
 			return
 		case <-t.C:
 			w.Tick()

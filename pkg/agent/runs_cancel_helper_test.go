@@ -90,9 +90,10 @@ func newCancelRig(t *testing.T) *cancelRig {
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
+	boot := func() (string, error) { return "0f1e2d3c4b5a69788796a5b4c3d2e1f0", nil } // the helper's volatile registry key
 	r.srv = helper.New(helper.Parts{Version: "test", Power: agent.RememberPower(r.exec, nil, nil, nil), MinDelayS: 30, Audit: log,
 		Approval: approval.NewGate(approval.Options{EnforcedBy: api.EnforcedByHelper, Log: log, Files: files,
-			Now: r.clock, Uptime: r.uptime, Runs: true, MinDelayS: 30})})
+			Now: r.clock, Uptime: r.uptime, BootID: boot, Runs: true, MinDelayS: 30})})
 	scm := &fakeSCM{state: api.HelperRunning, srv: r.srv}
 	dial := func(context.Context) (io.ReadWriteCloser, error) {
 		if r.cut.Load() {
@@ -106,7 +107,7 @@ func newCancelRig(t *testing.T) *cancelRig {
 	hp := r.client.Power()
 	d := agent.Deps{Collector: agenttest.NewCollector(), Version: "test", Helper: r.client,
 		Power: agent.NewPowerForRuns(hp, 30, hp.RunLive), HelperSources: []string{api.FeaturePower}}
-	d.Approval = approval.NewGate(approval.Options{EnforcedBy: api.EnforcedByAgent, Files: files, ReadOnly: true, Now: r.clock, Uptime: r.uptime, Log: log})
+	d.Approval = approval.NewGate(approval.Options{EnforcedBy: api.EnforcedByAgent, Files: files, ReadOnly: true, Now: r.clock, Uptime: r.uptime, BootID: boot, Log: log})
 	hs := httptest.NewServer(agent.New(cfg, agent.Tokens{Read: readTok, Control: ctlTok}, d).Handler())
 	t.Cleanup(hs.Close)
 	r.base = hs.URL

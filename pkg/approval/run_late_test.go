@@ -18,7 +18,7 @@ import (
 // deadline), the self-off began whenever the checker next looked in the same boot: hours or days later, at a
 // moment whoever can start the helper picks, on Linux with no notice at all (review of fd6d3be, T2).
 func TestArmedRunDoesNotFireWhenTheCheckerRunsAgainLater(t *testing.T) {
-	for _, bootID := range []string{"boot-1", ""} { // Linux, Windows
+	for _, bootID := range []string{"boot-1", winBoot} { // Linux, Windows
 		for _, away := range []time.Duration{72 * time.Hour, 20 * time.Minute, 121 * time.Second} {
 			r := newRunRig(t)
 			r.bootID = bootID
@@ -148,7 +148,7 @@ func TestArmedRunPutOffForAnUpdate(t *testing.T) {
 // The confirmation: its one update and its one shutdown are refused once within_s is over, also when nothing
 // looked in between (the service was stopped when the time ran out), and the block says so at the first look.
 func TestConfirmationThatRanOutWhileNothingLooked(t *testing.T) {
-	for _, bootID := range []string{"boot-1", ""} {
+	for _, bootID := range []string{"boot-1", winBoot} {
 		r := newRunRig(t)
 		r.bootID = bootID
 		r.restart()

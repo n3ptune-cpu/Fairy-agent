@@ -49,8 +49,10 @@ type Options struct {
 	Now func() time.Time
 	// Uptime is how long the system has been up (nil or an error: the shutdown-after-boot setting never applies).
 	Uptime func() (time.Duration, error)
-	// BootID is the system's own id of this boot, where it has one (Linux). nil, "" or an error: whether the
-	// one shutdown after boot was used in this boot is told from the recorded time and the uptime instead.
+	// BootID is the id of this boot: the kernel's on Linux, on Windows the value the helper keeps in a volatile
+	// registry key (agent.SystemBootID). nil, "" or an error: whether the one shutdown after boot was used in
+	// this boot is told from the recorded time and the uptime instead, and no runs are kept (run.go: a live run
+	// counts in the boot it was accepted in, and only the id says which that is).
 	BootID func() (string, error)
 	// ReadOnly: this gate reads a trust file it cannot write and does not own (a Windows agent next to the
 	// helper, whose file it is). It checks requests and gives challenges for them; it never sets the trust,
@@ -114,6 +116,7 @@ type Gate struct {
 	epoch    uint64    // counts the changes of the trust file's content: what was given under one does not count under the next
 	bootUsed bool      // the one shutdown after boot was accepted in this boot (by this process, or recorded)
 	rs       runMem    // the run record as this process knows it (run.go)
+	bootSaid string    // why there is no boot id, as it was logged last
 }
 
 // Pass is a request the gate let through (Admit). Whoever carries the request out tells the pass when it was
@@ -308,8 +311,19 @@ func (g *Gate) bootID() string {
 	}
 	id, err := g.o.BootID()
 	if err != nil || len(id) > 128 {
+		// A checker that keeps runs says why it keeps none, once for each reason. Caller holds g.mu.
+		if why := "no id"; g.o.Runs && !g.o.ReadOnly {
+			if err != nil {
+				why = firstLine(err.Error())
+			}
+			if why != g.bootSaid {
+				g.bootSaid = why
+				g.o.Log.Error("approval: this machine cannot say which boot this is, so it keeps no runs (no ticket and no confirmation is taken, nothing of a run is let through)", "error", why)
+			}
+		}
 		return ""
 	}
+	g.bootSaid = ""
 	return id
 }
 

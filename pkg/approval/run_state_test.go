@@ -462,10 +462,10 @@ func TestRunSurvivesARestartOfTheService(t *testing.T) {
 	}
 }
 
-// Another boot: nothing of the run is left. With the system's boot id (Linux), and without one (Windows),
-// where the uptime and the moment of the start decide.
+// Another boot: nothing of the run is left. With the kernel's boot id (Linux) and with the one the Windows
+// helper keeps (a value in a registry key that is gone after a restart).
 func TestRunEndsWithTheBoot(t *testing.T) {
-	for _, bootID := range []string{"boot-1", ""} {
+	for _, bootID := range []string{"boot-1", winBoot} {
 		for _, state := range []string{api.RunArmed, api.RunConfirmed, api.RunOffPending} {
 			t.Run(state+" boot id "+bootID, func(t *testing.T) {
 				r := newRunRig(t)
@@ -506,41 +506,107 @@ func TestRunEndsWithTheBoot(t *testing.T) {
 	}
 }
 
-// Without a boot id (Windows): a smaller uptime than on record is another boot, whatever the clock says; and
-// a restart of the service after the clock was set by more than two minutes ends the run (the safe side: the
-// machine stays on), while a correction within that keeps it.
-func TestRunBootWithoutBootID(t *testing.T) {
+// A system that cannot say which boot this is keeps no runs: no ticket arms it, no confirmation is taken (no
+// challenge is given for one), and nothing of a run is let through. Before, such a system (Windows) told its
+// boots apart by the clock and the uptime, and two boots that began within two minutes counted as one.
+func TestNoRunsWithoutABootID(t *testing.T) {
 	r := newRunRig(t)
 	r.bootID = ""
 	r.restart()
-	r.armed(runA) // at 60 s
-	// started again one minute later, with the clock set so that the start looks like the same moment
-	r.mu.Lock()
-	r.uptime = 30 * time.Second
-	r.now = r.now.Add(-30 * time.Second)
-	r.mu.Unlock()
-	r.restart()
-	if run := r.run(); run != nil {
-		t.Errorf("the uptime went backwards and the run is still there: %+v", run)
+	_, ref := r.w.Arm(r.ticket(runA, r.up()+100*time.Second))
+	runRefused(t, "a ticket on a system without a boot id", ref, 503, api.CodeRunUnavailable, "")
+	_, ref = r.g.Challenge(goReq(runA, "-", 30, 300))
+	runRefused(t, "the challenge for a confirmation", ref, 503, api.CodeRunUnavailable, "")
+	_, ref = r.w.Go(goReq(runA, "-", 30, 300), r.ticket(runA, r.up()+100*time.Second))
+	runRefused(t, "a confirmation", ref, 503, api.CodeRunUnavailable, "")
+	if r.touched() || r.run() != nil {
+		t.Fatalf("something of a run on a system without a boot id: %+v", r.run())
 	}
-
-	for _, c := range []struct {
-		jump time.Duration
-		kept bool
-	}{{approval.BootSlack, true}, {-approval.BootSlack, true}, {approval.BootSlack + time.Second, false}, {-approval.BootSlack - time.Second, false}, {10 * time.Minute, false}} {
-		r := newRunRig(t)
-		r.bootID = ""
-		r.restart()
-		r.armed(runA)
-		r.ticks(100 * time.Second)
-		r.jump(c.jump)
-		r.restart()
-		if kept := r.state() == api.RunArmed; kept != c.kept {
-			t.Errorf("clock set by %s, then a restart of the service: kept %v, want %v", c.jump, kept, c.kept)
+	// a record of a system that had one (the registry key could be read then, and cannot be now): its live run
+	// does not count
+	r.bootID = winBoot
+	r.restart()
+	r.armed(runA)
+	if _, ref := r.confirm(goReq(runA, "9.9.9", 30, 300)); ref != nil {
+		t.Fatal(ref)
+	}
+	r.bootID = ""
+	r.restart()
+	for _, req := range []api.ApprovalRequest{update, power("shutdown", 30)} {
+		if _, ref := r.g.AdmitRun(req, runA); ref == nil {
+			t.Errorf("%s of a run let through on a system that cannot say which boot this is", req.Verb)
 		}
-		// a ticket of another run does not arm this boot again, whichever way it went
-		if _, ref := r.w.Arm(r.ticket(runB, r.up()+100*time.Second+max(c.jump, 0))); ref == nil && c.jump <= approval.BootSlack {
-			t.Errorf("clock set by %s: armed a second time in one boot", c.jump)
+	}
+	r.ticks(2000 * time.Second)
+	if len(r.scheduled) != 0 || r.run() != nil {
+		t.Fatalf("%+v %+v", r.scheduled, r.run())
+	}
+}
+
+// R13 of the review: an uptime that is smaller than when the record was written is another boot, whatever
+// the boot id says (a system whose id did not change, a copy of a machine): the live run ends, at the first
+// look of a service that starts and at the next look of one that is running.
+func TestUptimeGoingBackwardsEndsTheRun(t *testing.T) {
+	for _, state := range []string{api.RunArmed, api.RunConfirmed} {
+		for _, restart := range []bool{true, false} {
+			r := newRunRig(t)
+			r.armed(runA) // at 60 s
+			if state == api.RunConfirmed {
+				if _, ref := r.confirm(goReq(runA, "9.9.9", 30, 600)); ref != nil {
+					t.Fatal(ref)
+				}
+			}
+			r.ticks(20 * time.Second)
+			r.mu.Lock()
+			r.uptime = 30 * time.Second // the same boot id, and the system has been up for less than before
+			r.mu.Unlock()
+			if restart {
+				r.restart()
+			}
+			r.w.Tick()
+			if run := r.run(); run != nil && run.State == state {
+				t.Errorf("%s, service restarted %v: the uptime went backwards and the run is still live: %+v", state, restart, run)
+			}
+			for _, req := range []api.ApprovalRequest{update, power("shutdown", 30)} {
+				if _, ref := r.g.AdmitRun(req, runA); ref == nil {
+					t.Errorf("%s, service restarted %v: %s let through after the uptime went backwards", state, restart, req.Verb)
+				}
+			}
+			r.ticks(2000 * time.Second)
+			if len(r.scheduled) != 0 {
+				t.Errorf("%s, service restarted %v: switched off: %+v", state, restart, r.scheduled)
+			}
+		}
+	}
+}
+
+// With a boot id the clock says nothing about the boot: set by any amount, with a restart of the service
+// after it, the armed run of this boot is kept (its wait is counted on the uptime), and no second ticket arms
+// the machine in this boot, whichever way the clock went.
+func TestRunAndTheClockInOneBoot(t *testing.T) {
+	for _, bootID := range []string{"boot-1", winBoot} {
+		for _, jump := range []time.Duration{approval.BootSlack + time.Second, -approval.BootSlack - time.Second, 10 * time.Minute, -time.Hour, 30 * 24 * time.Hour} {
+			r := newRunRig(t)
+			r.bootID = bootID
+			r.restart()
+			r.armed(runA)
+			r.ticks(100 * time.Second)
+			r.jump(jump)
+			r.restart()
+			if r.state() != api.RunArmed {
+				t.Errorf("boot id %q, clock set by %s, then a restart of the service: the run is %q", bootID, jump, r.state())
+			}
+			if _, ref := r.w.Arm(r.ticket(runB, r.up()+100*time.Second)); ref == nil {
+				t.Errorf("boot id %q, clock set by %s: armed a second time in one boot", bootID, jump)
+			}
+			if was, err := r.w.Cancel("test"); was != api.RunArmed || err != nil {
+				t.Fatalf("cancel: %q %v", was, err)
+			}
+			r.jump(-jump)
+			r.restart()
+			if _, ref := r.w.Arm(r.ticket(runB, r.up()+100*time.Second)); ref == nil {
+				t.Errorf("boot id %q, clock set by %s and back: armed again after a cancel in this boot", bootID, jump)
+			}
 		}
 	}
 }
@@ -775,8 +841,8 @@ func TestNoTicketNoChange(t *testing.T) {
 	if looks > 600/5+5 {
 		t.Errorf("%d looks at the folder in 600 s on a machine without a run: the watch reads the run record at every look", looks)
 	}
-	if exists, _ := r.files.RunRecordCheck(); exists {
-		t.Error("a run record without a ticket")
+	if r.touched() {
+		t.Error("something of a run in the record without a ticket")
 	}
 	if ref := r.g.Precheck(power("shutdown", 60), false); ref == nil || ref.Code != api.CodeApprovalRequired {
 		t.Errorf("a shutdown without approval: %v", ref)

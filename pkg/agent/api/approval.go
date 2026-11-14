@@ -142,6 +142,10 @@ const (
 	RunReasonConfirmed     = "already_confirmed" // go: this run is confirmed already
 	RunReasonTooLate       = "too_late"          // go: the wait is over, the machine is switching itself off
 	RunReasonOver          = "run_over"          // go: this run was armed or confirmed here before and is over (cancelled, finished, or the machine was started again)
+	// RunReasonClockBack (arm): this machine's clock is more than two minutes behind a time it showed before. A
+	// ticket is judged by the clock (how old it is, whether the machine started after it was signed), so none is
+	// taken while the clock is known to have been set back; the machine stays on. See approval.RunClockBack.
+	RunReasonClockBack = "clock_back"
 )
 
 // Run states (RunStatus.State).

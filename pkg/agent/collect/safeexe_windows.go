@@ -68,6 +68,16 @@ func ownerAndACL(p string, sd *windows.SECURITY_DESCRIPTOR) (owner string, null 
 	return o.String(), null, aces, nil
 }
 
+// KeySecurity reads the owner and the permission list of an open registry key (opened with READ_CONTROL), for
+// CheckKeyACL.
+func KeySecurity(name string, key windows.Handle) (owner string, nullDACL bool, aces []ACE, err error) {
+	sd, err := windows.GetSecurityInfo(key, windows.SE_REGISTRY_KEY, windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION)
+	if err != nil {
+		return "", false, nil, fmt.Errorf("%s: cannot read its permissions: %w", name, err)
+	}
+	return ownerAndACL(name, sd)
+}
+
 // FindIpmitool returns ipmitool from C:\Program Files\ipmitool\ (ipmitool.exe or bin\ipmitool.exe) if it is
 // trusted. PATH and other folders are never searched: any user may create C:\ipmitool, and the agent may run as
 // LocalSystem.

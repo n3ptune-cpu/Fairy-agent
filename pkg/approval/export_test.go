@@ -29,6 +29,26 @@ func (f Files) RunRecordCheck() (exists bool, err error) {
 	return exists, err
 }
 
+// RunRecordTouched reports whether the run record holds anything a ticket, a confirmation or a cancel leaves in
+// this boot: a live run, the id of a run, how a run ended, or the mark that closes the boot bootID for tickets.
+// The record itself is there on every machine with trust (the checker keeps the clock in it).
+func (f Files) RunRecordTouched(bootID string) bool {
+	rec, _, exists, err := f.readRun()
+	if !exists || err != nil || rec == nil {
+		return false
+	}
+	return rec.Run != nil || len(rec.Used) > 0 || rec.Last != nil || (rec.Arm != nil && rec.Arm.BootID == bootID)
+}
+
+// RunClockSeen is the record's "clock" (0: no record, or none in it).
+func (f Files) RunClockSeen() int64 {
+	rec, _, _, err := f.readRun()
+	if err != nil || rec == nil {
+		return 0
+	}
+	return rec.Clock
+}
+
 // RunRoundTrip reads b as a run record and, when it is one, writes it out again the way the gate does.
 func RunRoundTrip(b []byte) ([]byte, error) {
 	var r runFile
@@ -43,8 +63,9 @@ func RunRoundTrip(b []byte) ([]byte, error) {
 
 // The limits of the run record, for the tests of the file.
 const (
-	MaxRunFile  = maxRunFile
-	RunUsedMax  = runUsedMax
-	RunOffGrace = runOffGrace
-	BootSlack   = bootSlack
+	MaxRunFile    = maxRunFile
+	RunUsedMax    = runUsedMax
+	RunOffGrace   = runOffGrace
+	BootSlack     = bootSlack
+	RunClockEvery = runClockEvery
 )

@@ -298,6 +298,7 @@ func Run(ctx context.Context, cfg *Config, b Build) error {
 				Guests:   GuestsRunning,
 			})
 			go d.Runs.Run(ctx)
+			defer d.Approval.RunStop() // the clock goes into the run record when the agent stops
 		}
 	}
 	if cfg.WOL.Enabled {

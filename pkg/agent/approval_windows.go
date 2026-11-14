@@ -24,10 +24,14 @@ func ApprovalFiles(cfg *Config) approval.Files {
 // SystemUptime is the time since Windows started (GetTickCount64, the same clock as "uptime_s" of /metrics).
 func SystemUptime() (time.Duration, error) { return windows.DurationSinceBoot(), nil }
 
-// SystemBootID: Windows has no id of its boot that a service can simply read, so there is none here and "the
-// one shutdown after boot was used in this boot" is told from the time it was recorded and the uptime
-// (approval.Gate.usedThisBoot).
-func SystemBootID() (string, error) { return "", nil }
+// SystemBootID is the id of this boot as the agent reads it: the value the helper keeps in a volatile registry
+// key (bootid.go). The agent's account only reads the key; before the helper has made it in this boot there is
+// no id, and a record of the helper's is then not "of this boot" for the agent.
+func SystemBootID() (string, error) { return bootIDFrom(winBootKey{}, nil, false) }
+
+// SystemBootIDOwner is SystemBootID for whoever may make the key when it is not there: the helper (it runs
+// as SYSTEM) and the administrator's command (fairy-agent helper-run).
+func SystemBootIDOwner() (string, error) { return bootIDFrom(winBootKey{}, nil, true) }
 
 // ApprovalAdminFiles is ApprovalFiles for the administrator's command (fairy-agent helper-trust). A file
 // created in the helper's folder inherits its permissions: Administrators and SYSTEM change it, the agent's

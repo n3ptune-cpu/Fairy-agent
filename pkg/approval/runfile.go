@@ -85,6 +85,10 @@ type runFile struct {
 	Used []string `json:"used,omitempty"` // ids of the runs accepted here, oldest first, at most runUsedMax
 	Last *runLast `json:"last,omitempty"`
 	Run  *runLive `json:"run,omitempty"`
+	// Clock is the latest time this machine's clock showed when the checker looked (Unix seconds; 0: not known).
+	// No ticket is taken while the clock is more than RunClockBack behind it (Gate.runClockKeep says when it is
+	// written, and when it follows a clock that was put right backwards).
+	Clock int64 `json:"clock,omitempty"`
 }
 
 func (r bootRef) valid() bool {
@@ -94,7 +98,7 @@ func (r bootRef) valid() bool {
 // validate says whether a record read from disk can be believed: every value is one this program writes.
 func (f *runFile) validate() error {
 	no := errors.New("not a run record of this program")
-	if f.Version != 1 || !f.At.valid() || (f.Arm != nil && !f.Arm.valid()) || len(f.Used) > runUsedMax {
+	if f.Version != 1 || !f.At.valid() || (f.Arm != nil && !f.Arm.valid()) || len(f.Used) > runUsedMax || f.Clock < 0 || f.Clock >= 1e11 {
 		return no
 	}
 	for _, id := range f.Used {
@@ -273,6 +277,8 @@ type RunView struct {
 	Update, Shutdown         int
 	LastID, LastState        string
 	WrittenWall, WrittenUpMS int64
+	// Clock: the latest time this machine's clock showed when the checker looked (Unix seconds; 0: not known).
+	Clock int64
 }
 
 func (f Files) runView(rec *runFile) RunView {
@@ -280,7 +286,7 @@ func (f Files) runView(rec *runFile) RunView {
 	if rec == nil {
 		return v
 	}
-	v.WrittenWall, v.WrittenUpMS = rec.At.Wall, rec.At.UpMS
+	v.WrittenWall, v.WrittenUpMS, v.Clock = rec.At.Wall, rec.At.UpMS, rec.Clock
 	if l := rec.Last; l != nil {
 		v.LastID, v.LastState = l.ID, l.State
 	}

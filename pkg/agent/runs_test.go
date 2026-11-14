@@ -97,7 +97,7 @@ func newRunsRig(t *testing.T, windows bool) *rrig {
 		Apply: func(context.Context) error { r.ownStarts.Add(1); return nil }}
 	d := agent.Deps{Collector: agenttest.NewCollector(), Version: "test"}
 	if windows {
-		r.bootID = "" // Windows has none
+		r.bootID = "0f1e2d3c4b5a69788796a5b4c3d2e1f0" // the value the helper keeps in its volatile registry key
 		var srv atomic.Pointer[helper.Server]
 		var conns []net.Conn // the pipe connections of the helper that is running: they end with it
 		r.startChecker = func(runs bool) {
@@ -257,6 +257,21 @@ func (r *rrig) updateDone() agent.UpdateStatus {
 	}
 	r.t.Fatal("the update never ended")
 	return agent.UpdateStatus{}
+}
+
+// nothingOfARunOnRecord: the record is there on every machine with trust (the checker keeps the clock in it),
+// and nothing a ticket, a confirmation or a cancel leaves is in it.
+func (r *rrig) nothingOfARunOnRecord(when string) {
+	r.t.Helper()
+	rec, err := os.ReadFile(filepath.Join(filepath.Dir(r.files.Path), approval.RunFileName))
+	if err != nil {
+		return
+	}
+	for _, member := range []string{`"run"`, `"arm"`, `"used"`, `"last"`} {
+		if strings.Contains(string(rec), member) {
+			r.t.Errorf("the run record holds %s %s: %s", member, when, rec)
+		}
+	}
 }
 
 func (r *rrig) starts() int32 { return r.ownStarts.Load() + r.helperStarts.Load() }
@@ -517,9 +532,7 @@ func TestRunRoutesNeedAPasskeyToken(t *testing.T) {
 		if r.block()["run"] != nil || len(r.exec.Scheduled) != before {
 			t.Fatalf("something was armed: %v, %v", r.block()["run"], r.exec.Scheduled)
 		}
-		if _, err := os.Lstat(filepath.Join(filepath.Dir(r.files.Path), approval.RunFileName)); err == nil {
-			t.Error("a run record was written")
-		}
+		r.nothingOfARunOnRecord("after refusals only")
 	})
 }
 
@@ -598,9 +611,7 @@ func TestOldPanelSeesNoDifference(t *testing.T) {
 			t.Errorf("block %v", blk)
 		}
 		r.pass(3 * time.Hour)
-		if _, err := os.Lstat(filepath.Join(filepath.Dir(r.files.Path), approval.RunFileName)); err == nil {
-			t.Error("a run record on a machine no ticket reached")
-		}
+		r.nothingOfARunOnRecord("on a machine no ticket reached")
 	})
 }
 

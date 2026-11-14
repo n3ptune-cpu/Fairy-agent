@@ -40,7 +40,8 @@ func SystemUptime() (time.Duration, error) {
 }
 
 // SystemBootID is the kernel's own id of this boot (Linux: /proc/sys/kernel/random/boot_id, a new random UUID
-// at every boot). "" where there is none: the gate then tells boots apart by the clock and the uptime.
+// at every boot). "" where there is none: such a system keeps no runs (approval.Gate), and whether the one shutdown
+// after boot was used in this boot is told by the clock and the uptime.
 func SystemBootID() (string, error) {
 	if runtime.GOOS != "linux" {
 		return "", nil
@@ -55,6 +56,9 @@ func SystemBootID() (string, error) {
 	}
 	return id, nil
 }
+
+// SystemBootIDOwner is SystemBootID: the kernel keeps the id, nobody has to make it (Windows: the helper does).
+func SystemBootIDOwner() (string, error) { return SystemBootID() }
 
 // ApprovalAdminFiles is ApprovalFiles for the administrator's command (fairy-agent helper-trust): run as root,
 // the file it writes belongs to root and is readable by the folder's group (the agent's), mode 0640.
