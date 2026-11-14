@@ -101,17 +101,19 @@ func newRunsRig(t *testing.T, windows bool) *rrig {
 		var srv atomic.Pointer[helper.Server]
 		var conns []net.Conn // the pipe connections of the helper that is running: they end with it
 		r.startChecker = func(runs bool) {
+			s := helper.New(helper.Parts{Version: "test", Power: agent.RememberPower(r.exec, nil, nil, nil), MinDelayS: 30, Audit: log,
+				Updater: func(context.Context) error { r.helperStarts.Add(1); return nil },
+				Approval: approval.NewGate(approval.Options{EnforcedBy: api.EnforcedByHelper, Log: log, Files: r.files,
+					Now: r.clock, Uptime: r.uptime, BootID: r.boot, Runs: runs, MinDelayS: 30})})
+			// under the lock the dial takes: a connection is either one of the helper before, and ends here, or
+			// one of this helper. None is left with the helper before.
 			r.mu.Lock()
+			srv.Store(s)
 			for _, c := range conns {
 				c.Close()
 			}
 			conns = nil
 			r.mu.Unlock()
-			s := helper.New(helper.Parts{Version: "test", Power: agent.RememberPower(r.exec, nil, nil, nil), MinDelayS: 30, Audit: log,
-				Updater: func(context.Context) error { r.helperStarts.Add(1); return nil },
-				Approval: approval.NewGate(approval.Options{EnforcedBy: api.EnforcedByHelper, Log: log, Files: r.files,
-					Now: r.clock, Uptime: r.uptime, BootID: r.boot, Runs: runs, MinDelayS: 30})})
-			srv.Store(s)
 			r.watch.Store(s.Runs())
 		}
 		r.startChecker(true)
@@ -121,16 +123,19 @@ func newRunsRig(t *testing.T, windows bool) *rrig {
 				return nil, errors.New("pipe not found")
 			}
 			a, c := net.Pipe()
-			s := srv.Load()
 			r.mu.Lock()
+			s := srv.Load()
 			conns = append(conns, a)
 			r.mu.Unlock()
 			go func() { s.ServeConn(ctx, a, "test"); a.Close() }()
 			return c, nil
 		}
 		client := agent.NewHelperClient(dial, scm, true)
-		client.Every = 10 * time.Millisecond
-		go client.Run(ctx) // as in the agent: the helper's status is asked again all the time
+		// As in the agent, the helper's status is asked again all the time. Ten times a second and not more: the
+		// helper answers 300 reads a minute (proto.ReadsPerMinute) and then refuses, so a test that asked every
+		// 10 ms had three seconds to finish in.
+		client.Every = 100 * time.Millisecond
+		go client.Run(ctx)
 		uo.ApplyApproved, uo.ApplyRun = client.ApplyUpdateApproved, client.ApplyUpdateRun
 		hp := client.Power()
 		d.Helper, d.Power, d.HelperSources = client, agent.NewPowerForRuns(hp, 30, hp.RunLive), []string{api.FeaturePower}
