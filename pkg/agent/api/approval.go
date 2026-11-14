@@ -134,7 +134,7 @@ const (
 const (
 	RunReasonNotFresh      = "not_fresh"         // arm: the machine has been up for RunArmUptimeS or longer (or cannot say)
 	RunReasonStartedBefore = "started_before"    // arm: the machine was already running when the ticket was signed
-	RunReasonArmedThisBoot = "already_armed"     // arm: a ticket was accepted in this boot already (one per boot, whatever became of it)
+	RunReasonArmedThisBoot = "already_armed"     // arm: this boot is closed for tickets: one was accepted in it already (one per boot, whatever became of it), a run was cancelled in it, or the run record was made anew in it
 	RunReasonRunUsed       = "run_used"          // arm: a ticket of this run was accepted before
 	RunReasonPowerPending  = "power_pending"     // arm: a shutdown, reboot or sleep is pending
 	RunReasonLimits        = "limits"            // notice_s or shutdown_delay_s is below this machine's power_control.min_delay_s
@@ -146,6 +146,10 @@ const (
 	// ticket is judged by the clock (how old it is, whether the machine started after it was signed), so none is
 	// taken while the clock is known to have been set back; the machine stays on. See approval.RunClockBack.
 	RunReasonClockBack = "clock_back"
+	// RunReasonBeforeRecord (arm): the ticket was signed before this machine's run record was made anew (the
+	// record was missing, removed, or could not be read). What the machine knew of earlier tickets went with the
+	// old record, so no ticket from before is taken. A ticket signed after that is.
+	RunReasonBeforeRecord = "before_record"
 )
 
 // Run states (RunStatus.State).

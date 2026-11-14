@@ -76,7 +76,7 @@ var armText = map[string]string{
 var runText = map[string]string{
 	api.RunReasonNotFresh:      "this machine has been up for " + strconv.Itoa(api.RunArmUptimeS) + " s or longer (or cannot say how long): a ticket arms only a machine that has just started",
 	api.RunReasonStartedBefore: "this machine was already running when the ticket was signed",
-	api.RunReasonArmedThisBoot: "a ticket was accepted on this machine in this boot already",
+	api.RunReasonArmedThisBoot: "this boot is closed for tickets on this machine: one was accepted in it already, a run was cancelled in it, or the run record was made anew in it (a ticket arms it again after its next start)",
 	api.RunReasonRunUsed:       "a ticket of this run was accepted on this machine before",
 	api.RunReasonPowerPending:  "a shutdown, reboot or sleep is pending on this machine",
 	api.RunReasonLimits:        "a delay it names is shorter than this machine's power_control.min_delay_s",
@@ -84,6 +84,7 @@ var runText = map[string]string{
 	api.RunReasonConfirmed:     "this run is confirmed on this machine already",
 	api.RunReasonTooLate:       "too late: the wait is over and this machine is switching itself off",
 	api.RunReasonOver:          "this run was armed or confirmed on this machine before and is over here (cancelled, finished, or the machine was started again since)",
+	api.RunReasonBeforeRecord:  "the ticket was signed before this machine's run record was made anew (the record was missing, removed, or could not be read): what the machine knew of earlier tickets went with it, so a ticket from before is not taken. Start the run again",
 	api.RunReasonClockBack: "this machine's clock is more than " + strconv.Itoa(int(RunClockBack/time.Second)) + " s behind a time it showed before, and a ticket is judged by the clock: none is taken, the machine stays on. " +
 		"If the clock was wrong before and is right now, this ends by itself: once the machine has been up for " + strconv.Itoa(api.RunArmUptimeS) + " s the clock is taken as it is, and tickets are taken again after the next start",
 }
@@ -166,7 +167,7 @@ func (g *Gate) runRead(now time.Time, up time.Duration) {
 		m.file, m.exists, m.bad = nil, true, firstLine(err.Error())
 		if m.said != m.bad {
 			m.said = m.bad
-			g.o.Log.Error("approval: the run record cannot be used: it counts as no record (nothing is armed, nothing of a run is let through), and no ticket is accepted until it is removed (fairy-agent helper-run cancel)",
+			g.o.Log.Error("approval: the run record cannot be used: it counts as no record (nothing is armed, nothing of a run is let through), and no ticket is accepted until it is made anew (fairy-agent helper-run cancel)",
 				"error", m.bad)
 		}
 		return
@@ -218,7 +219,7 @@ func (g *Gate) runSync(now time.Time, up time.Duration) {
 		m.file, m.exists, m.bad = nil, true, firstLine(err.Error())
 		if m.said != m.bad {
 			m.said = m.bad
-			g.o.Log.Error("approval: the run record cannot be used: it counts as no record (nothing is armed, nothing of a run is let through), and no ticket is accepted until it is removed (fairy-agent helper-run cancel)",
+			g.o.Log.Error("approval: the run record cannot be used: it counts as no record (nothing is armed, nothing of a run is let through), and no ticket is accepted until it is made anew (fairy-agent helper-run cancel)",
 				"error", m.bad)
 		}
 		return
@@ -237,6 +238,9 @@ func (g *Gate) runSync(now time.Time, up time.Duration) {
 			f.Arm = &at
 			g.runWrite(now, up)
 		}
+	}
+	if f == nil && err == nil {
+		g.runEnsure(now, up) // the record was removed: made anew, this boot closed
 	}
 }
 
@@ -283,11 +287,9 @@ func (g *Gate) runClockKeep(now time.Time, up time.Duration, force bool) {
 	}
 	m.clockKept, m.clockAt = true, up
 	g.runSync(now, up) // as the file is now: what an administrator did to it on the machine is not written over
-	if m.bad != "" || m.dirty {
+	g.runEnsure(now, up)
+	if m.bad != "" || m.dirty || m.file == nil {
 		return
-	}
-	if m.file == nil {
-		m.file = &runFile{Version: 1}
 	}
 	was, want := m.file.Clock, max(m.file.Clock, now.Unix())
 	if up >= api.RunArmUptimeS*time.Second {
@@ -301,6 +303,23 @@ func (g *Gate) runClockKeep(now time.Time, up time.Duration, force bool) {
 			"clock_was", was, "clock", want, "uptime_s", int(up/time.Second))
 	}
 	m.file.Clock = want
+	g.runWrite(now, up)
+}
+
+// runEnsure makes the record anew when there is none: the service looks for the first time on a machine with
+// trust, or the file was removed. A record that is made anew closes this boot for tickets and takes none that
+// was signed before (runFile.Born): the marks that refuse (the boot of the last ticket or cancel, the ids of
+// the runs) cannot be had back, so nothing is taken that they might have refused. If it cannot be written,
+// runGate refuses everything of a run (dirty). Caller holds g.mu, after g.reload.
+func (g *Gate) runEnsure(now time.Time, up time.Duration) {
+	m := &g.rs
+	if g.o.ReadOnly || !g.o.Runs || g.state != api.ApprovalRequired || !m.loaded || m.bad != "" || m.file != nil {
+		return
+	}
+	m.file = newRunFile(g.bootRef(now, up))
+	m.armedHere = true
+	g.o.Log.Warn("approval: there was no run record; one was made anew. No ticket is taken until this machine has been started again, and none that was signed before now",
+		"uptime_s", int(up/time.Second))
 	g.runWrite(now, up)
 }
 
@@ -403,6 +422,7 @@ func (g *Gate) runGate() (now time.Time, up time.Duration, ref *Refusal) {
 		return now, up, runUnavailable("this machine cannot say which boot this is (Windows: the helper's registry key for it cannot be made, read or believed; helper.log says why)")
 	}
 	g.runSync(now, up) // as the file is now: an administrator may have cancelled or removed it
+	g.runEnsure(now, up)
 	g.runClockKeep(now, up, false)
 	switch {
 	case g.rs.bad != "":
@@ -529,6 +549,8 @@ func (g *Gate) Arm(ap *api.Approval, pending bool) (api.RunAnswer, *Refusal) {
 		return no(api.RunReasonNotFresh)
 	case now.Add(-up).Before(cl.Iat.Add(-ClockAllowance)):
 		return no(api.RunReasonStartedBefore)
+	case f.Born != 0 && cl.Iat.Unix() < f.Born:
+		return no(api.RunReasonBeforeRecord)
 	case g.rs.armedHere || (f.Arm != nil && g.maybeThisBoot(*f.Arm, now, up)):
 		return no(api.RunReasonArmedThisBoot)
 	case slices.Contains(f.Used, id):
@@ -802,10 +824,12 @@ func (g *Gate) runPoll() (live *runLive, up time.Duration, stop bool) {
 		g.runRead(now, up)
 	}
 	if ok && g.bootID() != "" {
-		if m.clockKept && up >= m.clockAt && up < m.clockAt+runClockEvery {
+		if m.file != nil && m.clockKept && up >= m.clockAt && up < m.clockAt+runClockEvery {
 			// not now (the common case, once a second: nothing is read)
 		} else {
 			g.reload(false)
+			g.runSync(now, up) // first the file as it is now: a record that is there is never made anew over
+			g.runEnsure(now, up)
 			g.runClockKeep(now, up, false)
 		}
 	}

@@ -114,6 +114,10 @@ func newCancelRig(t *testing.T) *cancelRig {
 	if st, b := r.post(api.PathApprovalTrust, provenTrust(t, r.base, r.iss, r.iss.Init())); st != 200 {
 		t.Fatalf("trust: %d %v", st, b)
 	}
+	// the run record this PC has from a boot before (one that is made now would close this boot for tickets)
+	if err := approvaltest.EarlierBoot(files, r.clock().Add(-24*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
 	return r
 }
 

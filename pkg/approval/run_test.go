@@ -59,6 +59,19 @@ func newRunRig(t testing.TB) *runRig {
 	r.uptime = 60 * time.Second
 	r.mu.Unlock()
 	r.files.CheckDir = func(string) error { return r.dirErr }
+	// The machine has its run record from a boot before this one, a day ago, as every machine has that a run
+	// wakes: the service made it when it first looked with trust set (a record that is made anew closes its
+	// boot for tickets).
+	r.bootID = "boot-0"
+	r.mu.Lock()
+	r.now = r.now.Add(-24 * time.Hour)
+	r.mu.Unlock()
+	r.restart()
+	r.w.Tick()
+	r.mu.Lock()
+	r.now = r.now.Add(24 * time.Hour)
+	r.mu.Unlock()
+	r.bootID = "boot-1"
 	r.restart()
 	return r
 }
@@ -120,6 +133,13 @@ func (r *runRig) touched() bool {
 	id := r.bootID
 	r.mu.Unlock()
 	return r.files.RunRecordTouched(id)
+}
+
+// stamp is this moment as the administrator's command (fairy-agent helper-run cancel) notes it.
+func (r *runRig) stamp() approval.RunStamp {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return approval.RunStamp{BootID: r.bootID, Now: r.now, Up: r.uptime}
 }
 
 // winBoot is a boot id as the Windows helper keeps one: 32 hex characters from its registry key.
@@ -220,8 +240,8 @@ func TestArmAcceptsAFreshMachine(t *testing.T) {
 	if st.Runs != api.ApprovalRuns || st.Run != nil || st.Proto != 2 {
 		t.Fatalf("before: runs %d, run %+v, proto %d", st.Runs, st.Run, st.Proto)
 	}
-	if exists, _ := r.files.RunRecordCheck(); exists {
-		t.Fatal("a run record before any ticket")
+	if r.touched() {
+		t.Fatal("something of a run in the record before any ticket")
 	}
 	ans, ref := r.w.Arm(r.ticket(runA, 160*time.Second)) // signed 100 s before the machine started
 	if ref != nil || ans != (api.RunAnswer{Run: runA, State: api.RunArmed, OffInS: 960}) {
@@ -586,8 +606,8 @@ func TestRunsAreOffWithoutTrustAndUnavailableWhenBroken(t *testing.T) {
 	if st := r.g.Status(); st.State != api.ApprovalOff || st.Run != nil || st.Runs != api.ApprovalRuns {
 		t.Errorf("status %+v", st)
 	}
-	if exists, _ := r.files.RunRecordCheck(); exists {
-		t.Error("a run record on a machine without trust")
+	if r.touched() {
+		t.Error("something of a run in the record of a machine without trust")
 	}
 	if err := os.WriteFile(r.files.Path, []byte("{"), 0o600); err != nil {
 		t.Fatal(err)

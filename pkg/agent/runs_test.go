@@ -172,6 +172,10 @@ func (r *rrig) trusted() *rrig {
 	if st, b := r.post(api.PathApprovalTrust, provenTrust(r.t, r.base, r.iss, r.iss.Init())); st != 200 {
 		r.t.Fatalf("first-time set: %d %v", st, b)
 	}
+	// the run record this machine has from a boot before (one that is made now would close this boot for tickets)
+	if err := approvaltest.EarlierBoot(r.files, r.clock().Add(-24*time.Hour)); err != nil {
+		r.t.Fatal(err)
+	}
 	return r
 }
 
@@ -267,10 +271,14 @@ func (r *rrig) nothingOfARunOnRecord(when string) {
 	if err != nil {
 		return
 	}
-	for _, member := range []string{`"run"`, `"arm"`, `"used"`, `"last"`} {
+	for _, member := range []string{`"run"`, `"used"`, `"last"`} {
 		if strings.Contains(string(rec), member) {
 			r.t.Errorf("the run record holds %s %s: %s", member, when, rec)
 		}
+	}
+	// the mark that closes a boot for tickets is the one of the boot before (approvaltest.EarlierBoot), not of this one
+	if strings.Count(string(rec), `"boot_id":"`+r.bootID+`"`) > 1 {
+		r.t.Errorf("this boot is closed for tickets %s: %s", when, rec)
 	}
 }
 

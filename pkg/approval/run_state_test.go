@@ -871,7 +871,7 @@ func TestRunCancelOfAConfirmationWithoutTicketClosesTheBoot(t *testing.T) {
 	if _, ref := r.confirm(goReq(runA, "19-abc", 30, 1500)); ref != nil {
 		t.Fatal(ref)
 	}
-	if _, changed, err := r.files.RunCancel(); !changed || err != nil {
+	if _, changed, err := r.files.RunCancel(r.stamp()); !changed || err != nil {
 		t.Fatal(err)
 	}
 	r.w.Tick()

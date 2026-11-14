@@ -230,7 +230,7 @@ func randomRunSequence(t *testing.T, seed int64) bool {
 			}
 		case 9: // helper-run cancel on the machine
 			l := liveID()
-			if _, changed, err := r.files.RunCancel(); err != nil {
+			if _, changed, err := r.files.RunCancel(r.stamp()); err != nil {
 				return fail("helper-run cancel: %v", err)
 			} else if changed && l != "" {
 				cancelled[boot], cancelledRun[l] = true, true

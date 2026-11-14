@@ -29,12 +29,33 @@ run is still let through: one update, one shutdown).
 cancel (root / Administrator) ends the run on this machine: it does not switch itself off, nothing of the run
 is let through any more, and no ticket arms it again until it has been started anew. The service sees the
 cancel within a second and stops a countdown that is already running (Windows: shutdown /a does that too).
-With no run on record it changes nothing. A record that cannot be read is removed.
+With no run on record it changes nothing. A record that cannot be read is replaced by a new one, which takes
+no ticket until this machine has been started again, and none that was signed before.
 The panel's Cancel button for this machine does the same.
 `
 
-// runUptime is how long the system has been up, for show (a seam for the tests).
-var runUptime = agent.SystemUptime
+// runUptime is how long the system has been up, and runBootID the id of this boot as whoever may make it
+// reads it (seams for the tests).
+var (
+	runUptime = agent.SystemUptime
+	runBootID = agent.SystemBootIDOwner
+)
+
+// runStamp is this moment for the record: the boot, the clock, the uptime. A boot id or an uptime that cannot
+// be read is left out, with a line that says so: the cancel is what matters, and the mark it leaves then closes
+// this boot for tickets by the clock.
+func runStamp(stderr io.Writer) approval.RunStamp {
+	at := approval.RunStamp{Now: time.Now()}
+	if id, err := runBootID(); err == nil {
+		at.BootID = id
+	} else {
+		fmt.Fprintln(stderr, "note: the id of this boot cannot be read ("+err.Error()+"); the record is marked with the clock instead")
+	}
+	if up, err := runUptime(); err == nil {
+		at.Up = up
+	}
+	return at
+}
 
 func helperRunCmd(args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 || (args[0] != "show" && args[0] != "cancel") {
@@ -81,13 +102,14 @@ func helperRunCmd(args []string, stdout, stderr io.Writer) int {
 		printRun(stdout, v)
 		return 0
 	}
-	was, changed, err := files.RunCancel()
+	was, changed, err := files.RunCancel(runStamp(stderr))
 	if err != nil {
 		return fail(err)
 	}
 	switch {
 	case was.Err != nil:
-		fmt.Fprintln(stdout, "the run record could not be read ("+was.Err.Error()+") and was removed. Nothing was armed because of it. What it remembered of earlier runs is gone.")
+		fmt.Fprintln(stdout, "the run record could not be read ("+was.Err.Error()+") and was replaced by a new one. Nothing was armed because of the old one.")
+		fmt.Fprintln(stdout, "What it remembered of earlier runs is gone, so no ticket arms this machine until it has been started anew, and none that was signed before now.")
 	case !changed:
 		fmt.Fprintln(stdout, "no run is armed or confirmed on this machine ("+was.Path+"): nothing changed")
 	default:
@@ -104,7 +126,7 @@ func printRun(w io.Writer, v approval.RunView) {
 	switch {
 	case v.Err != nil:
 		fmt.Fprintln(w, "run:             the record cannot be used:", v.Err)
-		fmt.Fprintln(w, "                 nothing is armed and nothing of a run is let through because of it; no ticket is accepted until it is removed: fairy-agent helper-run cancel")
+		fmt.Fprintln(w, "                 nothing is armed and nothing of a run is let through because of it; no ticket is accepted until it is made anew: fairy-agent helper-run cancel")
 		return
 	case !v.Exists:
 		fmt.Fprintln(w, "run:             none (no record)")

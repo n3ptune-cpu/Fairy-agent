@@ -55,6 +55,10 @@ func newRunHelper(t *testing.T, power bool) *runHelper {
 	if resp := h.v3(t, proto.Request{Verb: proto.VerbTrustInit, Trust: &in}); resp.Status != 200 {
 		t.Fatalf("trust_init: %+v", resp)
 	}
+	// the run record this PC has from a boot before (one that is made now would close this boot for tickets)
+	if err := approvaltest.EarlierBoot(files, h.now.Add(-24*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
 	return h
 }
 

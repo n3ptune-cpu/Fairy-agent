@@ -52,7 +52,7 @@ func TestRunRecordFile(t *testing.T) {
 		t.Fatal(err)
 	}
 	for k := range m {
-		if !strings.Contains(" version at arm used last run clock ", " "+k+" ") {
+		if !strings.Contains(" version at arm used last run clock born ", " "+k+" ") {
 			t.Errorf("member %q in the record", k)
 		}
 	}
@@ -151,8 +151,10 @@ func TestRunRecordThatCannotBeUsed(t *testing.T) {
 			os.Mkdir(r.files.RunPath(), 0o700)
 		},
 		"the file check refuses it (another owner)": func(t *testing.T, r *runRig, rec []byte) {
+			// the file that is there belongs to somebody else; one that takes its name later is the writer's own
+			theirs, _ := os.Lstat(r.files.RunPath())
 			r.files.CheckFile = func(path string) error {
-				if path == r.files.RunPath() {
+				if now, err := os.Lstat(path); path == r.files.RunPath() && err == nil && os.SameFile(theirs, now) {
 					return errors.New("belongs to user 4242")
 				}
 				return nil
@@ -185,13 +187,18 @@ func TestRunRecordThatCannotBeUsed(t *testing.T) {
 			runRefused(t, "a ticket", ref, 503, api.CodeRunUnavailable, "")
 			_, ref = r.confirm(goReq(runB, "19-abc", 30, 1500))
 			runRefused(t, "a confirmation", ref, 503, api.CodeRunUnavailable, "")
-			// the administrator's command removes it (a link itself, not what it points to), and runs work again
-			was, changed, err := r.files.RunCancel()
+			// the administrator's command puts a new record in its place (in the place of a link itself, not of
+			// what it points to), and runs work again
+			was, changed, err := r.files.RunCancel(r.stamp())
 			if err != nil || !changed || was.Err == nil {
 				t.Fatalf("helper-run cancel: %+v, %v, %v", was, changed, err)
 			}
-			if exists, _ := r.files.RunRecordCheck(); exists {
-				t.Fatal("still there")
+			if exists, err := r.files.RunRecordCheck(); !exists || err != nil {
+				t.Fatalf("after helper-run cancel there is no record that can be used: %v, %v", exists, err)
+			}
+			// the new record closes this boot for tickets: what the old one knew of them is gone
+			if _, ref := r.w.Arm(r.ticket(runC, time.Second)); ref == nil {
+				t.Error("a ticket armed the machine in the boot in which the record was made anew")
 			}
 			if _, ref := r.confirm(goReq(runB, "19-abc", 30, 1500)); ref != nil {
 				t.Errorf("a confirmation after the repair: %v", ref)
@@ -305,21 +312,35 @@ func TestRunRecordIsWrittenBeforeTheAnswer(t *testing.T) {
 }
 
 // `fairy-agent helper-run cancel` on the machine: the run is over within one look of the service, a
-// countdown that is running is stopped by the service, and nothing arms again. It never makes a record.
+// countdown that is running is stopped by the service, and nothing arms again. With no run on record it
+// changes nothing, and with no record it makes none.
 func TestRunCancelOnTheMachine(t *testing.T) {
 	r := newRunRig(t)
-	if was, changed, err := r.files.RunCancel(); changed || err != nil || was.Exists {
+	before := r.record(t)
+	if was, changed, err := r.files.RunCancel(r.stamp()); changed || err != nil || !was.Exists || was.ID != "" {
+		t.Fatalf("cancel without a run: %+v, %v, %v", was, changed, err)
+	}
+	if !bytes.Equal(before, r.record(t)) {
+		t.Fatal("the command changed a record without a run")
+	}
+	if err := os.Remove(r.files.RunPath()); err != nil {
+		t.Fatal(err)
+	}
+	if was, changed, err := r.files.RunCancel(r.stamp()); changed || err != nil || was.Exists {
 		t.Fatalf("cancel without a record: %+v, %v, %v", was, changed, err)
 	}
 	if exists, _ := r.files.RunRecordCheck(); exists {
 		t.Fatal("the command made a record")
+	}
+	if err := os.WriteFile(r.files.RunPath(), before, 0o600); err != nil {
+		t.Fatal(err)
 	}
 	r.armed(runA)
 	r.ticks(10 * time.Second)
 	if v := r.files.RunShow(); v.ID != runA || v.State != api.RunArmed || v.UpMS != 1020_000 || v.Name != "neptune" || v.Err != nil {
 		t.Fatalf("show: %+v", v)
 	}
-	was, changed, err := r.files.RunCancel()
+	was, changed, err := r.files.RunCancel(r.stamp())
 	if err != nil || !changed || was.ID != runA || was.State != api.RunArmed {
 		t.Fatalf("cancel: %+v, %v, %v", was, changed, err)
 	}
@@ -327,7 +348,7 @@ func TestRunCancelOnTheMachine(t *testing.T) {
 	if r.state() != api.RunCancelled || r.cancels != 0 {
 		t.Fatalf("after the command: %s, %d", r.state(), r.cancels)
 	}
-	if _, changed, _ := r.files.RunCancel(); changed {
+	if _, changed, _ := r.files.RunCancel(r.stamp()); changed {
 		t.Error("a second cancel changed the record")
 	}
 	_, ref := r.w.Arm(r.ticket(runB, r.up()+100*time.Second))
@@ -344,7 +365,7 @@ func TestRunCancelOnTheMachine(t *testing.T) {
 	if len(r.scheduled) != 1 || !r.pending {
 		t.Fatal("no countdown")
 	}
-	if _, changed, err := r.files.RunCancel(); !changed || err != nil {
+	if _, changed, err := r.files.RunCancel(r.stamp()); !changed || err != nil {
 		t.Fatal(err)
 	}
 	r.w.Tick()
@@ -362,7 +383,7 @@ func TestRunCancelOnTheMachine(t *testing.T) {
 	if _, ref := r.confirm(goReq(runA, "19-abc", 30, 1500)); ref != nil {
 		t.Fatal(ref)
 	}
-	if _, changed, err := r.files.RunCancel(); !changed || err != nil {
+	if _, changed, err := r.files.RunCancel(r.stamp()); !changed || err != nil {
 		t.Fatal(err)
 	}
 	r.w.Tick()

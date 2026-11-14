@@ -32,9 +32,10 @@ type runCmdRig struct {
 func newRunCmdRig(t *testing.T) *runCmdRig {
 	t.Helper()
 	r := &runCmdRig{trustRig: newTrustRig(t), now: time.Now()}
-	old := runUptime
+	old, oldBoot := runUptime, runBootID
 	runUptime = func() (time.Duration, error) { return 100 * time.Second, nil }
-	t.Cleanup(func() { runUptime = old })
+	runBootID = func() (string, error) { return "boot-1", nil }
+	t.Cleanup(func() { runUptime, runBootID = old, oldBoot })
 	r.g = approval.NewGate(approval.Options{Files: r.files, EnforcedBy: api.EnforcedByAgent, Runs: true,
 		Now: func() time.Time { return r.now }, Uptime: runUptime, BootID: func() (string, error) { return "boot-1", nil },
 		Log: slog.New(slog.NewTextHandler(io.Discard, nil))})
@@ -59,6 +60,11 @@ func (r *runCmdRig) arm(t *testing.T) {
 	rand.Read(b[:])
 	run, valid, wait, notice := cmdRun, 420, 960, 120
 	text, _ := (api.ApprovalRequest{Verb: api.ApproveRunArm, Run: &run, ValidS: &valid, WaitS: &wait, NoticeS: &notice}).Canonical()
+	if !r.files.RunShow().Exists { // the record this machine has from a boot before (one made now would close this boot)
+		if err := approvaltest.EarlierBoot(r.files, r.now.Add(-24*time.Hour)); err != nil {
+			t.Fatal(err)
+		}
+	}
 	ap := approvaltest.New().Approve(r.now.Add(-200*time.Second), api.MachineEntry{MachineID: approvaltest.MachineID, Challenge: approvaltest.B64(b[:]), Request: text})
 	if _, ref := r.w.Arm(ap); ref != nil {
 		t.Fatal(ref)
@@ -129,7 +135,8 @@ func TestHelperRunShowAndCancel(t *testing.T) {
 	}
 }
 
-// A record that cannot be read: show says so and what it means, cancel removes it.
+// A record that cannot be read: show says so and what it means, cancel puts a new one in its place, which
+// takes no ticket in this boot.
 func TestHelperRunWithARecordThatCannotBeRead(t *testing.T) {
 	r := newRunCmdRig(t)
 	if err := os.WriteFile(r.runPath(), []byte(`{"version":1,"run":{"state":"armed"`), 0o600); err != nil {
@@ -138,11 +145,25 @@ func TestHelperRunWithARecordThatCannotBeRead(t *testing.T) {
 	if code, out, _ := r.cmd("show"); code != 0 || !strings.Contains(out, "the record cannot be used") || !strings.Contains(out, "fairy-agent helper-run cancel") {
 		t.Fatalf("show: %d\n%s", code, out)
 	}
-	if code, out, _ := r.cmd("cancel"); code != 0 || !strings.Contains(out, "was removed") {
+	code, out, _ := r.cmd("cancel")
+	if code != 0 || !strings.Contains(out, "was replaced by a new one") || !strings.Contains(out, "no ticket arms this machine until it has been started anew") {
 		t.Fatalf("cancel: %d\n%s", code, out)
 	}
-	if _, err := os.Lstat(r.runPath()); err == nil {
-		t.Fatal("still there")
+	if v := r.files.RunShow(); !v.Exists || v.Err != nil || v.Born == 0 || v.ID != "" {
+		t.Fatalf("after cancel: %+v", v)
+	}
+	if code, out, _ := r.cmd("show"); code != 0 || strings.Contains(out, "cannot be used") {
+		t.Fatalf("show after cancel: %d\n%s", code, out)
+	}
+	// the service takes no ticket in this boot: the new record is marked with the boot the command read
+	var b [32]byte
+	rand.Read(b[:])
+	run, valid, wait, notice := cmdRun, 420, 960, 120
+	text, _ := (api.ApprovalRequest{Verb: api.ApproveRunArm, Run: &run, ValidS: &valid, WaitS: &wait, NoticeS: &notice}).Canonical()
+	r.now = r.now.Add(5 * time.Second)
+	ap := approvaltest.New().Approve(r.now.Add(-time.Second), api.MachineEntry{MachineID: approvaltest.MachineID, Challenge: approvaltest.B64(b[:]), Request: text})
+	if _, ref := r.w.Arm(ap); ref == nil {
+		t.Fatal("a ticket armed the machine in the boot in which the record was made anew")
 	}
 }
 

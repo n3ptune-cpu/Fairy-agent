@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"time"
 
 	"github.com/n3ptune-cpu/Fairy-agent/pkg/agent/api"
 )
@@ -89,6 +90,17 @@ type runFile struct {
 	// No ticket is taken while the clock is more than RunClockBack behind it (Gate.runClockKeep says when it is
 	// written, and when it follows a clock that was put right backwards).
 	Clock int64 `json:"clock,omitempty"`
+	// Born is when this record was made anew (Unix seconds; 0: it was not): the checker found no record, or the
+	// administrator's command replaced one that could not be read. Whatever an older record knew (the boot of
+	// the last ticket, the ids of the runs) is not in this one, so a record that is made anew closes its boot
+	// for tickets (Arm), and no ticket that was signed before Born is ever taken.
+	Born int64 `json:"born,omitempty"`
+}
+
+// newRunFile is a record made anew at the moment at (see runFile.Born).
+func newRunFile(at bootRef) *runFile {
+	arm := at
+	return &runFile{Version: 1, At: at, Arm: &arm, Clock: at.Wall, Born: at.Wall}
 }
 
 func (r bootRef) valid() bool {
@@ -98,7 +110,7 @@ func (r bootRef) valid() bool {
 // validate says whether a record read from disk can be believed: every value is one this program writes.
 func (f *runFile) validate() error {
 	no := errors.New("not a run record of this program")
-	if f.Version != 1 || !f.At.valid() || (f.Arm != nil && !f.Arm.valid()) || len(f.Used) > runUsedMax || f.Clock < 0 || f.Clock >= 1e11 {
+	if f.Version != 1 || !f.At.valid() || (f.Arm != nil && !f.Arm.valid()) || len(f.Used) > runUsedMax || f.Clock < 0 || f.Clock >= 1e11 || f.Born < 0 || f.Born >= 1e11 {
 		return no
 	}
 	for _, id := range f.Used {
@@ -249,27 +261,12 @@ func (f Files) writeRun(rec *runFile) (sum [32]byte, err error) {
 	return sha256.Sum256(b), nil
 }
 
-// removeRun deletes the run record (the administrator's command, for a record that cannot be read).
-func (f Files) removeRun() error {
-	dir := filepath.Dir(f.runPath())
-	if f.CheckDir != nil {
-		if err := f.CheckDir(dir); err != nil {
-			return fmt.Errorf("the folder of the run record is not safe: %w", err)
-		}
-	}
-	if err := os.Remove(f.runPath()); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return err
-	}
-	syncDir(dir)
-	return nil
-}
-
 // RunView is the run record as `fairy-agent helper-run` shows it.
 type RunView struct {
 	Path   string
 	Exists bool
 	// Err: the file is there and cannot be used (nothing is armed or let through because of it, and no new
-	// ticket is accepted until it is removed).
+	// ticket is accepted until it is made anew: fairy-agent helper-run cancel).
 	Err error
 	// The live run ("" ID: none).
 	ID, State, Name, To      string
@@ -278,7 +275,8 @@ type RunView struct {
 	LastID, LastState        string
 	WrittenWall, WrittenUpMS int64
 	// Clock: the latest time this machine's clock showed when the checker looked (Unix seconds; 0: not known).
-	Clock int64
+	// Born: when the record was made anew (0: it was not).
+	Clock, Born int64
 }
 
 func (f Files) runView(rec *runFile) RunView {
@@ -286,7 +284,7 @@ func (f Files) runView(rec *runFile) RunView {
 	if rec == nil {
 		return v
 	}
-	v.WrittenWall, v.WrittenUpMS, v.Clock = rec.At.Wall, rec.At.UpMS, rec.Clock
+	v.WrittenWall, v.WrittenUpMS, v.Clock, v.Born = rec.At.Wall, rec.At.UpMS, rec.Clock, rec.Born
 	if l := rec.Last; l != nil {
 		v.LastID, v.LastState = l.ID, l.State
 	}
@@ -312,19 +310,47 @@ func (f Files) RunShow() RunView {
 	return v
 }
 
+// RunStamp is the moment of the administrator's command, as the record notes it: the id of this boot (""
+// where the command cannot read one), the clock, and how long the system has been up (0: not known).
+type RunStamp struct {
+	BootID string
+	Now    time.Time
+	Up     time.Duration
+}
+
+func (s RunStamp) ref() bootRef {
+	id := s.BootID
+	if len(id) > 128 {
+		id = ""
+	}
+	return bootRef{BootID: id, Wall: s.Now.Unix(), UpMS: max(s.Up.Milliseconds(), 0)}
+}
+
 // RunCancel is `fairy-agent helper-run cancel`, on the machine, by an administrator: it takes the live run out
 // of the record, so the machine does not switch itself off and lets nothing of the run through any more. The
-// mark stays (the run is on record as cancelled), so no ticket arms the machine again in this boot. The
-// service looks at the record every second while a run is live and stops a countdown that is already running.
-// It never creates a record: with no file, or no live run in it, it changes nothing. A record that cannot be
-// read is removed (nothing was armed because of it; what it remembered of earlier runs is lost).
+// run is on record as cancelled, and the boot is closed for tickets by the command itself (the mark of at),
+// whether the service is running or not. The service looks at the record every second while a run is live and
+// stops a countdown that is already running.
+//
+// It never deletes the record. A record that cannot be read is replaced by one made anew (runFile.Born):
+// nothing was armed because of the old one, what it remembered of earlier runs is lost, and so the new one
+// closes this boot for tickets and takes no ticket that was signed before this moment. With no file, or no
+// live run in a good one, it changes nothing (the service makes the record when it is missing).
 // It returns what the record held before, and whether it was changed.
-func (f Files) RunCancel() (was RunView, changed bool, err error) {
+func (f Files) RunCancel(at RunStamp) (was RunView, changed bool, err error) {
 	rec, _, exists, rerr := f.readRun()
 	was = f.runView(rec)
 	was.Exists, was.Err = exists, rerr
 	if rerr != nil {
-		if err := f.removeRun(); err != nil {
+		_, err := f.writeRun(newRunFile(at.ref()))
+		if st, serr := os.Lstat(f.runPath()); err != nil && serr == nil && st.IsDir() {
+			// a folder under the record's name: nothing takes the name of a folder in one step. An empty one is
+			// removed (the folder's own check is writeRun's); a folder with something in it stays, with the error.
+			if os.Remove(f.runPath()) == nil {
+				_, err = f.writeRun(newRunFile(at.ref()))
+			}
+		}
+		if err != nil {
 			return was, false, err
 		}
 		return was, true, nil
@@ -332,7 +358,8 @@ func (f Files) RunCancel() (was RunView, changed bool, err error) {
 	if rec == nil || rec.Run == nil {
 		return was, false, nil
 	}
-	rec.Last, rec.Run = &runLast{ID: rec.Run.ID, State: api.RunCancelled}, nil
+	mark := at.ref()
+	rec.Last, rec.Run, rec.Arm = &runLast{ID: rec.Run.ID, State: api.RunCancelled}, nil, &mark
 	if _, err := f.writeRun(rec); err != nil {
 		return was, false, err
 	}
