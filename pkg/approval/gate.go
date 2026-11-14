@@ -61,6 +61,14 @@ type Options struct {
 	Rand io.Reader
 	// Log gets one line for every accepted and every refused approval (nil: slog.Default()).
 	Log *slog.Logger
+	// Runs: this gate takes run tickets and run confirmations and keeps the run record (run.go): the Windows
+	// helper, and the agent on a system where it is the checker and can read the uptime (Linux). It needs
+	// Uptime, and it is never set together with ReadOnly.
+	Runs bool
+	// MinDelayS is the shortest delay a shutdown may be scheduled with on this machine
+	// (power_control.min_delay_s): the notice of a run ticket and the shutdown delay of a run confirmation
+	// are never shorter.
+	MinDelayS int
 }
 
 // Refusal is a request the gate does not let through: the HTTP status, the code and the text of the answer.
@@ -71,6 +79,10 @@ type Refusal struct {
 	// RetryAfterS, when not 0, is in how many seconds the same request can be sent again with a chance of
 	// another answer (too_many_challenges): the answer's Retry-After header and its "retry_after_s".
 	RetryAfterS int
+	// Reason, when not empty, is the "reason" member of the answer: which rule refused a run ticket or a run
+	// confirmation (api.RunReason..., or the reason word of a refused approval). Only POST /run/arm, /run/go
+	// and the challenge for run_go set it.
+	Reason string
 }
 
 func (r *Refusal) Error() string { return r.Code + ": " + r.Msg }
@@ -101,6 +113,7 @@ type Gate struct {
 	fanAt    time.Time // when the approval that opened the fan window was accepted (zero: closed)
 	epoch    uint64    // counts the changes of the trust file's content: what was given under one does not count under the next
 	bootUsed bool      // the one shutdown after boot was accepted in this boot (by this process, or recorded)
+	rs       runMem    // the run record as this process knows it (run.go)
 }
 
 // Pass is a request the gate let through (Admit). Whoever carries the request out tells the pass when it was
@@ -235,6 +248,9 @@ func (g *Gate) status() api.ApprovalStatus {
 		st.Error = g.loadErr
 	}
 	st.EnforcedBy = g.o.EnforcedBy
+	if g.o.Runs && !g.o.ReadOnly {
+		st.Runs, st.Run = api.ApprovalRuns, g.runStatus()
+	}
 	return st
 }
 
@@ -341,6 +357,9 @@ func (g *Gate) Challenge(req api.ApprovalRequest) (api.ChallengeResponse, *Refus
 	if err != nil {
 		return api.ChallengeResponse{}, &Refusal{Status: 400, Code: "bad_request", Msg: "not a request that can be approved: " + err.Error()}
 	}
+	if req.Verb == api.ApproveRunArm { // a ticket answers no challenge: nothing it could be mistaken for is ever open
+		return api.ChallengeResponse{}, &Refusal{Status: 400, Code: "bad_request", Msg: "a run ticket (run_arm) answers no challenge: it is sent to POST " + api.PathRunArm}
+	}
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	g.reload(false)
@@ -367,6 +386,15 @@ func (g *Gate) Challenge(req api.ApprovalRequest) (api.ChallengeResponse, *Refus
 		if _, ok := g.bootWindow(req, now); ok {
 			out.Reason = "boot_shutdown"
 			return out, nil
+		}
+	case req.Verb == api.ApproveRunGo:
+		// what Go would refuse before it looks at an approval is refused here, before anybody is asked for one
+		_, up, ref := g.runGate()
+		if ref == nil {
+			ref = g.goCheck(req, now, up)
+		}
+		if ref != nil {
+			return out, ref
 		}
 	}
 	c := challenge{request: canon, issued: now, ttl: challengeTTL(req)}
@@ -467,6 +495,9 @@ func (g *Gate) Precheck(req api.ApprovalRequest, sent bool) *Refusal {
 	if req.Verb == api.ApproveTrustSet {
 		return notCarriedOut()
 	}
+	if isRunVerb(req.Verb) {
+		return notARun()
+	}
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	canon, on, ref := g.enforced(req)
@@ -502,6 +533,9 @@ func (g *Gate) Admit(req api.ApprovalRequest, ap *api.Approval) (*Pass, *Refusal
 	}
 	if req.Verb == api.ApproveTrustSet { // not a request that is carried out: Init checks its own approval
 		return nil, notCarriedOut()
+	}
+	if isRunVerb(req.Verb) { // Arm and Go check their own
+		return nil, notARun()
 	}
 	g.mu.Lock()
 	defer g.mu.Unlock()

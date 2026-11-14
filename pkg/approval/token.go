@@ -51,6 +51,9 @@ type claims struct {
 	Sub  string
 	Name string // preferred_username, cleaned; for the log only
 	Kid  string
+	// Iat is the token's "iat", set once it was read from a token whose signature holds (the zero time before
+	// that). A run ticket is compared with the moment this machine started by it (Gate.Arm).
+	Iat time.Time
 }
 
 // verifyToken checks the compact ID token tok against t. nonce is the nonce of the entry list it must carry,
@@ -152,6 +155,7 @@ func verifyToken(tok string, t *Trust, nonce string, now, issued time.Time) (cla
 	if !ok {
 		return c, ReasonClaims
 	}
+	c.Iat = iat
 	if iat.After(now.Add(ClockAllowance)) || iat.Before(issued.Add(-ClockAllowance)) {
 		return c, ReasonClock // the token was made for this challenge, so it cannot be older than it
 	}
