@@ -25,7 +25,9 @@ func TestRunSelfOff(t *testing.T) {
 		t.Fatalf("when the wait is over: %+v", r.scheduled)
 	}
 	s := r.scheduled[0]
-	want := "Fairy: this PC was started for an update by neptune and nobody confirmed it. Shutdown in 120 seconds. To keep it on: shutdown /a"
+	want := "Fairy: this PC was started for an update by neptune and nobody confirmed it. It shuts down in 120 seconds. " +
+		"To keep it on: press Cancel for this PC in the Fairy panel, or here press Windows+R and type: shutdown, a space, a slash and the letter a. " +
+		"(Administrators can also run: fairy‑agent helper‑run cancel)"
 	if s.delay != 120*time.Second || s.message != want || s.who != "run "+runA || s.up != 1020*time.Second {
 		t.Errorf("scheduled %+v", s)
 	}
@@ -68,8 +70,23 @@ func TestRunSelfOff(t *testing.T) {
 // The name in the notice is the cleaned preferred_username of whoever signed the ticket; its hyphens cannot
 // begin a word that looks like a switch.
 func TestRunNotice(t *testing.T) {
-	if got := approval.RunNotice("test-admin -x", 30); got != "Fairy: this PC was started for an update by test‑admin ‑x and nobody confirmed it. Shutdown in 30 seconds. To keep it on: shutdown /a" {
+	want := "Fairy: this PC was started for an update by test‑admin ‑x and nobody confirmed it. It shuts down in 30 seconds. " +
+		"To keep it on: press Cancel for this PC in the Fairy panel, or here press Windows+R and type: shutdown, a space, a slash and the letter a. " +
+		"(Administrators can also run: fairy‑agent helper‑run cancel)"
+	if got := approval.RunNotice("test-admin -x", 30); got != want {
 		t.Errorf("%q", got)
+	}
+	// no word that looks like a switch, and no ASCII hyphen (the rule of every notice: agent.PowerMessage)
+	for _, name := range []string{"test-admin -x", "a /s b", "", "x/y"} {
+		got := approval.RunNotice(name, 120)
+		for _, w := range strings.Fields(got) {
+			if strings.HasPrefix(w, "-") || strings.HasPrefix(w, "/") {
+				t.Errorf("the notice for %q has the word %q", name, w)
+			}
+		}
+		if strings.ContainsAny(got, "-/") {
+			t.Errorf("the notice for %q has an ASCII hyphen or a slash: %q", name, got)
+		}
 	}
 	if got := approval.RunNotice("", 120); !strings.Contains(got, "by an administrator and") {
 		t.Errorf("%q", got)

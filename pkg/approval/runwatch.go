@@ -84,14 +84,22 @@ func (w *RunWatch) Run(ctx context.Context) {
 }
 
 // RunNotice is the text of the self-off's notice (Windows shows it with its countdown): fixed, but for the
-// name of who signed the ticket (cleaned when the token was read; its hyphens are written as U+2011, as in
-// every notice of Fairy's, see agent.PowerMessage) and the seconds.
+// name of who signed the ticket (cleaned when the token was read) and the seconds.
+//
+// It keeps the rule of every notice Fairy hands to Windows (agent.PowerMessage): no word of it begins with
+// "-" or "/", and it holds no ASCII hyphen at all; every hyphen is written as U+2011, which looks the same. A
+// real PC cut a notice at such a word. So the way to stop the shutdown on the PC itself is said in words
+// ("shutdown, a space, a slash and the letter a"), and the agent's own command is spelled with U+2011: a
+// person reads "fairy-agent helper-run cancel" and types it. The test of the rule is in package agent, next
+// to the rule (TestRunNoticePassesTheRuleOfEveryNotice).
 func RunNotice(name string, noticeS int) string {
 	if name == "" {
 		name = "an administrator"
 	}
-	return fmt.Sprintf("Fairy: this PC was started for an update by %s and nobody confirmed it. Shutdown in %d seconds. To keep it on: shutdown /a",
-		strings.ReplaceAll(name, "-", "‑"), noticeS)
+	text := fmt.Sprintf("Fairy: this PC was started for an update by %s and nobody confirmed it. It shuts down in %d seconds. "+
+		"To keep it on: press Cancel for this PC in the Fairy panel, or here press Windows+R and type: shutdown, a space, a slash and the letter a. "+
+		"(Administrators can also run: fairy-agent helper-run cancel)", strings.ReplaceAll(name, "/", " "), noticeS)
+	return strings.ReplaceAll(text, "-", "\u2011")
 }
 
 // Tick is one look. With no live run it does nothing (and reads no file).
