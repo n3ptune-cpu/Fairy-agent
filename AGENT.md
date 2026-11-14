@@ -1822,15 +1822,19 @@ keeps the latest time the machine's clock showed when the checker looked (`"cloc
 starts and stops, every ten minutes of uptime when it moved by a minute, and with every other write of the
 record), and no ticket is judged while the clock is more than two minutes behind it: `409 run_refused`,
 `clock_back`; the machine is not armed and stays on. That value only goes up, with one exception: once the
-machine has been up for 600 s (no ticket can arm it in this boot any more) the record takes the clock as it
-is. This is how a PC recovers **by itself** whose clock was wrong ahead (a clock battery, a firmware default,
-another system that keeps the hardware clock in another zone) and was put right: in that boot no ticket is
-taken; after ten minutes of uptime the record follows the clock (log: `... the clock is taken as it is from
-here on`); from the next start tickets are taken again. A PC whose clock is wrong ahead at every start, until
-its time service corrects it, is never armed while that lasts; the reason says so. What this cannot see: a
-machine that has not run at all since the ticket was signed and starts with its clock set into the ticket's
-minutes (nothing on it has seen a later time), and somebody who holds the clock back through a whole boot of
-ten minutes or more and the start after it.
+machine has been up for 600 s (no ticket can arm it in this boot any more) AND the checker has seen the clock
+behind that value at every look, once a second, for 600 s without a break, the record takes the clock as it
+is. One look with the clock back changes nothing, whenever it is made (the stop of the service is such a
+look). This is how a PC recovers **by itself** whose clock was wrong ahead (a clock battery, a firmware
+default, another system that keeps the hardware clock in another zone) and was put right: in that boot no
+ticket is taken; after the clock has stayed where it is for ten minutes of that boot the record follows it
+(log: `... the clock is taken as it is from here on`); from the next start tickets are taken again. A PC that
+is switched off before those ten minutes are over recovers in the first boot that lasts that long. A PC whose
+clock is wrong ahead at every start, until its time service corrects it, is never armed while that lasts; the
+reason says so. What this cannot see: a machine that has not run at all since the ticket was signed and
+starts with its clock set into the ticket's minutes (nothing on it has seen a later time), and somebody who
+holds the clock back for ten minutes on end while the machine is up and the checker runs, and through the
+start after it.
 
 **The boot.** A live run counts in the boot it was accepted in and in no other, and the mark that closes a boot
 for tickets is the mark of that boot. Which boot this is, is told by an id and nothing else: on Linux the

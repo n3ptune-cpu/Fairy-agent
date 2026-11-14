@@ -284,3 +284,79 @@ func TestWatchReadsNothingEverySecond(t *testing.T) {
 		}
 	}
 }
+
+// The clock on record follows the clock down only on a machine that has been up for ten minutes AND whose
+// checker has seen the clock behind at every look, once a second, for ten minutes without a break. It used to
+// follow at ONE look on a machine up for ten minutes: the clock set back for a moment and the service stopped
+// in that moment (POST /helper/stop does that with the control token) lowered it, and with the next start
+// showing that time a ticket that had been held back for 25 minutes armed the machine (second review of the
+// runs, U4; AGENT.md said "through a whole boot of ten minutes or more").
+func TestClockOnRecordDoesNotFollowOneLookWithTheClockBack(t *testing.T) {
+	for _, look := range []string{"the service stops", "the service starts again and looks", "the service stops and starts again five times", "nine minutes of looks"} {
+		r := newRunRig(t)
+		t0 := r.Now()
+		tk := r.signed(t0, ticketEntry(approvaltest.MachineID, runA, 600, 960, 120)) // signed now, never presented
+		r.ticks(25 * time.Minute)
+		seen := r.files.RunClockSeen()
+		if seen < t0.Add(20*time.Minute).Unix() {
+			t.Fatalf("clock on record %d", seen)
+		}
+		r.jump(t0.Add(10 * time.Second).Sub(r.Now())) // the clock is set back into the ticket's minutes
+		switch look {
+		case "the service stops":
+			r.g.RunStop()
+		case "the service starts again and looks":
+			r.restart()
+			r.w.Tick()
+			r.g.RunStop()
+		case "the service stops and starts again five times":
+			for i := 0; i < 5; i++ {
+				r.g.RunStop()
+				r.restart()
+				r.ticks(100 * time.Second)
+			}
+			r.g.RunStop()
+		case "nine minutes of looks":
+			r.ticks(9 * time.Minute)
+			r.g.RunStop()
+		}
+		if got := r.files.RunClockSeen(); got < seen {
+			t.Errorf("%s: the clock on record went back from %d to %d", look, seen, got)
+		}
+		r.jump(t0.Add(10 * time.Second).Sub(r.Now()))
+		r.reboot(5*time.Second, 20*time.Second) // the next start shows that time
+		_, ref := r.w.Arm(tk)
+		runRefused(t, look+": the ticket that was held back, at the next start", ref, 409, api.CodeRunRefused, api.RunReasonClockBack)
+	}
+}
+
+// What is left, and what AGENT.md says: the clock held back for ten minutes on end while the machine is up
+// and the checker looks, and through the start after it. That is also how a machine recovers by itself whose
+// clock was wrong ahead and was put right. A moment in which the clock was not behind starts the ten minutes
+// again.
+func TestClockOnRecordFollowsAClockThatStaysBack(t *testing.T) {
+	r := newRunRig(t)
+	r.ticks(25 * time.Minute)
+	seen := r.files.RunClockSeen()
+	r.jump(-20 * time.Minute)
+	r.ticks(5 * time.Minute)
+	r.jump(20 * time.Minute) // right for a moment
+	r.ticks(2 * time.Second)
+	r.jump(-20 * time.Minute)
+	r.ticks(9 * time.Minute) // 14 minutes behind in all, 9 without a break
+	if got := r.files.RunClockSeen(); got < seen {
+		t.Fatalf("the clock on record went back after 9 minutes without a break: %d to %d", seen, got)
+	}
+	r.ticks(62 * time.Second)
+	got := r.files.RunClockSeen()
+	if d := got - r.Now().Unix(); d < -60 || d > 60 {
+		t.Fatalf("after ten minutes behind without a break the clock on record is %d, the clock %d", got, r.Now().Unix())
+	}
+	if !strings.Contains(r.log.String(), "the clock is taken as it is from here on") {
+		t.Errorf("the log does not say that the record follows the clock:\n%s", r.log.String())
+	}
+	r.reboot(time.Minute, 20*time.Second)
+	if _, ref := r.w.Arm(r.ticket(runA, time.Second)); ref != nil {
+		t.Errorf("a ticket after the next start: %v", ref)
+	}
+}

@@ -43,6 +43,10 @@ const RunClockBack = 2 * time.Minute
 // runClockEvery is how much uptime passes between two looks at the clock for the record (runClockKeep).
 const runClockEvery = 10 * time.Minute
 
+// runClockDown is for how much uptime, without a break, the checker must have seen the clock behind the clock
+// on record before the record follows it down (runClockKeep).
+const runClockDown = api.RunArmUptimeS * time.Second
+
 // runRetryEvery is how long the service waits, by the uptime, before it tries by itself to write a record again
 // that it could not write (runRetry). A request that needs the record does not wait for it.
 const runRetryEvery = 15 * time.Second
@@ -75,6 +79,10 @@ type runMem struct {
 	// clockKept: this process has looked at the clock for the record (runClockKeep); clockAt: at which uptime last.
 	clockKept bool
 	clockAt   time.Duration
+	// behind: at every look of this process since the uptime behindFrom the clock was behind the clock on record
+	// (runClockSeen). The record follows the clock down only after runClockDown of that (runClockKeep).
+	behind     bool
+	behindFrom time.Duration
 }
 
 // armText says some reasons differently for a ticket (the others are refusalText's).
@@ -100,7 +108,7 @@ var runText = map[string]string{
 	api.RunReasonOver:          "this run was armed or confirmed on this machine before and is over here (cancelled, finished, or the machine was started again since)",
 	api.RunReasonBeforeRecord:  "the ticket was signed before this machine's run record was made anew (the record was missing, removed, or could not be read): what the machine knew of earlier tickets went with it, so a ticket from before is not taken. Start the run again",
 	api.RunReasonClockBack: "this machine's clock is more than " + strconv.Itoa(int(RunClockBack/time.Second)) + " s behind a time it showed before, and a ticket is judged by the clock: none is taken, the machine stays on. " +
-		"If the clock was wrong before and is right now, this ends by itself: once the machine has been up for " + strconv.Itoa(api.RunArmUptimeS) + " s the clock is taken as it is, and tickets are taken again after the next start",
+		"If the clock was wrong before and is right now, this ends by itself: once the machine has been up for " + strconv.Itoa(api.RunArmUptimeS) + " s and the clock has stayed where it is for that long, the clock is taken as it is, and tickets are taken again after the next start",
 }
 
 func runOff() *Refusal {
@@ -363,13 +371,17 @@ func (g *Gate) runLiveOnDisk() bool {
 // minutes on a machine with trust, and nothing on one without.
 //
 // Mostly the value only goes up. It follows the clock DOWN in one case: the machine has been up for
-// api.RunArmUptimeS or longer, so no ticket can arm it in this boot any more. That is how a machine recovers by
-// itself whose clock was wrong ahead (a clock battery, a firmware default, a system that keeps the hardware
-// clock in another zone) and was put right: in the boot in which the clock went back no ticket is taken (the
-// safe side: it is not armed and stays on); once it has been up for ten minutes the record takes the clock as
-// it is; from the next start on tickets are taken again. Somebody who sets the clock back to use an old ticket
-// gains nothing in that boot, and to gain something in a later one he must hold the clock back through a whole
-// boot of ten minutes or more and the start after it.
+// api.RunArmUptimeS or longer, so no ticket can arm it in this boot any more, AND this process has seen the
+// clock behind the record's at every look, once a second, for runClockDown without a break (runClockSeen).
+// That is how a machine recovers by itself whose clock was wrong ahead (a clock battery, a firmware default,
+// a system that keeps the hardware clock in another zone) and was put right: in the boot in which the clock
+// went back no ticket is taken (the safe side: it is not armed and stays on); once the clock has stayed where
+// it is for ten minutes of that boot the record takes it as it is; from the next start on tickets are taken
+// again. Somebody who sets the clock back to use an old ticket gains nothing in that boot, and to gain
+// something in a later one he must hold the clock back for ten minutes on end while the machine is up and the
+// checker runs, and through the start after it. One look with the clock back does nothing, whenever it is
+// made: the record followed at a single look once (the stop of the service is one, and the control token can
+// ask for it), which let a ticket through that had been held back for 25 minutes (second review, U4).
 //
 // Caller holds g.mu, after g.reload.
 func (g *Gate) runClockKeep(now time.Time, up time.Duration, force bool) {
@@ -377,7 +389,7 @@ func (g *Gate) runClockKeep(now time.Time, up time.Duration, force bool) {
 	if g.o.ReadOnly || !g.o.Runs || g.state != api.ApprovalRequired {
 		return
 	}
-	if !force && m.clockKept && up >= m.clockAt && up < m.clockAt+runClockEvery {
+	if !force && m.clockKept && up >= m.clockAt && up < m.clockAt+runClockEvery && !g.runClockIsDown(up) {
 		return
 	}
 	m.clockKept, m.clockAt = true, up
@@ -386,19 +398,38 @@ func (g *Gate) runClockKeep(now time.Time, up time.Duration, force bool) {
 	if m.bad != "" || m.dirty || m.file == nil {
 		return
 	}
+	g.runClockSeen(now, up)
 	was, want := m.file.Clock, max(m.file.Clock, now.Unix())
-	if up >= api.RunArmUptimeS*time.Second {
+	if g.runClockIsDown(up) {
 		want = now.Unix()
 	}
 	if d := want - was; m.exists && d > -60 && d < 60 {
 		return
 	}
 	if want < was {
-		g.o.Log.Warn("approval: this machine's clock is behind a time it showed before; it has been up too long to be armed in this boot, so the clock is taken as it is from here on",
+		g.o.Log.Warn("approval: this machine's clock is behind a time it showed before and has stayed so for ten minutes; the machine has been up too long to be armed in this boot, so the clock is taken as it is from here on",
 			"clock_was", was, "clock", want, "uptime_s", int(up/time.Second))
 	}
 	m.file.Clock = want
 	g.runWrite(now, up)
+}
+
+// runClockSeen notes at a look whether the clock is behind the clock on record, and since which uptime it has
+// been so at every look of this process. Nothing is read or written for it. Caller holds g.mu.
+func (g *Gate) runClockSeen(now time.Time, up time.Duration) {
+	m := &g.rs
+	switch {
+	case m.file == nil || now.Unix() > m.file.Clock-60: // not behind (a minute is no difference: runClockKeep)
+		m.behind = false
+	case !m.behind || up < m.behindFrom:
+		m.behind, m.behindFrom = true, up
+	}
+}
+
+// runClockIsDown reports whether the record may follow the clock down at this look (runClockKeep).
+func (g *Gate) runClockIsDown(up time.Duration) bool {
+	m := &g.rs
+	return up >= api.RunArmUptimeS*time.Second && m.behind && up-m.behindFrom >= runClockDown
 }
 
 // runEnsure makes the record anew when there is none: the service looks for the first time on a machine with
@@ -933,7 +964,8 @@ func (g *Gate) runPoll() (live *runLive, up time.Duration, stop bool) {
 		g.reload(false)
 		g.runRead(now, up)
 	}
-	if m.file != nil && m.clockKept && up >= m.clockAt && up < m.clockAt+runClockEvery {
+	g.runClockSeen(now, up)
+	if m.file != nil && m.clockKept && up >= m.clockAt && up < m.clockAt+runClockEvery && !g.runClockIsDown(up) {
 		// not now (the common case, once a second: nothing is read, and nobody is asked which boot this is)
 	} else if g.reload(false); ok && g.state == api.ApprovalRequired && g.bootID() != "" {
 		g.runSync(now, up) // first the file as it is now: a record that is there is never made anew over
