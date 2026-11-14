@@ -88,3 +88,7 @@ func serviceRunning(ctx context.Context) error {
 	}
 	return nil
 }
+
+// UpdaterRunning is for the Windows helper, which cannot see the agent's updater (update_windows.go). Here the
+// agent asks its own (Updater.Busy).
+func UpdaterRunning() bool { return false }

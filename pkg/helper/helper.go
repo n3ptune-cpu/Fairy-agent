@@ -47,6 +47,12 @@ type Parts struct {
 	// power (other than cancel) and apply_update run only with an approval the helper has verified itself. The
 	// agent is not trusted with any part of it. nil: no check (tests of the other parts).
 	Approval *approval.Gate
+	// Runs carries the runs of Approval out (approval.RunWatch): it takes the ticket and the confirmation,
+	// counts the wait and switches the PC off through Power. nil: New builds it from Approval, Power and
+	// Updating (none without power control: the self-off needs it).
+	Runs *approval.RunWatch
+	// Updating reports whether the updater service is installing an update (nil: never): a self-off waits for it.
+	Updating func() bool
 	Audit    *slog.Logger // the audit log (helper.log); nil = slog.Default()
 	Now      func() time.Time
 }
@@ -73,7 +79,37 @@ func New(p Parts) *Server {
 	}
 	l := proto.NewLimiter(proto.ReadsPerMinute, proto.ChangesPerMinute, time.Minute)
 	l.Now = p.Now
+	if p.Runs == nil && p.Approval != nil && p.Power != nil {
+		p.Runs = approval.NewRunWatch(p.Approval, runHooks(p.Power, p.Updating))
+	}
 	return &Server{p: p, limit: l, started: p.Now()}
+}
+
+// runHooks are the parts of the machine a run needs, from the helper's power part: what is pending is what
+// that part remembers; the self-off is its ordinary delayed shutdown (Windows counts it down and shows its own
+// notice with the text; the action is remembered like every other, shown as pending and cancelled the same
+// way); and the stop of a countdown is its Cancel.
+func runHooks(power agent.PowerExec, updating func() bool) approval.RunHooks {
+	return approval.RunHooks{
+		Pending: func() bool {
+			src, ok := power.(interface{ PendingAction() (agent.Pending, bool) })
+			if !ok {
+				return false
+			}
+			_, pending := src.PendingAction()
+			return pending
+		},
+		Shutdown: func(delay time.Duration, message, who string) error {
+			if n, ok := power.(interface {
+				ScheduleNotice(action string, delay time.Duration, message, who string) error
+			}); ok {
+				return n.ScheduleNotice("shutdown", delay, message, who)
+			}
+			return power.Schedule("shutdown", delay, message)
+		},
+		Cancel:   power.Cancel,
+		Updating: updating,
+	}
 }
 
 // FromConfig builds the parts config.yaml switches on: Core Temp (sensors.coretemp), IPMI through Windows
@@ -87,8 +123,12 @@ func New(p Parts) *Server {
 func FromConfig(cfg *agent.Config, version string, audit *slog.Logger) (Parts, func(), error) {
 	agent.HideDeviceSecrets(cfg)
 	p := Parts{Version: version, Audit: audit}
+	// The helper is the one that takes run tickets and confirmations on Windows and keeps the run record (in its
+	// own folder, next to the trust file). The notice of a self-off and the delay of a run's shutdown are never
+	// shorter than the shortest delay it accepts for any shutdown.
 	p.Approval = approval.NewGate(approval.Options{Files: agent.ApprovalFiles(cfg), EnforcedBy: api.EnforcedByHelper,
-		Uptime: agent.SystemUptime, BootID: agent.SystemBootID, Log: audit})
+		Uptime: agent.SystemUptime, BootID: agent.SystemBootID, Log: audit,
+		Runs: true, MinDelayS: max(cfg.PowerControl.MinDelayS, proto.MinDelayS)})
 	closer := func() {}
 	if cfg.Sensors.CoreTemp {
 		p.CoreTemp = collect.ReadCoreTemp
@@ -112,6 +152,7 @@ func FromConfig(cfg *agent.Config, version string, audit *slog.Logger) (Parts, f
 	}
 	if cfg.SelfUpdate.Enabled {
 		p.Updater = agent.StartUpdaterService
+		p.Updating = agent.UpdaterRunning
 	}
 	return p, closer, nil
 }
@@ -131,6 +172,10 @@ func coreTemps(read func() ([]byte, string, error)) []collect.Temp {
 	}
 	return d.Temps()
 }
+
+// Runs is the watch of this helper's runs (nil: it keeps none). The service does not use it; it is for whoever
+// drives a helper in a test and wants the watch to look now instead of in a second.
+func (s *Server) Runs() *approval.RunWatch { return s.p.Runs }
 
 // Features are what this helper serves (api.FeatureCoreTemp ...).
 func (s *Server) Features() []string {
@@ -162,6 +207,11 @@ func (s *Server) Start(ctx context.Context) {
 		if st := s.p.Approval.Status(); st.State != api.ApprovalOff {
 			s.p.Audit.Info("passkey approval of fan, power and update requests", "state", st.State, "issuer", st.Issuer, "machine_id", st.MachineID, "error", st.Error)
 		}
+	}
+	if s.p.Runs != nil {
+		// A run from before this helper restarted (the update restarts it) is taken over from the record now:
+		// the wait goes on by the uptime, and what was left of a confirmation is what is left.
+		go s.p.Runs.Run(ctx)
 	}
 }
 
@@ -240,6 +290,18 @@ func args(r proto.Request) string {
 	if r.DelayS != nil {
 		a = append(a, fmt.Sprintf("delay_s=%d", *r.DelayS))
 	}
+	if r.Run != nil {
+		a = append(a, "run="+*r.Run)
+	}
+	if r.To != nil {
+		a = append(a, "to="+*r.To)
+	}
+	if r.ShutdownDelayS != nil {
+		a = append(a, fmt.Sprintf("shutdown_delay_s=%d", *r.ShutdownDelayS))
+	}
+	if r.WithinS != nil {
+		a = append(a, fmt.Sprintf("within_s=%d", *r.WithinS))
+	}
 	return strings.Join(a, " ")
 }
 
@@ -255,8 +317,8 @@ func (s *Server) off(verb string) *proto.Response {
 	switch {
 	case (verb == proto.VerbFanSet || verb == proto.VerbFanMode) && s.p.Fan == nil:
 		resp = disabled("fan control")
-	case verb == proto.VerbPower && s.p.Power == nil:
-		resp = disabled("power control")
+	case (verb == proto.VerbPower || verb == proto.VerbRunArm || verb == proto.VerbRunGo) && s.p.Power == nil:
+		resp = disabled("power control") // a run ends with a shutdown, the self-off or the confirmed one
 	case verb == proto.VerbApplyUpdate && s.p.Updater == nil:
 		resp = disabled("self-update")
 	default:
@@ -266,7 +328,7 @@ func (s *Server) off(verb string) *proto.Response {
 }
 
 func refusal(ref *approval.Refusal) proto.Response {
-	return proto.Response{Status: ref.Status, Code: ref.Code, Error: ref.Msg, RetryAfterS: ref.RetryAfterS}
+	return proto.Response{Status: ref.Status, Code: ref.Code, Error: ref.Msg, RetryAfterS: ref.RetryAfterS, Reason: ref.Reason}
 }
 
 // The passkey check of a request that changes something. While trust is set, fan_set, fan_mode, power (other
@@ -297,7 +359,13 @@ func (s *Server) precheck(r proto.Request) *proto.Response {
 	if !ok {
 		return nil
 	}
-	if ref := s.p.Approval.Precheck(ar, r.Approval != nil); ref != nil {
+	var ref *approval.Refusal
+	if r.Run != nil && r.Approval == nil { // it names a confirmed run in the place of an approval
+		_, ref = s.p.Approval.RunCovers(ar, *r.Run)
+	} else {
+		ref = s.p.Approval.Precheck(ar, r.Approval != nil)
+	}
+	if ref != nil {
 		resp := refusal(ref)
 		return &resp
 	}
@@ -311,7 +379,13 @@ func (s *Server) admit(r proto.Request) (*approval.Pass, *proto.Response) {
 	if !ok {
 		return nil, nil
 	}
-	pass, ref := s.p.Approval.Admit(ar, r.Approval)
+	var pass *approval.Pass
+	var ref *approval.Refusal
+	if r.Run != nil && r.Approval == nil { // the one update, or the one shutdown, of the confirmed run is used up here
+		_, ref = s.p.Approval.AdmitRun(ar, *r.Run)
+	} else {
+		pass, ref = s.p.Approval.Admit(ar, r.Approval)
+	}
 	if ref != nil {
 		resp := refusal(ref)
 		return nil, &resp
@@ -353,7 +427,7 @@ func (s *Server) challenge(r proto.Request) proto.Response {
 	}
 	ar, _ := proto.ApprovalRequestOf(r)
 	if s.p.Approval == nil {
-		if ar.Verb == api.ApproveTrustSet {
+		if ar.Verb == api.ApproveTrustSet || ar.Verb == api.ApproveRunGo {
 			return proto.Fail(proto.CodeDisabled, "this helper has no approval check")
 		}
 		canon, _ := ar.Canonical()
@@ -395,6 +469,24 @@ func (s *Server) dispatch(ctx context.Context, r proto.Request) proto.Response {
 			return refusal(ref)
 		}
 		return proto.OK(st)
+	case proto.VerbRunArm, proto.VerbRunGo:
+		if resp := s.off(r.Verb); resp != nil {
+			return *resp
+		}
+		if s.p.Runs == nil {
+			return proto.Fail(proto.CodeDisabled, "this helper has no approval check")
+		}
+		var ans api.RunAnswer
+		var ref *approval.Refusal
+		if r.Verb == proto.VerbRunArm {
+			ans, ref = s.p.Runs.Arm(r.Approval)
+		} else {
+			ans, ref = s.p.Runs.Go(proto.RunGoRequestOf(r), r.Approval)
+		}
+		if ref != nil {
+			return refusal(ref)
+		}
+		return proto.OK(ans)
 	case proto.VerbCoreTempRead:
 		if s.p.CoreTemp == nil {
 			return disabled("Core Temp")
@@ -477,8 +569,18 @@ func (s *Server) power(r proto.Request) proto.Response {
 	}
 	action := *r.Action
 	if action == "cancel" {
+		// A cancel also ends the run this PC is in, armed, counting down or confirmed, and nothing arms it again
+		// in this boot. First the run, so that its self-off is not scheduled behind this cancel; then the
+		// pending action, which may be that self-off.
+		var runErr error
+		if s.p.Runs != nil {
+			_, runErr = s.p.Runs.Cancel("a cancel of the pending power action")
+		}
 		if err := s.p.Power.Cancel(); err != nil {
 			return proto.Fail(proto.CodeFailed, "cancel: "+short(err))
+		}
+		if runErr != nil { // not "cancelled": a restart of this service would find the run again
+			return proto.Fail(proto.CodeFailed, "cancel: the pending action is stopped, but the end of the run could not be written down ("+short(runErr)+"); cancel again")
 		}
 		return proto.OK(proto.PowerData{Action: "cancel"})
 	}

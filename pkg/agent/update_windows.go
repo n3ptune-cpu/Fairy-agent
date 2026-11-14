@@ -268,6 +268,14 @@ func UpdaterStopped() (bool, error) {
 	return err == nil && st == windows.SERVICE_STOPPED, err
 }
 
+// UpdaterRunning reports whether the updater service is installing an update at this moment (false also when
+// that cannot be told). The helper asks it when the wait of a run is over: no self-off while an update is
+// being installed.
+func UpdaterRunning() bool {
+	stopped, err := UpdaterStopped()
+	return err == nil && !stopped
+}
+
 // Staged reports whether an update is staged (the agent wrote request.json into the stage).
 func Staged(cfg *Config) bool {
 	stage, _ := UpdatePaths(cfg)

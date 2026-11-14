@@ -327,6 +327,12 @@ func (r *RememberedPower) ScheduleBy(action string, delay time.Duration, who str
 	return r.schedule(action, delay, PowerMessage(action, who, delay), who)
 }
 
+// ScheduleNotice is Schedule with a message of the caller's own and the requester on record: the self-off of
+// a run (approval.RunNotice), which is in everything else the ordinary delayed shutdown.
+func (r *RememberedPower) ScheduleNotice(action string, delay time.Duration, message, who string) error {
+	return r.schedule(action, delay, message, cleanWho(who))
+}
+
 func (r *RememberedPower) schedule(action string, delay time.Duration, message, who string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
