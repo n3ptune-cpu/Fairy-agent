@@ -1184,7 +1184,8 @@ The rules:
   <token>" http://<agent>:9101/metrics`), in a member the row has only then:
   `"missing": {"voltage": "the sensor is unavailable"}`. The names in it are the row's (`voltage`, `current`,
   `energy_kwh_total`), and the texts are fixed ones, the table below; nothing Home Assistant sent is repeated
-  in them. A panel up to build 14 does not show `missing`; it shows the empty value.
+  in them. A panel that does not know `missing` shows the empty value and nothing else; the panel builds 13
+  and 14, which have the columns for volts, amperes and kWh, are such panels.
 - **When the watts fail, the source fails**, with the watts' text from the table above, and the other sensors
   are not asked: a volts value without watts is not shown.
 - **A refusal is the whole source's.** When Home Assistant answers 401 or 403 for one of the optional sensors
@@ -1641,7 +1642,7 @@ the machines are up.
 
 **What you must know before you install it.**
 
-* **Nothing changes until a panel that knows runs is installed** (panel build 15). For approvals, power and
+* **Nothing changes until a panel build that knows runs is installed.** For approvals, power and
   updates this agent answers every request an older panel sends exactly as 0.8.0 did; `"proto"` in the
   `approval` block stays 2, and the only thing an older panel could see is one new member in that block,
   `"runs": 1`, which it does not read. (The other new thing in 0.9.0 has nothing to do with runs and shows
@@ -1705,7 +1706,9 @@ accepts it when **all** of this holds:
   may differ);
 * the machine has been up for less than 600 s, by its uptime;
 * it started (its clock minus its uptime) not before the ticket was signed, less those 60 s. A machine that
-  was already running when you confirmed can never be armed;
+  was already running when you confirmed is not armed, as long as its clock is right; with a clock that is
+  wrong ahead it can be, and then only while it has been up for less than those 600 s (the second row of
+  "Runs: the numbers" below);
 * the ticket was not signed before the run record was made anew (`before_record`, see "The record");
 * this boot is not closed for tickets (`already_armed`): no ticket was accepted in it (one per boot, whatever
   became of it), no cancel ended a run in it, and the run record was not made anew in it; and no ticket of
@@ -1838,7 +1841,12 @@ start after it.
 
 **The boot.** A live run counts in the boot it was accepted in and in no other, and the mark that closes a boot
 for tickets is the mark of that boot. Which boot this is, is told by an id and nothing else: on Linux the
-kernel's (`/proc/sys/kernel/random/boot_id`); on Windows a value the **helper** keeps, because Windows has
+kernel's (`/proc/sys/kernel/random/boot_id`; a **Linux container** has its host's kernel and with it its
+host's id, so for an agent in a container a restart of the container is not a new boot by the id: what is
+left is the rule that an uptime smaller than on record is another boot, which holds where the container shows
+its own uptime and not where it shows the host's. There a live run outlives a restart of the container, as it
+outlives a restart of the service, and a ticket arms the container only while the host itself has just
+started. Runs are meant for an agent on the machine itself); on Windows a value the **helper** keeps, because Windows has
 none a service can read: 16 random bytes in the registry key `HKLM\SOFTWARE\FairyAgentBoot`, which is a
 *volatile* key (in memory only, never written to disk: gone after a restart or a full shutdown, kept through
 a restart of the services and through sleep). The helper makes it when it first needs it in a boot, with its
@@ -1897,10 +1905,24 @@ not follow the clock down as `"clock"` does). Two things follow. A record that w
 **ahead** refuses every ticket (`before_record`) until the clock has got there: hours for a clock that was
 hours ahead; for one that was years ahead, set the clock right, delete `approval-run.json` (as root / an
 administrator) and start the machine again: the service makes a new record with the right time, and from the
-start after that tickets are taken. And what this cannot see: a record that is lost while the clock is
-already **behind** a ticket's signature, and stays there until the next start: nothing on the machine then
-knows that ticket or a later time, and a ticket that was used before can arm it once more (the random test
-found this; it takes an administrator twice, for the file and for the clock, on the machine itself).
+start after that tickets are taken.
+
+What the record cannot see, and what that takes: **administrator rights on the PC itself, once.** One act is
+enough and the clock need not be touched: an **older copy of the record put back** (a copy made before the
+ticket was taken; a restore from a backup or a snapshot) within the time in which the ticket can be
+presented (eleven minutes at the most, eight with the panel's defaults). The copy does not know that ticket, and after the next start of the machine the same ticket arms
+it once more. The other way takes two acts: the record deleted while the clock is already behind the
+ticket's signature and stays there until the next start (nothing on the machine then knows the ticket or a
+later time). The worst result of either is **one more self-switch-off of a PC that has just started**: with
+the ticket's own wait, announced by the notice, and cancellable in the panel or at the PC as every one is.
+Never an update, never a shutdown without the notice, nothing on a PC that has been up for ten minutes, and
+nothing once the ticket's time is over. Whoever can do this can switch the PC off without Fairy.
+
+**One look that cannot read the record ends a live run for good**, also a confirmed one: the record counts as
+no record at that look, and when it can be read again the live run in it is one this service no longer holds,
+which is ended, not taken back. The machine stays on, the confirmation is spent, and the run is started again
+from the panel. (Windows: a program that holds the file open without sharing for a second can cause this; the
+record's own readers share it.) This is the safe side and stays so.
 
 **Runs: the numbers.** Worst cases, by the machine's own limits (a text outside them is not accepted); the
 panel's defaults in brackets. All waits are counted on the uptime.
