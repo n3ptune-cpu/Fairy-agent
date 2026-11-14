@@ -195,7 +195,7 @@ func (f Files) readRun() (rec *runFile, sum [32]byte, exists bool, err error) {
 			return nil, sum, true, fmt.Errorf("the run record is not safe: %w", err)
 		}
 	}
-	fh, err := os.Open(path)
+	fh, err := openShared(path) // nobody who reads the record keeps a new one from taking its name
 	if err != nil {
 		return nil, sum, true, err
 	}
@@ -220,7 +220,34 @@ func (f Files) readRun() (rec *runFile, sum [32]byte, exists bool, err error) {
 // writeRun writes the run record: the complete content goes into a temporary file in the same (checked)
 // folder, is synced, and takes the record's name in one step, replacing what is there (a link under that name
 // is replaced, never followed). It returns the hash of what was written.
-func (f Files) writeRun(rec *runFile) (sum [32]byte, err error) { return f.writeRunOver(rec, nil) }
+func (f Files) writeRun(rec *runFile) (sum [32]byte, err error) {
+	return f.writeRunOver(rec, nil, runRenameWait)
+}
+
+// How long a writer of the record keeps trying when the new file cannot take the record's name because
+// somebody has the record open at that moment (Windows; renameBusy): the service a moment (it holds its lock,
+// and tries again at its next step anyway), the administrator's command a few seconds (it has one try, and a
+// person waits for it).
+var (
+	runRenameWait = 200 * time.Millisecond
+	runCancelWait = 3 * time.Second
+	runRenameStep = 20 * time.Millisecond
+	// the two calls, for the tests
+	runRename     = os.Rename
+	runRenameBusy = renameBusy
+)
+
+// renameFor is os.Rename, tried again every runRenameStep for at most wait while it fails as renameBusy.
+func renameFor(from, to string, wait time.Duration) error {
+	deadline := time.Now().Add(wait)
+	for {
+		err := runRename(from, to)
+		if err == nil || !runRenameBusy(err) || !time.Now().Before(deadline) {
+			return err
+		}
+		time.Sleep(runRenameStep)
+	}
+}
 
 // errRunChanged: the record on disk is not the one the writer last read or wrote: somebody else wrote it in
 // between (the administrator's command). Nothing was written.
@@ -237,7 +264,7 @@ type runOnDisk struct {
 // nothing is written (errRunChanged), and the writer reads the record again. The look and the rename are two
 // steps with nothing slow between them; the administrator's command, which is the other writer, looks again
 // after it wrote (RunCancel).
-func (f Files) writeRunOver(rec *runFile, over *runOnDisk) (sum [32]byte, err error) {
+func (f Files) writeRunOver(rec *runFile, over *runOnDisk, wait time.Duration) (sum [32]byte, err error) {
 	path := f.runPath()
 	dir := filepath.Dir(path)
 	if _, err := os.Lstat(dir); errors.Is(err, os.ErrNotExist) {
@@ -274,7 +301,12 @@ func (f Files) writeRunOver(rec *runFile, over *runOnDisk) (sum [32]byte, err er
 		err = f.Prepare(tmp.Name())
 	}
 	if err == nil && over != nil {
-		now, rerr := os.ReadFile(path)
+		var now []byte
+		fh, rerr := openShared(path)
+		if rerr == nil {
+			now, rerr = io.ReadAll(io.LimitReader(fh, maxRunFile+1))
+			fh.Close()
+		}
 		switch {
 		case errors.Is(rerr, os.ErrNotExist):
 			if over.exists {
@@ -285,7 +317,7 @@ func (f Files) writeRunOver(rec *runFile, over *runOnDisk) (sum [32]byte, err er
 		}
 	}
 	if err == nil {
-		err = os.Rename(tmp.Name(), path)
+		err = renameFor(tmp.Name(), path, wait)
 	}
 	if err != nil {
 		_ = os.Remove(tmp.Name())
@@ -376,12 +408,12 @@ func (f Files) RunCancel(at RunStamp) (was RunView, changed bool, err error) {
 	was = f.runView(rec)
 	was.Exists, was.Err = exists, rerr
 	if rerr != nil {
-		_, err := f.writeRun(newRunFile(at.ref()))
+		_, err := f.writeRunOver(newRunFile(at.ref()), nil, runCancelWait)
 		if st, serr := os.Lstat(f.runPath()); err != nil && serr == nil && st.IsDir() {
 			// a folder under the record's name: nothing takes the name of a folder in one step. An empty one is
 			// removed (the folder's own check is writeRun's); a folder with something in it stays, with the error.
 			if os.Remove(f.runPath()) == nil {
-				_, err = f.writeRun(newRunFile(at.ref()))
+				_, err = f.writeRunOver(newRunFile(at.ref()), nil, runCancelWait)
 			}
 		}
 		if err != nil {
@@ -398,7 +430,7 @@ func (f Files) RunCancel(at RunStamp) (was RunView, changed bool, err error) {
 	for try := 0; ; try++ {
 		mark := at.ref()
 		rec.Last, rec.Run, rec.Arm = &runLast{ID: rec.Run.ID, State: api.RunCancelled}, nil, &mark
-		if _, err := f.writeRun(rec); err != nil {
+		if _, err := f.writeRunOver(rec, nil, runCancelWait); err != nil {
 			return was, false, err
 		}
 		time.Sleep(runCancelSettle)

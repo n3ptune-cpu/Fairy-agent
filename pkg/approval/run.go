@@ -252,7 +252,7 @@ func (g *Gate) runWrite(now time.Time, up time.Duration) error {
 	m.file.Clock = max(m.file.Clock, now.Unix()) // never back by a write that is made for something else (runClockKeep)
 	// over what this process knows to be there, and over nothing else: a cancel that the administrator's
 	// command wrote in this moment is not written over (the next look takes it)
-	sum, err := g.o.Files.writeRunOver(m.file, &runOnDisk{exists: m.exists, sum: m.sum})
+	sum, err := g.o.Files.writeRunOver(m.file, &runOnDisk{exists: m.exists, sum: m.sum}, runRenameWait)
 	if errors.Is(err, errRunChanged) {
 		g.o.Log.Warn("approval: the run record was changed on the machine in this moment; nothing was written over it", "error", firstLine(err.Error()))
 		return err

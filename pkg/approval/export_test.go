@@ -77,3 +77,12 @@ func SetRunCancelSettle(d time.Duration) time.Duration {
 	runCancelSettle = d
 	return old
 }
+
+// SetRunRename puts rename and busy in the place of os.Rename and of "it failed because the file is open", and
+// sets how long the service and the administrator's command keep trying; the returned function puts all of it
+// back.
+func SetRunRename(rename func(from, to string) error, busy func(error) bool, service, command, step time.Duration) (restore func()) {
+	r, b, s, c, st := runRename, runRenameBusy, runRenameWait, runCancelWait, runRenameStep
+	runRename, runRenameBusy, runRenameWait, runCancelWait, runRenameStep = rename, busy, service, command, step
+	return func() { runRename, runRenameBusy, runRenameWait, runCancelWait, runRenameStep = r, b, s, c, st }
+}
