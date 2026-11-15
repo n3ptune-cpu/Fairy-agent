@@ -1051,6 +1051,111 @@ whose agent reads a plug through Home Assistant (skip it where none does). One s
 
 The two lines of L1 (or what was there instead), and for L3 the line of `check-config`.
 
+## 16. 0.10.0: the sockets of a plug that is in Home Assistant (none of this has run on Windows)
+
+What it is: AGENT.md, "Switching a plug's sockets". All of it was written and tested on Linux against a
+made-up Home Assistant; nothing has been switched in a real one yet, from any system. On Windows the agent
+checks the approval of a switch **itself**, with the helper's trust file (the helper is not involved: it never
+uses the network). Without a panel that knows sockets, a PC can show: the block loads, the sockets are read,
+and every way a switch is refused. An ACCEPTED switch needs the panel (later).
+
+Only for a PC whose `config.yaml` has a `type: homeassistant` entry (skip the section where none does), after
+it was updated to 0.10.0 (L1 shows the build number). `$fa` as at the top, `$ctl`, `$read`, `$base` as in
+section 13. One step is one line, in **Windows PowerShell as Administrator**; after `->` is what a good answer
+looks like. `desk-bar`, `ch1`, `switch.desk_bar_socket_1` and `HA_SWITCH_TOKEN` are EXAMPLE VALUES: use the
+ids of your own entry. **Use a socket with something harmless on it** (a lamp). No step here switches it, and
+M7 is the proof of that.
+
+### A. Shown, nothing switched
+
+* M1 **[KEY]** **The block and the sockets load, with switching off.** Make a second Home Assistant user and
+  a long-lived access token for it, then `& $fa secret set HA_SWITCH_TOKEN` (asks for the token, no echo).
+  Add to `config.yaml`, at the top level, `home_assistant:` with `url:` (the same address the entry has),
+  `token_env: HA_SWITCH_TOKEN`, `switching: false`, `switch_allow: []`, `feeds_self: []`; and to the
+  `type: homeassistant` entry `sockets:` with one line `- {id: ch1, name: "Lamp", switch_entity: switch.desk_bar_socket_1}`
+  (AGENT.md has the whole example). Then `& $fa check-config`
+  -> after `config OK` and the line of the entry (`power source "desk-bar": ...`):
+  `home assistant: host <host> (http), token: present (HA_SWITCH_TOKEN), switching: off (sockets are shown, nothing is ever switched)`,
+  `socket "desk-bar/ch1" (Lamp): switch.desk_bar_socket_1, shown only (not in home_assistant.switch_allow)`,
+  `never switched (feeds_self): none`. The token itself is nowhere in the output.
+* M2 **The path of `ca_file`** (only with an `https://` address): write it without quotes or in single
+  quotes, `ca_file: C:\ProgramData\fairy-agent\ha.pem`. -> `check-config` shows `(https)` in the line of M1. In
+  double quotes it is a YAML error and nothing is changed.
+* M3 **[KEY]** **The sockets are read.** `Restart-Service fairy-agent`, wait 15 s, then
+  `$s = ((curl.exe -s -H "Authorization: Bearer $read" "$base/metrics" | ConvertFrom-Json).power_sources | Where-Object { $_.sockets }).sockets; $s`
+  -> `id : ch1`, `name : Lamp`, `state : on` (or `off`: what the socket is), `switchable : False`,
+  `why : switching_off`, `tag : <22 characters>`, `error :` empty; **no** entity id. The watts of the entry
+  are shown as before. `(curl.exe -s -H "Authorization: Bearer $read" "$base/metrics" | ConvertFrom-Json).features.plug_switching`
+  -> `False`. A `state : unknown` has its reason in `error`.
+* M4 **[KEY]** **With switching off, the route does not exist.**
+  `Set-Content -Path "C:\fairy-selfbuilt\switch.json" -Value ('{"source":"desk-bar","socket":"ch1","to":"off","tag":"' + $s[0].tag + '"}') -Encoding ASCII`
+  `curl.exe -s -w " [%{http_code}]" -H "Authorization: Bearer $ctl" --data-binary "@C:\fairy-selfbuilt\switch.json" "$base/plug/switch"`
+  -> `{"code":"plug_switching_disabled", ...} [404]`, and the lamp did not change.
+
+### B. Switching on in the config, and every refusal
+
+* M5 **Allow the one socket and turn switching on.**
+  `& $fa config set home_assistant.switch_allow "switch.desk_bar_socket_1"`, then
+  `& $fa config set home_assistant.switching true`, then `& $fa check-config`
+  -> the socket's line ends with `can be switched`; with an `http://` address there is
+  `note: switching goes over http: ...`; and on a PC without a trust file
+  `note: this machine has no passkey check: every switch request is refused (approval_off) until the check is turned on.`
+  Then `Restart-Service fairy-agent` and
+  `Select-String -Path C:\ProgramData\fairy-agent\logs\agent.log -Pattern 'plug sockets' | Select-Object -Last 3`
+  -> a line `plug sockets (home assistant)` with `sockets=1 can_be_switched=1 ... switching=true`, and each
+  note once more as a warning. Run M3's first line again (`$s` has the row).
+* M6 **[KEY]** **A PC without a trust file refuses** (do this one on a PC or VM where `& $fa helper-trust show`
+  says that no trust is set; on a PC with trust go on with M7).
+  `$s` -> `switchable : False`, `why : approval_off`.
+  `Set-Content -Path "C:\fairy-selfbuilt\challenge-socket.json" -Value ('{"verb":"socket_set","source":"desk-bar","socket":"ch1","to":"off","tag":"' + $s[0].tag + '"}') -Encoding ASCII`
+  `curl.exe -s -w " [%{http_code}]" -H "Authorization: Bearer $ctl" --data-binary "@C:\fairy-selfbuilt\challenge-socket.json" "$base/approval/challenge"`
+  -> `{"code":"approval_off", ...} [409]`. The same for M4's second line -> `[409]` with `"code":"approval_off"`.
+  The lamp did not change. (A shutdown on this PC still runs without an approval, as before: only a switch
+  is refused without the check.)
+* M7 **[KEY]** **With trust set (section 13 B): no approval, no switch, and Home Assistant is not asked.**
+  `(curl.exe -s -H "Authorization: Bearer $read" "$base/metrics" | ConvertFrom-Json).approval`
+  -> `agent_checks` names `socket_set` (and `enforced_by : helper` as before). `$s` -> `switchable : True`,
+  `why :` empty. M4's two lines again
+  -> `{"code":"approval_required", ...} [403]`. The second and third line of M6 (they write the file and ask
+  for a challenge)
+  -> `{"needed":true,"request":"socket_set source=desk-bar socket=ch1 to=off tag=<22 characters>","challenge":"<43 characters>", ...} [200]`.
+  The lamp did not change, and Home Assistant's logbook has no entry for the switch from the second user.
+  `Get-Content C:\ProgramData\fairy-agent\logs\agent.log -Tail 5`
+  -> a line with `msg="plug: refused"`, `reason=approval_required`, `source=desk-bar socket=ch1 to=off` and
+  the socket's name and switch; the token is not in it.
+* M8 **A changed socket is not the socket that was asked for.** In M4's file, change the first letter of
+  the tag to another letter and send it -> `[409]` with `"code":"socket_changed"`. With `"socket":"nope"` -> `[404]` with
+  `"code":"unknown_socket"`. With one more member, `"entity":"switch.other"` -> `[400]`: a request cannot name
+  an entity.
+* M9 **[KEY]** **feeds_self wins.** `& $fa config set home_assistant.feeds_self "switch.desk_bar_socket_1"`,
+  `& $fa check-config`
+  -> the socket's line ends with `never switched (home_assistant.feeds_self)`,
+  `never switched (feeds_self): switch.desk_bar_socket_1`, and
+  `note: switch.desk_bar_socket_1 is in switch_allow and in feeds_self: feeds_self counts, it is never switched.`
+  `Restart-Service fairy-agent`, then M4's second line -> `[403]` with `"code":"feeds_self"`. Put
+  `feeds_self` back to what is true for this PC afterwards (`[]` only if no socket feeds this PC, Home
+  Assistant's machine or the network between them).
+* M10 **The token's variable empty.** Take the line `HA_SWITCH_TOKEN=...` out of the `env_file`,
+  `& $fa check-config` -> `token: missing (HA_SWITCH_TOKEN is not set: ...)` and a note that the token the
+  power sources read with is never used in its place. `Restart-Service fairy-agent` -> `$s` (M3's first line)
+  shows `state : unknown`, `why : no_token`, the entry's watts are still read, and M4's second line answers
+  `[409]` with `"code":"no_token"`. Store the token again (`& $fa secret set HA_SWITCH_TOKEN`) and restart.
+
+Not testable yet: a switch that is accepted (`plug: switching`, then `plug: switched` or `plug: not confirmed`
+in `agent.log`, `approval: accepted request="socket_set ..."` next to it). It needs a real token from Pocket
+ID, which only the panel obtains. When the panel knows sockets: switch the lamp off and on from the socket's
+row, confirm each with the passkey, and send those lines.
+
+### Going back to 0.9.0
+
+**An agent up to 0.9.0 does not start with the block `home_assistant` or with `sockets:` in its file.** Take
+both out of `config.yaml` before an older agent is put back.
+
+### What to send back
+
+The output of M1, M3, M4 and M5, of M6 or M7 (whichever fits the PC), of M9, and the `plug` lines of
+`agent.log`. Look through it first: no token belongs in it, and none should be there.
+
 ## Rollback (back to build 10 / v0.4.4)
 
 0.4.4 does not know the helper or the new account, so remove 0.5's services first. Config and tokens stay, the

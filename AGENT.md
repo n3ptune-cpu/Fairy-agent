@@ -6,8 +6,8 @@ Tailscale network. It is one file, needs nothing else installed, and uses very l
 well under 1 % of one CPU core while the panel watches it every second.
 
 Out of the box it only **reads**. It can also restart or shut down the machine, control a Supermicro server's
-fans, wake other computers on the network, or update itself when you press Update in the panel, but only if you
-switch each of those on yourself.
+fans, wake other computers on the network, switch the sockets of plugs that are in Home Assistant, or update
+itself when you press Update in the panel, but only if you switch each of those on yourself.
 
 The panel itself is [Fairy-dashboard](https://github.com/n3ptune-cpu/Fairy-dashboard). How to build fairy-agent
 from source, and a map of the code, are in [README.md](README.md).
@@ -20,7 +20,8 @@ from source, and a map of the code, are in [README.md](README.md).
 * [Install on Linux](#install-on-linux)
   * [Check your Linux agents: are the sandbox lines still on?](#check-your-linux-agents-are-the-sandbox-lines-still-on)
 * [Point the panel at it](#point-the-panel-at-it)
-* [Optional features](#optional-features): fan control, shutdown / reboot, Wake-on-LAN, plugs and UPSes
+* [Optional features](#optional-features): fan control, shutdown / reboot, Wake-on-LAN, plugs and UPSes,
+  [switching a plug's sockets](#switching-a-plugs-sockets-home_assistant-0100)
 * [Updates (the panel's Update button)](#updates-the-panels-update-button)
 * [What it can and cannot show](#what-it-can-and-cannot-show)
 * [Core Temp (optional, Windows)](#core-temp-optional-windows): CPU core temperatures and watts on Windows
@@ -1009,7 +1010,9 @@ A plug the agent cannot ask itself (a Tuya plug, a Zigbee plug, anything else) c
 Home Assistant on the same network knows it: the agent asks that Home Assistant for the plug's power sensor.
 It reads the watts, and the plug's volts, amperes and energy total when the entry names the sensors for them
 ([below](#volts-amperes-and-the-energy-total-voltage_entity-current_entity-energy_entity)), and nothing else.
-Nothing is switched, and nothing is written to Home Assistant.
+This type switches nothing and writes nothing to Home Assistant. (From 0.10.0 an agent can also switch a
+plug's sockets when its own `config.yaml` turns that on; that is another part of the agent with a token of
+its own: [Switching a plug's sockets](#switching-a-plugs-sockets-home_assistant-0100).)
 `type: homeassistant` belongs in an agent's `power_sources:`; do not put it into the panel's own
 `power_sources:` (the long wait after a refused token exists only in the agent).
 
@@ -1048,6 +1051,11 @@ begins a YAML escape, and the agent does not start (`found unknown escape charac
 > with it, in the hands of anybody who can read that file. So: use a Home Assistant (or at least a Home
 > Assistant user made only for Fairy) that has nothing but the plugs in it, keep the token only in `env_file`,
 > and delete the token in Home Assistant when the agent no longer needs it.
+>
+> With `home_assistant.switching: true` (0.10.0) the agent sends two requests more,
+> `POST /api/services/switch/turn_on` and `.../turn_off` for a socket you allowed, and reads the states of the
+> sockets' switches. Those go with **another** token, the one `home_assistant.token_env` names, never with the
+> token of an entry; see [Switching a plug's sockets](#switching-a-plugs-sockets-home_assistant-0100).
 
 Setting it up:
 
@@ -1223,6 +1231,185 @@ An agent up to 0.8.0 does not know the three members and does not start with an 
 voltage_entity not found`): update the agent first, then add them, and take them out again before you put an
 agent of 0.8.0 or older back on this machine.
 
+#### Switching a plug's sockets (`home_assistant:`, 0.10.0)
+
+From 0.10.0 the panel can show whether a socket of a plug is on or off and, **when you turn that on in this
+machine's `config.yaml`**, switch it. A socket is the outlet of an ordinary plug, or one of the outlets of a
+powerbar, that Home Assistant has a `switch.` entity for. This is off by default and stays off until you
+change it at the machine. Nothing in the panel can turn it on.
+
+The rules, all of them enforced by the agent on the machine that talks to Home Assistant:
+
+* **Every switch needs a passkey approval** (Pocket ID), for on and for off, checked by this agent itself. One
+  approval is one socket in one direction, and it is used up by the switch. There is no "for the next 30
+  seconds", no group, no "all off".
+* **A machine without the passkey check refuses.** The other requests that can need an approval (fans, power,
+  update) run unchecked on a machine that has no trust file, as they always did. A switch does not: without
+  the check it is answered `409 approval_off`. Set the check up first
+  ([Passkey approval](#passkey-approval-of-fan-power-and-update-requests-pocket-id)).
+* **Only what you allowed, by its exact id.** A socket is switched only if its switch is in `switch_allow`.
+  There are no patterns and no "everything on this plug".
+* **A socket that feeds this machine, Home Assistant or the network is never switched**, on or off: its switch
+  goes into `feeds_self`, which wins over `switch_allow`. A plug whose entry says `system_hint: self` is
+  treated the same without being listed. If the agent switched off the socket it hangs on itself, or the one
+  Home Assistant or the network gear hangs on, nothing could switch it on again from the panel.
+* **Only on and off.** The agent sends `switch.turn_on` or `switch.turn_off` and nothing else: never
+  `toggle`, never another kind of entity (no light, lock, cover, script), never a service somebody names.
+* **The address, the token, the two lists and the on/off of all this are in `config.yaml` on this machine
+  only.** No request can set or change them, and a request never names an entity or an address: it names the
+  ids below (`desk-bar`, `ch1`).
+
+```yaml
+env_file: /etc/fairy-agent/secrets.env     # HA_TOKEN=... and HA_SWITCH_TOKEN=..., written by `fairy-agent secret set`
+
+home_assistant:                            # at the top level, once
+  url: "http://192.168.1.10:8123"          # Home Assistant itself, the same address the plugs' entries have
+  token_env: HA_SWITCH_TOKEN               # the NAME of the variable that holds the token for the sockets
+  # ca_file: /etc/fairy-agent/ha.pem       # https only
+  switching: false                         # default. true: POST /plug/switch answers on this machine
+  switch_allow: []                         # exact switch.* entity ids that may be switched (at most 32)
+  feeds_self: []                           # exact switch.* entity ids that are NEVER switched (at most 32)
+  min_gap_s: 10                            # one socket is switched at most this often (5 to 3600)
+
+power_sources:
+  - id: desk-bar                           # with sockets: at most 40 characters
+    type: homeassistant
+    name: "Monitor powerbar"
+    url: "http://192.168.1.10:8123"
+    token_env: HA_TOKEN                    # the token the watts are read with, as before
+    entity: sensor.desk_bar_power
+    sockets:                               # none, one, or up to 8
+      - {id: ch1, name: "Left monitor", switch_entity: switch.desk_bar_socket_1}
+      - {id: ch2, name: "Lamp",         switch_entity: switch.desk_bar_socket_2}
+```
+
+A socket has an `id` (1 to 16 lower-case letters, digits and dashes, unique in its entry), a `name` (at most
+48 bytes; say what is plugged in, because the panel shows this name when it asks you to confirm; without one
+the id is shown) and a `switch_entity` (an id that begins with `switch.`; one switch belongs to one socket in
+the whole file). An entry with sockets must have the same address as `home_assistant.url`.
+
+**Two tokens.** The entries read their sensors with the token their own `token_env` names, as before. The
+states of the sockets are read, and the sockets are switched, with the token `home_assistant.token_env`
+names. Neither is ever used in the other's place: while the block's variable is empty, the sockets show
+`unknown`, every switch is refused (`409 no_token`), `check-config` says so, and the watts are read as
+always. Make a **second Home Assistant user** for the block's token: its token can then be deleted without
+losing the readings, and Home Assistant's own logbook shows which switches came from Fairy. (One variable for
+both is accepted, and `check-config` notes it.) Like every Home Assistant token, this one can do whatever its
+user can; what Fairy does with it is limited by what the agent can send, which is the two requests above
+and `GET /api/states/<a switch>`.
+
+Setting it up, in this order:
+
+1. **Update the agent to 0.10.0 first.** An agent up to 0.9.0 does not start with the block or with `sockets:`
+   in its file (`field home_assistant not found`). Take both out again before an older agent is put back.
+2. **Add the block with `switching: false`, and the sockets.** Store the second token
+   (`sudo fairy-agent secret set HA_SWITCH_TOKEN`), then `sudo fairy-agent check-config` and restart. The
+   panel now shows each socket with its state and a lock. Nothing can be switched.
+3. **Answer which sockets must never be switched**, in writing: `feeds_self` with the switch of every socket
+   that feeds this machine, the machine Home Assistant runs on, or the network between them (the switch, the
+   router, a UPS that feeds any of those). If there is none, write `feeds_self: []`. `switching: true` does
+   not load without this line. If you can, also disable such a switch entity in Home Assistant itself: then
+   no token can switch it, whatever Fairy's lists say.
+4. **Allow one socket** with something harmless on it (`switch_allow`), set `switching: true`, and look at
+   what `check-config` says before you restart:
+
+   ```
+   home assistant: host 192.168.1.10:8123 (http), token: present (HA_SWITCH_TOKEN), switching: on, 10 s between two switches of one socket
+   socket "desk-bar/ch1" (Left monitor): switch.desk_bar_socket_1, shown only (not in home_assistant.switch_allow)
+   socket "desk-bar/ch2" (Lamp): switch.desk_bar_socket_2, can be switched
+   socket "server-corner/main" (Server corner): switch.server_corner_socket, never switched (home_assistant.feeds_self)
+   never switched (feeds_self): switch.server_corner_socket
+   note: switching goes over http: the token and every request cross that network unencrypted, and whoever is on it can read and change them. Use https with ca_file where you can.
+   ```
+
+   It names, every time, which sockets can be switched and which never are. Read it before every restart
+   after a change to these lists.
+
+The same settings from the command line (they are checked like `check-config` before anything is written):
+
+```sh
+sudo fairy-agent config set home_assistant.feeds_self "switch.server_corner_socket"
+sudo fairy-agent config set home_assistant.switch_allow "switch.desk_bar_socket_2"
+sudo fairy-agent config set home_assistant.switching true
+sudo systemctl restart fairy-agent
+```
+
+Switching counts as a control feature: with `switching: true` the agent needs its control token, like fan
+control or power control.
+
+**What a switch does**, step by step (`POST /plug/switch`, sent by the panel after you confirmed with your
+passkey):
+
+1. The agent checks the request against its own config: the socket exists, is in `switch_allow`, is not in
+   `feeds_self`, and is still the socket you looked at (its name and its switch have not been changed since).
+2. It checks the approval without using it up. A request without a good approval ends here; Home Assistant
+   has not been asked anything.
+3. It reads the socket's state from Home Assistant. A socket that Home Assistant does not reach
+   (`unavailable`) or has no state for is refused now, and your approval is still whole: Home Assistant would
+   answer a switch request for such a socket with "ok" and do nothing.
+4. It uses the approval up and sends **one** request, `turn_on` or `turn_off`. It is never sent a second
+   time, also not when no answer comes.
+5. It reads the state again, after half a second and then every second for ten seconds, and answers with
+   what it saw: `confirmed: true` when the socket shows the new state, `confirmed: false` when Home Assistant
+   took the request and the socket did not follow in that time (a plug that reports through its maker's
+   cloud can take longer; it may still follow). The agent never reports "switched" from Home Assistant's
+   answer alone.
+
+One socket is switched at most every `min_gap_s`, and one switch runs at a time on a machine.
+
+**What `GET /metrics` shows.** The row of a power source with sockets has `"sockets"`: for each its `id`,
+`name`, `state` (`on`, `off`, `unavailable`, `unknown`), whether it can be switched, why not if not
+(`switching_off`, `feeds_self`, `not_allowed`, `no_token`, `approval_off`, `approval_unavailable`), a `tag`
+and an `error` when the state could not be read. The entity id is not sent. The states are read every 10
+seconds, one request for each socket; after a token that Home Assistant refuses, nothing is asked for 5
+minutes, then 15, then an hour, as for the sensors. A plug's watts are shown whatever its sockets say.
+
+**What it answers** when something is not as it should be (the panel turns these into sentences):
+
+| Answer | Meaning | Your approval |
+| --- | --- | --- |
+| `404 plug_switching_disabled` | `switching` is false on this machine | not used |
+| `404 unknown_socket` | no such power source or socket | not used |
+| `403 not_allowed`, `403 feeds_self` | this machine's config does not let it be switched | not used |
+| `409 approval_off` | this machine has no passkey check | not used |
+| `403 approval_required`, `403 approval_refused`, `503 approval_unavailable` | as for every approved request; `approval_refused (one_entry)`: the approval was for more than this one switch | not used |
+| `409 socket_changed` | the socket's name or switch was changed in `config.yaml` since you looked | not used |
+| `409 no_token` | the variable of the switching token is empty | not used |
+| `409 switch_in_progress`, `429 too_soon` | another switch is running; this socket was switched less than `min_gap_s` ago (`Retry-After` says when) | not used |
+| `409 socket_unavailable` | Home Assistant has no "on" or "off" for the socket right now | not used |
+| `502 ha_unreachable` | the state could not be read (no answer, an error, the entity is gone, the token refused) | not used |
+| `502 ha_refused` | Home Assistant answered the switch request with an error | **used** |
+| `502 no_answer` | no answer to the switch request, and the socket did not change in 10 s. It may still switch: look at it | **used** |
+
+**The log.** Every switch request that carried the control token leaves one line in the agent's log (Linux:
+`journalctl -u fairy-agent | grep 'plug:'`; Windows: `logs\agent.log`): `plug: switched` with the socket, the
+entity, the direction, the state before and after and who asked; `plug: not confirmed`; `plug: refused` with
+the reason; `plug: failed after the approval was used` (an error line: `ha_refused` or `no_answer`). Before the
+one request is sent there is also `plug: switching`. The line of the passkey check next to it (`approval: accepted request="socket_set ..."`) says
+whose passkey it was. The token is never in the log. The panel has its own audit log; the agent's is the one
+a panel that was taken over cannot change.
+
+**What this does not protect against.**
+
+* **The page is the panel's.** A panel that was taken over can show one socket's name and ask your passkey
+  for another. Your one touch then switches one socket you did not mean, among the ones you put into
+  `switch_allow`, and the agent's log has the real ids. It cannot switch more than one socket with one
+  touch, a socket that is not allowed, or anything in `feeds_self`.
+* **Plain http.** With an `http://` address the switch requests and the states cross that network
+  unencrypted, like the token: somebody on that network can change a request on its way (another socket,
+  the other direction) and forge the state that comes back. `check-config` says so every time. `https` with
+  `ca_file` is always verified.
+* **A socket that feeds something you need and is in no list.** The agent cannot see cables. If a socket in
+  `switch_allow` feeds the network path to Home Assistant, switching it off cannot be undone from anywhere
+  but the button on the plug.
+* **An entity id that now belongs to another device** (ids swapped or a device paired again in Home
+  Assistant): Fairy goes by the id. Watch the first switch after any change in Home Assistant.
+* **This agent process being taken over.** It is the one that checks, and it holds the token.
+
+**Not tested yet:** all of this was written and tested against a made-up Home Assistant. Nothing has been
+switched in a real one, and nothing of it has run on Windows (there the agent itself checks the approval,
+with the helper's trust file; the helper is not involved, it never uses the network).
+
 ## Passkey approval of fan, power and update requests (Pocket ID)
 
 A panel that was taken over, or a stolen control token, could until now shut a machine down, set its fans or
@@ -1282,6 +1469,7 @@ says the same next to the id. The panel then has to be told the new id (it still
 | `POST /fan/duty`, `POST /fan/mode` | yes | after one approved fan change that the machine applied, further fan changes need none for 30 s (the **fan window**; see settings) |
 | `POST /power` with `shutdown`, `reboot`, `sleep` | yes, one each | never the fan window |
 | `POST /update` | yes, one each | Windows: see "Updates on Windows" below |
+| `POST /plug/switch` (0.10.0) | yes, one each, and an approval for nothing but that one switch | never a window. **And it is refused on a machine without a trust file** (`409 approval_off`), where every other row of this table needs nothing: see [Switching a plug's sockets](#switching-a-plugs-sockets-home_assistant-0100). The agent process checks it itself, also on Windows (`"agent_checks"` names `socket_set`) |
 | `POST /run/arm`, `POST /run/go` (0.9.0) | each **is** one | the ticket and the confirmation of a run: see "Runs" below. `POST /update` and `POST /power` `shutdown` with `"run"` are then let through once each without a new one |
 | `POST /power` with `cancel` | no | it only stops something. Windows: answered `503 helper_stopped` while the helper is stopped (see the next row but one) |
 | `POST /wol`, `POST /bmc/power` (`on`, `status`) | no | they wake machines; the relay has no "off" |
@@ -1289,7 +1477,9 @@ says the same next to the id. The panel then has to be told the new id (it still
 | what the agent does by itself (fan watchdog, fans to automatic when it or the helper stops) | no | nobody is there to confirm |
 
 **No trust set = exactly as before.** Without a trust file nothing is checked and every request works as it
-always did. `GET /metrics` says `"approval": {"state": "off", ...}`.
+always did. `GET /metrics` says `"approval": {"state": "off", ...}`. The one request that did not exist
+before approvals is the exception: `POST /plug/switch` is refused there (`409 approval_off`), and so is the
+challenge for it.
 
 ### Setting the trust
 
@@ -2176,9 +2366,10 @@ is in the list below the table). The important ones:
 | `sensors.acpi_thermal` | true | Windows: the temperatures of the ACPI thermal zones; `false` to switch off |
 | `ipmi`, `fan_control`, `power_control`, `wol`, `bmc_relay` | off | see [Optional features](#optional-features) |
 | `power_sources`, `ups` | none | plugs, BMCs and UPSes on this machine's network that the agent reads and passes on: see [Plugs and UPSes on this machine's network](#plugs-and-upses-on-this-machines-network). New in 0.9.0: a `type: homeassistant` entry may also have `voltage_entity`, `current_entity` and `energy_entity` ([Volts, amperes and the energy total](#volts-amperes-and-the-energy-total-voltage_entity-current_entity-energy_entity)). **An agent up to 0.8.0 does not start with one of these three in its file: update the agent first, add them afterwards** |
+| `home_assistant` (0.10.0) | none | the Home Assistant whose plug sockets this machine shows and may switch: `url`, `token_env`, `ca_file`, `switching` (false), `switch_allow`, `feeds_self`, `min_gap_s` (10). Together with `sockets:` on a `type: homeassistant` entry. See [Switching a plug's sockets](#switching-a-plugs-sockets-home_assistant-0100). **An agent up to 0.9.0 does not start with either in its file: update the agent first, add them afterwards** |
 | `env_file` | none | `KEY=value` secrets (device and BMC passwords, a Home Assistant token); `fairy-agent secret set NAME` writes it |
 | `self_update.enabled`, `self_update.repo` | off, `n3ptune-cpu/Fairy-agent` | see [Updates](#updates-the-panels-update-button) |
-| `control_rate_per_min` | 12 | requests a minute, for everybody together, in each of three budgets that cannot use each other up: **control requests** (fan, power other than cancel, Wake-on-LAN, BMC relay, update, helper stop / start, the first-time set of the approval trust), all together; **approval challenges** (`POST /approval/challenge`), so an approved action costs one control request and one challenge, not two control requests; and **`POST /power` with `cancel`**, so that neither a burst of challenges nor a row of refused requests can keep a cancel out (only other cancels with the control token can, and on Windows a `POST /helper/stop`, which also needs the control token: a cancel is answered `503 helper_stopped` until the helper is started again; requests with a wrong token or none count against nobody but themselves, see [Security in short](#security-in-short)). One more is answered `429` (`Retry-After: 60`); the text says which budget |
+| `control_rate_per_min` | 12 | requests a minute, for everybody together, in each of three budgets that cannot use each other up: **control requests** (fan, power other than cancel, Wake-on-LAN, BMC relay, update, plug switching, helper stop / start, the first-time set of the approval trust), all together; **approval challenges** (`POST /approval/challenge`), so an approved action costs one control request and one challenge, not two control requests; and **`POST /power` with `cancel`**, so that neither a burst of challenges nor a row of refused requests can keep a cancel out (only other cancels with the control token can, and on Windows a `POST /helper/stop`, which also needs the control token: a cancel is answered `503 helper_stopped` until the helper is started again; requests with a wrong token or none count against nobody but themselves, see [Security in short](#security-in-short)). One more is answered `429` (`Retry-After: 60`); the text says which budget |
 | `log_file` | Windows: `C:\ProgramData\fairy-agent\logs\agent.log` (5 MB, one old copy); Linux: the journal | |
 
 Unknown settings are an error (so a typo does not silently do nothing). `fairy-agent check-config` checks the
@@ -2186,7 +2377,7 @@ file and the tokens without starting anything. The one thing from an earlier ver
 a line in the log and in `check-config`, is a `power_sources` entry with `type: tuya`
 (see [Plugs and UPSes on this machine's network](#plugs-and-upses-on-this-machines-network)).
 
-**Every name a `config.yaml` of 0.9.0 may contain.** No other name is accepted, at any level (but for what an
+**Every name a `config.yaml` of 0.10.0 may contain.** No other name is accepted, at any level (but for what an
 ignored `type: tuya` entry holds):
 
 ```yaml
@@ -2200,6 +2391,7 @@ fan_control:   enabled, vendor, min_duty, max_temp_c, auto_mode
 power_control: enabled, min_delay_s
 wol:           enabled, allowed_macs
 self_update:   enabled, repo
+home_assistant: url, token_env, ca_file, switching, switch_allow, feeds_self, min_gap_s   # 0.10.0
 bmc_relay:     enabled, targets (each: id, backend, host, url, username, password_env, cipher_suite,
                ipmitool_path, tls_fingerprint)
 power_sources: a list; every entry: id, type, name, system, system_hint, include_in_total, interval, and by type
@@ -2208,13 +2400,20 @@ power_sources: a list; every entry: id, type, name, system, system_hint, include
   nut:            host, port, ups, username, password_env
   redfish, ipmi:  url, chassis_id, power_path, username, password_env, verify_tls, ca_file
   homeassistant:  url, token_env, entity, max_age_s, ca_file,
-                  voltage_entity, current_entity, energy_entity      # these three: 0.9.0
+                  voltage_entity, current_entity, energy_entity,     # these three: 0.9.0
+                  sockets (each: id, name, switch_entity)            # 0.10.0
 ups:           a list; every entry: id, type, name, powers, host, port, ups, username, password_env
 ```
 
 (This block is a list of names, not a file to copy: `deploy/fairy-agent.config.example.yaml` is that.)
 
-What 0.9.0 adds to this list is the three members of a `homeassistant` entry and nothing else. Because unknown
+What 0.10.0 adds to this list is the section `home_assistant` and the member `sockets` of a `homeassistant`
+entry, and nothing else. **An agent up to 0.9.0 does not start with a `config.yaml` that has either** (`field
+home_assistant not found`): update the agent to 0.10.0, then add them, then restart it; and take them out
+again before an agent of 0.9.0 or older is put back on the machine. A `config.yaml` that 0.9.0 accepts,
+0.10.0 accepts too, and reads in the same way.
+
+What 0.9.0 added is the three members of a `homeassistant` entry and nothing else. Because unknown
 names are an error, **an agent up to 0.8.0 does not start with a `config.yaml` that has `voltage_entity`,
 `current_entity` or `energy_entity`** (`field voltage_entity not found`). So the order is always: update the
 agent to 0.9.0, then add the members, then restart it; and take them out again before an agent of 0.8.0 or
@@ -2248,7 +2447,8 @@ sudo systemctl restart fairy-agent
 Settings are written with dots (`fan_control.min_duty`). Values: `true`/`false`, numbers, text, and lists as
 comma-separated values (`[]` for an empty list). `config get <setting>` prints the value the agent uses
 (the default when the file does not set it); `config show` prints every setting. `power_sources` and `ups`
-are lists of devices: edit those in the file.
+are lists of devices: edit those in the file (also the `sockets:` of an entry; the settings of the
+`home_assistant` section itself are ordinary settings, `config set home_assistant.switching true`).
 
 ## Checking, logs, updating, removing
 
@@ -2306,6 +2506,21 @@ are lists of devices: edit those in the file.
     Wrong tries are logged but not limited: the update's own check comes the same way and cannot always be
     told from another local program's tries, so a limit would let any program on the machine make updates
     fail with a few wrong tries.
+* **Switching plug sockets (0.10.0)** is off unless this machine's `config.yaml` says
+  `home_assistant.switching: true`, which no request can set. Then: every switch needs a passkey approval
+  that this agent checks itself, for exactly one socket in one direction (an approval that lists more than
+  that one request is refused), and a machine without the passkey check refuses every switch
+  (`409 approval_off`), the opposite of what it does for fans, power and updates. A socket is switched only
+  when its switch is in `switch_allow` by its exact id, and never when it is in `feeds_self` or its plug says
+  `system_hint: self`. The agent can send Home Assistant exactly two requests that change something,
+  `switch.turn_on` and `switch.turn_off` for a `switch.` entity from its own config; it has no `toggle` and
+  no way to name another service, entity or address, and a request to the agent names ids only. The request
+  is sent once and never again by itself. The token for switching is a variable of its own, is never logged
+  or sent to the panel, and is never replaced by the token the sensors are read with. A request without a
+  good approval causes no request to Home Assistant at all. What is left: a panel that was taken over can
+  show one name and ask your passkey for another allowed socket (one socket for each touch); and over plain
+  `http://` whoever is on that network can change a switch request on its way
+  ([Switching a plug's sockets](#switching-a-plugs-sockets-home_assistant-0100)).
 * The join code is never an argument of a program: the install scripts and `fairy-agent join` take it from
   standard input or from the environment, and never print it. The old form with the code as an argument
   (`--join CODE`, `-Join CODE`, `fairy-agent join --code CODE`) is still accepted, prints a deprecation line
@@ -2471,6 +2686,10 @@ on the first install and report anything odd:
     taking a run over after the update restarted it, whether the updater service shows as running to the
     helper while it installs, and `helper-run show | cancel` in an Administrator window. An ACCEPTED ticket
     and confirmation need a panel that knows runs;
+* **switching plug sockets (0.10.0)** (TEST-ON-WINDOWS.md, section 16; none of it has run on Windows, and
+  nothing has been switched in a real Home Assistant from any system yet): the `home_assistant` block and
+  `sockets:` on a Windows agent, the agent's own check of a `socket_set` approval with the helper's trust
+  file (`"agent_checks"` names it), `409 approval_off` on a PC without a trust file, and the path of `ca_file`;
 * **0.9.0's log guard and the Home Assistant sensors** (TEST-ON-WINDOWS.md, section 15; none of it has run on
   Windows): both Windows services now set their log up in one new way (the agent's `agent.log` and the
   helper's `helper.log`, so that a line of Go's HTTP client cannot repeat what a device sent), so after the
