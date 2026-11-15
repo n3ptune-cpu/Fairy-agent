@@ -333,6 +333,13 @@ func TestSwitchRefusedByHomeAssistant(t *testing.T) {
 		if got := r.states("desk-bar"); got != "ch1=on, ch2=off, ch3=on" {
 			t.Errorf("http %d: after the reader's round: %s", status, got)
 		}
+		// the socket's gap counts from the request that was sent, whatever its answer was: a next try is too
+		// soon, and asks nobody
+		r.srv.Forget()
+		soon := &admitter{}
+		if res := r.p.Switch(bg(), "desk-bar", "ch1", false, soon.admit); res.Code != api.CodeTooSoon || res.RetryAfter != 10*time.Second || res.Spent || soon.asked != 0 || r.srv.Count() != 0 {
+			t.Errorf("http %d: the same socket inside the gap: %+v, admit asked %d times, asked %v", status, res, soon.asked, paths(r.srv.Requests()))
+		}
 		r.clk.add(time.Minute) // past the gap
 		if next := r.p.Switch(bg(), "desk-bar", "ch1", false, (&admitter{}).admit); next.Code != "" || !next.Confirmed {
 			t.Errorf("http %d: the next switch: %+v", status, next)

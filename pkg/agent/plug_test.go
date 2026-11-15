@@ -728,6 +728,16 @@ func TestPlugSwitchRefusedByHomeAssistant(t *testing.T) {
 			t.Errorf("http %d: the approval used again: %s", status, again)
 		}
 		r.quiet(t, "the spent approval")
+		// min_gap_s counts from the request that was sent, whatever Home Assistant answered to it: the same
+		// socket with a fresh approval is too soon, and nothing is asked. No wait is on after a refused switch
+		// request, so the gap is all that stands between two approved switches that Home Assistant refuses.
+		fresh := r.approve(t, sockCh1, "off")
+		r.ha.Forget()
+		soon := r.flip(t, sockCh1, "off", fresh)
+		if soon.status != 429 || soon.code() != api.CodeTooSoon || len(soon.hdr["Retry-After"]) != 1 || soon.hdr["Retry-After"][0] != "5" || soon.body["retry_after_s"] != float64(5) {
+			t.Errorf("http %d: the same socket with a fresh approval inside min_gap_s: %s, Retry-After %v", status, soon, soon.hdr["Retry-After"])
+		}
+		r.quiet(t, "a switch of the same socket inside min_gap_s after the refused one")
 		// no wait is on: the reader asks every socket at its next round, /metrics has the states, and the next
 		// socket gets its challenge and is switched
 		r.plugs.PollOnce(context.Background())
@@ -741,6 +751,10 @@ func TestPlugSwitchRefusedByHomeAssistant(t *testing.T) {
 		}
 		if next := r.flip(t, sockCh2, "on", r.approve(t, sockCh2, "on")); next.status != 200 || next.body["confirmed"] != true {
 			t.Errorf("http %d: the next socket: %s", status, next)
+		}
+		r.clk.add(5 * time.Second) // past the gap: the approval that was too soon is whole, and switches
+		if late := r.flip(t, sockCh1, "off", fresh); late.status != 200 || late.body["confirmed"] != true {
+			t.Errorf("http %d: the same socket after min_gap_s, with the approval that was too soon: %s", status, late)
 		}
 	}
 	out := log.String()
