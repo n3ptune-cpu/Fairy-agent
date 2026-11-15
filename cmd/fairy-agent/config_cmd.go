@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/n3ptune-cpu/Fairy-agent/pkg/agent"
+	"github.com/n3ptune-cpu/Fairy-agent/pkg/agent/api"
 	"github.com/n3ptune-cpu/Fairy-agent/pkg/agent/configedit"
 )
 
@@ -19,7 +20,8 @@ const configUsage = `usage:
 Settings are written with dots, e.g. fan_control.auto_mode; lists as "a, b" or [a, b].
 `
 
-// checkConfig is check-config's test of a loaded config: the env file, the tokens and the relayed devices.
+// checkConfig is check-config's test of a loaded config: the env file, the tokens, the relayed devices, and
+// the Home Assistant whose sockets are shown and switched (its ca_file is read; nothing is asked of it).
 func checkConfig(cfg *agent.Config) error {
 	if _, err := agent.LoadEnvFile(cfg.EnvFile); err != nil {
 		return err
@@ -27,7 +29,11 @@ func checkConfig(cfg *agent.Config) error {
 	if _, err := cfg.LoadTokens(); err != nil {
 		return err
 	}
-	_, err := cfg.NewRelay()
+	relay, err := cfg.NewRelay()
+	if err != nil {
+		return err
+	}
+	_, err = cfg.NewPlugs(relay)
 	return err
 }
 
@@ -45,10 +51,51 @@ func checkConfigCmd(cfgPath string, stdout, stderr io.Writer) int {
 	for _, l := range sourceLines(cfg) {
 		fmt.Fprintln(stdout, l)
 	}
-	for _, n := range configNotes(cfg) {
+	plugLines, plugNotes := plugReport(cfg)
+	for _, l := range plugLines {
+		fmt.Fprintln(stdout, l)
+	}
+	for _, n := range append(configNotes(cfg), plugNotes...) {
 		fmt.Fprintln(stdout, n)
 	}
 	return 0
+}
+
+// plugTrustState is what check-config can see of this machine's passkey check (tests put their own folder here).
+var plugTrustState = func(cfg *agent.Config) string { return agent.ApprovalStateOnDisk(agent.ApprovalFiles(cfg)) }
+
+// plugReport are check-config's lines and notes for the home_assistant block and the sockets, such as
+//
+//	home assistant: host 192.168.1.10:8123 (http), token: present (HA_SWITCH_TOKEN), switching: on, 10 s between two switches of one socket
+//	socket "desk-bar/ch1" (Left monitor): switch.desk_bar_socket_1, can be switched
+//	socket "desk-bar/ch2" (ch2): switch.desk_bar_socket_2, shown only (not in home_assistant.switch_allow)
+//	socket "server-corner/main" (Server corner): switch.server_corner_socket, never switched (home_assistant.feeds_self)
+//	never switched (feeds_self): switch.server_corner_socket
+//	note: switching goes over http: the token and every request cross that network unencrypted, ...
+//	note: this machine has no passkey check: every switch request is refused (approval_off) until the check is turned on.
+//
+// They say, every time, which sockets can be switched and which never are. Nothing without the block. As for
+// the power sources, "present" means the variable has a value; the token is not read, shown or tried, and a
+// missing one is said and is not an exit code. The note about the passkey check is printed only when this
+// command can look at the trust file: a user who may not look into its folder is told nothing about it.
+func plugReport(cfg *agent.Config) (lines, notes []string) {
+	relay, err := cfg.NewRelay()
+	if err != nil { // checkConfig has said so
+		return nil, nil
+	}
+	p, err := cfg.NewPlugs(relay)
+	if err != nil || p == nil {
+		return nil, nil
+	}
+	state := plugTrustState(cfg)
+	if state == api.ApprovalBroken { // also: this user may not look into the folder. Nothing is said then.
+		state = ""
+	}
+	rep := cfg.PlugReport(p, state)
+	for _, n := range rep.Notes {
+		notes = append(notes, "note: "+n)
+	}
+	return rep.Lines, notes
 }
 
 // sourceLines are check-config's lines for the relayed power sources that read with a token (type

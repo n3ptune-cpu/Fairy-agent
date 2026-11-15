@@ -205,6 +205,9 @@ func Run(ctx context.Context, cfg *Config, b Build) error {
 	if st := d.Approval.Status(); st.State != api.ApprovalOff {
 		slog.Info("passkey approval of fan, power and update requests", "state", st.State, "issuer", st.Issuer, "machine_id", st.MachineID, "error", st.Error)
 	}
+	// The sockets: how many, how many can be switched, which are never switched; and a warning for each thing
+	// that will not do what the owner may expect (switching over http, no passkey check: every switch refused).
+	logPlugs(cfg, sockets, d.Approval.Status().State)
 	if cfg.Sensors.CoreTemp {
 		if viaHelper {
 			d.Collector = collect.WithCoreTempReader(d.Collector, helper.CoreTempRead)
