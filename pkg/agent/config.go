@@ -77,6 +77,10 @@ type Config struct {
 	// /approval/challenge) and POST /power cancel (server.go: budgetControl, budgetChallenge, budgetCancel).
 	ControlRatePerMin int `yaml:"control_rate_per_min"`
 
+	// HomeAssistant is the one Home Assistant this agent may switch plug sockets in, and whether it may
+	// (config_homeassistant.go). Nothing of it is ever set from the panel.
+	HomeAssistant HomeAssistantConfig `yaml:"home_assistant"`
+
 	// PowerSources / UPS: devices on this machine's LAN that the agent reads and relays to the panel (same
 	// entries as the panel's power_sources / ups, secrets by env var name). SystemHint "self" links a power
 	// source to this agent's host.
@@ -85,6 +89,10 @@ type Config struct {
 
 	path    string
 	ignored []string
+	// haSet: config.yaml has a home_assistant block with at least one setting. haFeedsSelf: that block has a
+	// feeds_self line whose value is a list (the empty one too). Both are read from the YAML text (haLines): a
+	// missing line and an empty list decode to the same value.
+	haSet, haFeedsSelf bool
 	// unusedEnv: the environment variables that only entries taken out by power.DropRemoved named (a Tuya
 	// plug's local key). Nothing in this config uses them, so they are not loaded from env_file (UnusedSecret).
 	unusedEnv []string
@@ -206,7 +214,8 @@ func (c *Config) IPMISensors() bool { return c.IPMI.Enabled && boolOr(c.IPMI.Sen
 
 // ControlEnabled reports whether any POST feature is on (then a control token is required).
 func (c *Config) ControlEnabled() bool {
-	return c.FanControl.Enabled || c.PowerControl.Enabled || c.WOL.Enabled || c.SelfUpdate.Enabled || c.BMCRelay.Enabled
+	return c.FanControl.Enabled || c.PowerControl.Enabled || c.WOL.Enabled || c.SelfUpdate.Enabled || c.BMCRelay.Enabled ||
+		c.HomeAssistant.Switching
 }
 
 var (
@@ -223,6 +232,7 @@ func Parse(data []byte, path string) (*Config, error) {
 		return nil, fmt.Errorf("%s: %w", path, err)
 	}
 	c.path = path
+	c.haSet, c.haFeedsSelf = haLines(data)
 	all := c.PowerSources
 	gone := power.RemovedSecretEnv(all)
 	c.PowerSources, _ = power.DropRemoved(all)
@@ -260,9 +270,13 @@ func (c *Config) notNamedElsewhere(names []string) []string {
 }
 
 // deviceSecretEnv are the environment variables that the power_sources and ups entries name for their secrets:
-// the value of every member that ends in "_env" (password_env, token_env). Only names: no value is read.
+// the value of every member that ends in "_env" (password_env, token_env), and the variable of the token that
+// plug sockets are switched with (home_assistant.token_env). Only names: no value is read.
 func (c *Config) deviceSecretEnv() []string {
 	var names []string
+	if env := c.HomeAssistant.TokenEnv; env != "" {
+		names = append(names, env)
+	}
 	for _, raws := range [][]map[string]any{c.PowerSources, c.UPS} {
 		for _, raw := range raws {
 			for k, v := range raw {
@@ -344,6 +358,9 @@ func (c *Config) defaults() {
 	}
 	if c.ControlRatePerMin == 0 {
 		c.ControlRatePerMin = 12
+	}
+	if c.HomeAssistant.MinGapS == 0 {
+		c.HomeAssistant.MinGapS = DefaultSwitchGapS
 	}
 	if c.SelfUpdate.Repo == "" {
 		c.SelfUpdate.Repo = release.AgentRepo
@@ -458,6 +475,7 @@ func (c *Config) Validate() error {
 			add("processes.never_open: give program names like game.exe, not paths")
 		}
 	}
+	c.validateHomeAssistant(func(s string) { add("%s", s) })
 	if len(errs) > 0 {
 		return fmt.Errorf("%s: %s", c.path, strings.Join(errs, "; "))
 	}
@@ -513,7 +531,7 @@ func (c *Config) LoadTokens() (Tokens, error) {
 	if !c.ControlEnabled() {
 		return t, nil
 	}
-	if t.Control, err = get("FAIRY_AGENT_CONTROL_TOKEN", c.ControlTokenFile, "control token (fan, power, Wake-on-LAN or self-update is enabled)", true); err != nil {
+	if t.Control, err = get("FAIRY_AGENT_CONTROL_TOKEN", c.ControlTokenFile, "control token (fan, power, Wake-on-LAN, self-update or plug switching is enabled)", true); err != nil {
 		return t, err
 	}
 	if len(t.Control) < MinTokenLen {

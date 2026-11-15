@@ -91,9 +91,16 @@ func (c *Config) NewRelay() (*Relay, error) {
 // The error names the two settings by their ids and the member, never the variable: an error of a
 // homeassistant entry repeats no value of the entry. Several homeassistant entries may name one variable (the
 // plugs of one Home Assistant share its token), and an ignored entry (tuya) is not looked at.
+//
+// The same holds for home_assistant.token_env, the token plug sockets are switched with: it may be the variable
+// the homeassistant entries read with (one token for both) or one of its own, and never one that another kind
+// of secret is kept in.
 func (c *Config) tokenEnvShared() error {
 	type named struct{ what, env string }
 	var tokens, others []named
+	if env := c.HomeAssistant.TokenEnv; env != "" { // the token sockets are switched with goes to Home Assistant too
+		tokens = append(tokens, named{"home_assistant", env})
+	}
 	for _, raw := range c.PowerSources {
 		id, _ := raw["id"].(string)
 		if typ, _ := raw["type"].(string); typ == "homeassistant" {
@@ -127,7 +134,11 @@ func (c *Config) tokenEnvShared() error {
 	for _, tok := range tokens {
 		for _, o := range others {
 			if strings.EqualFold(tok.env, o.env) {
-				return fmt.Errorf("power source %s: token_env names the same variable as %s: what that variable holds would be sent to Home Assistant as the token. The token needs a variable that nothing else names", tok.what, o.what)
+				who := "power source " + tok.what
+				if tok.what == "home_assistant" {
+					who = "home_assistant" // the block, not an entry
+				}
+				return fmt.Errorf("%s: token_env names the same variable as %s: what that variable holds would be sent to Home Assistant as the token. The token needs a variable that nothing else names", who, o.what)
 			}
 		}
 	}

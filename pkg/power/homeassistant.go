@@ -103,6 +103,15 @@ var haEntity = regexp.MustCompile(`^sensor\.[a-z0-9_]+$`)
 
 var haEnvName = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]{0,127}$`)
 
+// haSwitch is what the entity id of a socket's switch must be: a switch.* id, and nothing that could change a
+// path or a JSON text. A Home Assistant entity id is at most 255 characters.
+var haSwitch = regexp.MustCompile(`^switch\.[a-z0-9_]+$`)
+
+// HASwitchEntity reports whether id can be the entity id of a switch in Home Assistant: `switch.` and then
+// lower-case letters, digits and underscores, at most 255 characters in all. It is the only kind of entity a
+// socket may name and the only kind Fairy ever switches (no light, lock, cover, script, scene or button).
+func HASwitchEntity(id string) bool { return len(id) <= 255 && haSwitch.MatchString(id) }
+
 // haSystemEnv are variables of the system that token_env must not name (buildHomeAssistant): the obvious ones,
 // not every one there is.
 var haSystemEnv = []string{"PATH", "HOME", "TEMP", "TMP", "SystemRoot", "USERPROFILE"}
@@ -334,6 +343,42 @@ func haAddress(raw, entity string) (addr, host string, ok bool) {
 	return (&url.URL{Scheme: u.Scheme, Host: u.Host, Path: "/api/states/" + entity}).String(), u.Host, true
 }
 
+// HATokenEnvProblem says what is wrong with name as a token_env, the name of the environment variable that
+// holds a Home Assistant token ("": nothing). The sentence begins with "token_env must" and never repeats the
+// name that was given: a token written there by mistake is not printed. The rule of a homeassistant entry, and
+// of the agent's home_assistant block, which sends requests with a token of its own.
+func HATokenEnvProblem(name string) string {
+	if !haEnvName.MatchString(name) {
+		return "token_env must be the name of the environment variable that holds the token (the token itself does not belong in this file)"
+	}
+	// The value of the variable is sent to Home Assistant. Fairy's own variables hold Fairy's own secrets (the
+	// agent's tokens, the panel's keys): none of them may be named here, in whatever letter case (Windows does
+	// not tell the cases apart). `fairy-agent secret set` refuses such a name too.
+	if strings.HasPrefix(strings.ToUpper(name), "FAIRY_") {
+		return "token_env must not be one of Fairy's own variables (a name that begins with FAIRY_): what such a variable holds is not for Home Assistant"
+	}
+	// The variable is hidden from every program the agent starts (the agent hides what token_env names), and
+	// its value goes to Home Assistant: a variable the system itself needs is neither a token nor one a
+	// program can do without. The names are compared in whatever letter case, as Windows does. The error has
+	// the whole list, not the name that was given.
+	if slices.ContainsFunc(haSystemEnv, func(n string) bool { return strings.EqualFold(n, name) }) {
+		return "token_env must not be a variable of the system (" + strings.Join(haSystemEnv, ", ") + "): the variable named there is used for nothing but the token and is hidden from the programs the agent starts"
+	}
+	return ""
+}
+
+// HAAddress checks the url of a Home Assistant by the rule of a homeassistant entry's `url` (haAddress: http or
+// https, a host, optionally a port, and nothing else) and returns its scheme and its host[:port]. ok is false
+// for anything else. Nothing of raw is repeated by it.
+func HAAddress(raw string) (scheme, host string, ok bool) {
+	addr, host, ok := haAddress(raw, "x")
+	if !ok {
+		return "", "", false
+	}
+	scheme, _, _ = strings.Cut(addr, "://")
+	return scheme, host, true
+}
+
 // buildHomeAssistant validates a `type: homeassistant` entry.
 //
 // What its errors repeat of the entry, and nothing else of it: the entry's id when it is a valid id (that is
@@ -390,21 +435,8 @@ func buildHomeAssistant(raw map[string]any) (Source, error) {
 	for i := range extras {
 		extras[i].addr, _, _ = haAddress(c.URL, extras[i].entity) // the same url, checked just now
 	}
-	if !haEnvName.MatchString(c.TokenEnv) {
-		return nil, fmt.Errorf("power source %s: token_env must be the name of the environment variable that holds the token (the token itself does not belong in this file)", c.ID)
-	}
-	// The value of the variable is sent to Home Assistant. Fairy's own variables hold Fairy's own secrets (the
-	// agent's tokens, the panel's keys): none of them may be named here, in whatever letter case (Windows does
-	// not tell the cases apart). `fairy-agent secret set` refuses such a name too.
-	if strings.HasPrefix(strings.ToUpper(c.TokenEnv), "FAIRY_") {
-		return nil, fmt.Errorf("power source %s: token_env must not be one of Fairy's own variables (a name that begins with FAIRY_): what such a variable holds is not for Home Assistant", c.ID)
-	}
-	// The variable is hidden from every program the agent starts (the agent hides what token_env names), and
-	// its value goes to Home Assistant: a variable the system itself needs is neither a token nor one a
-	// program can do without. The names are compared in whatever letter case, as Windows does. The error has
-	// the whole list, not the name that was given.
-	if slices.ContainsFunc(haSystemEnv, func(n string) bool { return strings.EqualFold(n, c.TokenEnv) }) {
-		return nil, fmt.Errorf("power source %s: token_env must not be a variable of the system (%s): the variable named there is used for nothing but the token and is hidden from the programs the agent starts", c.ID, strings.Join(haSystemEnv, ", "))
+	if problem := HATokenEnvProblem(c.TokenEnv); problem != "" {
+		return nil, fmt.Errorf("power source %s: %s", c.ID, problem)
 	}
 	// 0 or at least a second: a fraction of a second is not an age any plug's value can keep to (Home Assistant
 	// hears from a plug every 10 to 60 s), so it would only ever show "older than max_age_s".

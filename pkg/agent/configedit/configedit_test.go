@@ -280,3 +280,87 @@ func TestWriteFileNeverWritesInPlace(t *testing.T) {
 		t.Fatal("the old file is no longer under its other name")
 	}
 }
+
+// The home_assistant block is a plain section of text, whole numbers, true / false and lists, so `config set`
+// changes each of its settings, and `config show` lists them (PLUGS-DESIGN.md 3.2). What it writes is checked
+// like every other change: by loading the result.
+func TestEditHomeAssistantBlock(t *testing.T) {
+	keys := map[string]bool{}
+	for _, s := range Settings() {
+		if strings.HasPrefix(s.Key, "home_assistant.") {
+			keys[s.Key] = true
+			if !editable(s.Type) {
+				t.Errorf("%s cannot be set from the command line", s.Key)
+			}
+		}
+	}
+	want := []string{"url", "token_env", "ca_file", "switching", "switch_allow", "feeds_self", "min_gap_s"}
+	for _, k := range want {
+		if !keys["home_assistant."+k] {
+			t.Errorf("config show does not list home_assistant.%s", k)
+		}
+	}
+	if len(keys) != len(want) {
+		t.Errorf("the block has %d settings, want %d: %v", len(keys), len(want), keys)
+	}
+
+	text := "# my agent\nlisten: 100.64.0.10:9101\n"
+	for _, step := range []struct{ key, value string }{
+		{"home_assistant.url", "https://ha.example:8443"},
+		{"home_assistant.token_env", "HA_SWITCH_TOKEN"},
+		{"home_assistant.ca_file", "/etc/fairy-agent/ha.pem"},
+		{"home_assistant.min_gap_s", "30"},
+		{"home_assistant.switch_allow", "switch.desk_bar_socket_1, switch.desk_bar_socket_2"},
+		{"home_assistant.feeds_self", "switch.server_corner_socket"},
+		{"home_assistant.switching", "true"},
+	} {
+		text = set(t, text, step.key, step.value)
+		if _, err := agent.Parse([]byte(text), "/etc/fairy-agent/config.yaml"); err != nil {
+			t.Fatalf("after %s: %v\n%s", step.key, err, text)
+		}
+	}
+	const wantText = "# my agent\nlisten: 100.64.0.10:9101\nhome_assistant:\n  url: \"https://ha.example:8443\"\n  token_env: HA_SWITCH_TOKEN\n" +
+		"  ca_file: \"/etc/fairy-agent/ha.pem\"\n  min_gap_s: 30\n  switch_allow: [switch.desk_bar_socket_1, switch.desk_bar_socket_2]\n" +
+		"  feeds_self: [switch.server_corner_socket]\n  switching: true\n"
+	if text != wantText {
+		t.Fatalf("got:\n%s\nwant:\n%s", text, wantText)
+	}
+	cfg, err := agent.Parse([]byte(text), "/etc/fairy-agent/config.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := cfg.HomeAssistant
+	if !h.Switching || h.MinGapS != 30 || len(h.SwitchAllow) != 2 || len(h.FeedsSelf) != 1 || !cfg.ControlEnabled() {
+		t.Fatalf("%+v", h)
+	}
+	for k, v := range map[string]string{"home_assistant.switching": "true", "home_assistant.min_gap_s": "30",
+		"home_assistant.feeds_self": "[switch.server_corner_socket]", "home_assistant.token_env": "HA_SWITCH_TOKEN"} {
+		s, _ := Lookup(k)
+		if got := Effective(cfg, s); got != v {
+			t.Errorf("%s shows %q, want %q", k, got, v)
+		}
+	}
+	// the empty list is written as a list, which is what the feeds_self line must be
+	empty := set(t, "home_assistant:\n  url: \"http://192.0.2.10:8123\"\n  token_env: HA_SWITCH_TOKEN\n", "home_assistant.feeds_self", "")
+	if !strings.Contains(empty, "  feeds_self: []\n") {
+		t.Fatalf("%s", empty)
+	}
+	on := set(t, empty, "home_assistant.switching", "true")
+	if _, err := agent.Parse([]byte(on), "/etc/fairy-agent/config.yaml"); err != nil {
+		t.Fatalf("switching on after feeds_self: []: %v", err)
+	}
+	// switching on in a file without the line is an edit whose result does not load; `config set` then writes
+	// nothing (cmd/fairy-agent: "not changed, the result would be invalid")
+	noLine := set(t, "home_assistant:\n  url: \"http://192.0.2.10:8123\"\n  token_env: HA_SWITCH_TOKEN\n", "home_assistant.switching", "true")
+	if _, err := agent.Parse([]byte(noLine), "/etc/fairy-agent/config.yaml"); err == nil || !strings.Contains(err.Error(), "there is no feeds_self line") {
+		t.Fatalf("switching on without a feeds_self line loads: %v", err)
+	}
+	// the default of a file without the block
+	def, _ := agent.Parse(nil, "/etc/fairy-agent/config.yaml")
+	for k, v := range map[string]string{"home_assistant.switching": "false", "home_assistant.min_gap_s": "10", "home_assistant.switch_allow": "[]", "home_assistant.url": `""`} {
+		s, _ := Lookup(k)
+		if got := Effective(def, s); got != v {
+			t.Errorf("default of %s shows %q, want %q", k, got, v)
+		}
+	}
+}
