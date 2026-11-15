@@ -436,6 +436,39 @@ func TestPlugSwitchRefusesWhatTheConfigForbids(t *testing.T) {
 	both.quiet(t, "both lists")
 }
 
+// The plug this machine hangs on is locked however its entry spells "self": in capitals, with spaces around
+// it. Its socket is in switch_allow and in no feeds_self list here, so the hint alone decides. A hint that
+// names another machine locks nothing.
+func TestPlugSwitchOfThisMachinesOwnPlug(t *testing.T) {
+	for _, hint := range []string{"Self", "SELF", " self "} {
+		r := newPlugRig(t, plugRigOpts{PlugOptions: agenttest.PlugOptions{OwnHint: hint}})
+		good := r.approve(t, sockCh1, "off") // an approval that holds, for another socket
+		r.ha.Forget()
+		for _, to := range []string{"on", "off"} {
+			if ch := r.challenge(t, sockOwn, to); ch.status != 403 || ch.code() != api.CodeFeedsSelf || ch.body["challenge"] != nil {
+				t.Errorf("system_hint %q: challenge for %s: %s", hint, to, ch)
+			}
+			for what, ap := range map[string]*api.Approval{"without an approval": nil, "with an approval of another socket": good} {
+				if a := r.flip(t, sockOwn, to, ap); a.status != 403 || a.code() != api.CodeFeedsSelf {
+					t.Errorf("system_hint %q: switch to %s %s: %s", hint, to, what, a)
+				}
+			}
+		}
+		r.quiet(t, "the machine's own plug, system_hint "+strconv.Quote(hint))
+		if r.ha.State(agenttest.PlugOwnSw) != "on" {
+			t.Fatalf("system_hint %q: the socket was switched", hint)
+		}
+		m, _ := r.metrics(t)
+		if list, _ := socketsOf(t, m, agenttest.PlugOwn); len(list) != 1 || said(list[0]) != `main "This machine" on false feeds_self -` {
+			t.Errorf("system_hint %q: /metrics says %v", hint, list)
+		}
+	}
+	other := newPlugRig(t, plugRigOpts{PlugOptions: agenttest.PlugOptions{OwnHint: "another-machine-of-the-tests"}})
+	if ch := other.challenge(t, sockOwn, "off"); ch.status != 200 || ch.body["needed"] != true {
+		t.Errorf("a plug whose system_hint names another machine: %s", ch)
+	}
+}
+
 // The tag: a request for a socket as it was described before is refused before anything is used up or asked.
 func TestPlugSwitchWithAnotherTag(t *testing.T) {
 	r := newPlugRig(t, plugRigOpts{})

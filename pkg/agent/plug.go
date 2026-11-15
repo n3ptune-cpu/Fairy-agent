@@ -127,7 +127,7 @@ var plugRefusals = map[string]plugRefusal{
 	api.CodeUnknownSocket: {404, "this machine has no such socket (the power source and the socket are named by their ids, as GET /metrics shows them)"},
 	api.CodeNotAllowed:    {403, "this socket may not be switched: its switch is not in home_assistant.switch_allow in this machine's config.yaml. Nothing was switched"},
 	api.CodeFeedsSelf: {403, "this socket is never switched: this machine's config says that it feeds this machine, Home Assistant or the network " +
-		"(home_assistant.feeds_self, or system_hint: self on its meter). Nothing was switched"},
+		"(home_assistant.feeds_self, or a system_hint on its meter that means this machine). Nothing was switched"},
 	api.CodeSocketChanged: {409, "this socket is not what it was when the request was made: its name or its switch was changed in this machine's config (the tag is another one). " +
 		"Nothing was switched; look at the socket again"},
 	api.CodeNoSwitchToken: {409, "this machine has no token for switching: the variable that home_assistant.token_env names holds nothing " +

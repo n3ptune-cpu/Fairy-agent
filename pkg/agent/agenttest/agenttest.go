@@ -191,7 +191,7 @@ const (
 	PlugCorner     = "server-corner"               // power source, socket main "Server corner"
 	PlugCornerSens = "sensor.server_corner_power"  //
 	PlugCornerSw   = "switch.server_corner_socket" // the socket that must never be switched
-	PlugOwn        = "own-plug"                    // power source with system_hint: self, socket main "This machine"
+	PlugOwn        = "own-plug"                    // power source with system_hint: self (PlugOptions.OwnHint), socket main "This machine"
 	PlugOwnSensor  = "sensor.own_plug_power"       //
 	PlugOwnSw      = "switch.own_plug"             //
 )
@@ -207,6 +207,8 @@ type PlugOptions struct {
 	MinGapS          int // 0: 5
 	// NoBlock leaves the block and every socket out: the plugs are meters only, as before sockets.
 	NoBlock bool
+	// OwnHint is the system_hint of PlugOwn as it is written in the file ("": self).
+	OwnHint string
 }
 
 // PlugConfig is the home_assistant block and the power_sources of an agent that reads the made-up plugs from
@@ -220,6 +222,9 @@ func PlugConfig(haURL string, o PlugOptions) string {
 	}
 	if o.MinGapS == 0 {
 		o.MinGapS = 5
+	}
+	if o.OwnHint == "" {
+		o.OwnHint = "self"
 	}
 	meter := func(id, name, sensor, more string) string {
 		return "  - id: " + id + "\n    type: homeassistant\n    name: \"" + name + "\"\n    url: \"" + haURL + "\"\n    token_env: " + o.ReadEnv +
@@ -242,7 +247,7 @@ func PlugConfig(haURL string, o PlugOptions) string {
 			"{id: ch2, switch_entity: "+PlugBar2+"}",
 			"{id: ch3, name: Lamp, switch_entity: "+PlugBar3+"}")) +
 		meter(PlugCorner, "Server corner", PlugCornerSens, sockets("{id: main, name: \"Server corner\", switch_entity: "+PlugCornerSw+"}")) +
-		meter(PlugOwn, "Own plug", PlugOwnSensor, "    system_hint: self\n"+sockets("{id: main, name: \"This machine\", switch_entity: "+PlugOwnSw+"}"))
+		meter(PlugOwn, "Own plug", PlugOwnSensor, "    system_hint: "+strconv.Quote(o.OwnHint)+"\n"+sockets("{id: main, name: \"This machine\", switch_entity: "+PlugOwnSw+"}"))
 }
 
 // PlugStates are the states a fake Home Assistant starts with for PlugConfig's switches: the first socket of

@@ -62,7 +62,8 @@ const CodeNotAdmitted = "not_admitted"
 // The order:
 //
 //  1. This machine's own rules, again, whatever the caller checked: the socket exists; switching is on; the
-//     socket is not locked (feeds_self, system_hint self, not in switch_allow). No request is made.
+//     socket is not locked (feeds_self, a system_hint that means this machine, not in switch_allow). No
+//     request is made.
 //  2. One switch at a time on this agent: a second one is not queued but refused (switch_in_progress).
 //  3. Not sooner than MinGap after the last switch of this socket (too_soon). And not while the wait after a
 //     refused token is on (ha_unreachable): the token is not sent again before that is over.

@@ -2,6 +2,7 @@ package agent
 
 import (
 	"fmt"
+	"os"
 	"slices"
 	"strconv"
 	"strings"
@@ -192,8 +193,8 @@ func (c *Config) socketChecks(r *Relay) error {
 // switch. The running agent and check-config build it with this.
 //
 // What can be switched is decided here, from config.yaml alone, and nowhere else: each socket is marked with
-// whether its switch is in switch_allow, whether it is in feeds_self, and whether its meter says system_hint:
-// self. The ids are compared as the exact texts they are.
+// whether its switch is in switch_allow, whether it is in feeds_self, and whether its meter's system_hint
+// means this machine (hintKind). The ids are compared as the exact texts they are.
 func (c *Config) NewPlugs(r *Relay) (*plugs.Plugs, error) {
 	o, ok, err := c.PlugOptions(r)
 	if err != nil || !ok {
@@ -214,16 +215,84 @@ func (c *Config) PlugOptions(r *Relay) (o plugs.Options, ok bool, err error) {
 		return o, false, err
 	}
 	var sockets []plugs.Socket
+	name := ownName()
 	for _, src := range r.SocketSources() {
+		kind := hintKind(src.Hint, name)
 		for _, s := range src.Sockets {
 			sockets = append(sockets, plugs.Socket{Source: src.ID, SourceName: src.Name, ID: s.ID, Name: s.Name, Entity: s.SwitchEntity,
 				Tag:     api.SocketTag(src.ID, s.ID, s.Name, s.SwitchEntity),
 				Allowed: slices.Contains(h.SwitchAllow, s.SwitchEntity), FeedsSelf: slices.Contains(h.FeedsSelf, s.SwitchEntity),
-				SelfHint: src.Hint == selfHint})
+				SelfHint: kind == hintSelf || kind == hintName})
 		}
 	}
 	return plugs.Options{HA: ha, Sockets: sockets, Switching: h.Switching, MinGap: time.Duration(h.MinGapS) * time.Second}, true, nil
 }
 
-// selfHint is the system_hint of a power source that measures the machine this agent runs on.
+// selfHint is the word a power source's system_hint says for "this plug measures the machine the agent runs on".
 const selfHint = "self"
+
+// machineName asks the operating system for this machine's own name (tests put their own here).
+var machineName = os.Hostname
+
+// ownName is this machine's own name ("" when the operating system gives none: then no hint is taken as a name).
+func ownName() string {
+	name, err := machineName()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(name)
+}
+
+// What the system_hint of a power source with sockets means for the lock of its sockets (hintKind).
+const (
+	hintNone  = iota // no hint: nothing is said about which machine the plug feeds
+	hintSelf         // the word self: this machine
+	hintName         // this machine's own name: this machine
+	hintOther        // anything else: taken as another machine
+)
+
+// hintKind says what a system_hint means for the lock "this plug feeds this machine". name is this machine's
+// own name (ownName).
+//
+// The hint means the machine this agent runs on in two forms, and every socket of such an entry is then locked
+// like feeds_self, in either direction, without being listed there:
+//
+//   - the word self, in any letter case and with spaces around it (self, Self, "SELF ");
+//   - this machine's own name as the operating system has it: the whole name, or its first label (rack-box for
+//     rack-box.example.org), in any letter case.
+//
+// The panel links a relayed plug to the agent's own machine for the word self and for the id the panel has
+// given this agent (the id of the agent's entry in the panel's config). The agent is never told that id: no
+// setting of config.yaml holds it and no request carries it. What it does know is its own name, which that id
+// is on most machines, so a hint that is the name locks. An id that is not the name cannot be recognized here:
+// it is hintOther like every other text, the sockets can be switched if switch_allow has them, and
+// Config.PlugReport says so in a note for check-config and the start log, every time. Whoever means "this
+// machine" writes self, or lists the switch in feeds_self.
+func hintKind(hint, name string) int {
+	hint = strings.TrimSpace(hint)
+	switch {
+	case hint == "":
+		return hintNone
+	case strings.EqualFold(hint, selfHint):
+		return hintSelf
+	case name == "":
+		return hintOther
+	}
+	first, _, _ := strings.Cut(name, ".")
+	if strings.EqualFold(hint, name) || strings.EqualFold(hint, first) {
+		return hintName
+	}
+	return hintOther
+}
+
+// sourceHints are the system_hint of each power_sources entry as it is written in the file, by the entry's id.
+func (c *Config) sourceHints() map[string]string {
+	out := map[string]string{}
+	for _, raw := range c.PowerSources {
+		id, _ := raw["id"].(string)
+		if hint, _ := raw["system_hint"].(string); id != "" && hint != "" {
+			out[id] = hint
+		}
+	}
+	return out
+}

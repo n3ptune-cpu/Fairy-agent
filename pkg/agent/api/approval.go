@@ -97,7 +97,7 @@ const (
 	CodePlugSwitchingDisabled = "plug_switching_disabled" // 404: home_assistant.switching is false on this machine
 	CodeUnknownSocket         = "unknown_socket"          // 404: no such power source, or it has no such socket
 	CodeNotAllowed            = "not_allowed"             // 403: the socket's switch is not in home_assistant.switch_allow
-	CodeFeedsSelf             = "feeds_self"              // 403: the socket's switch is in home_assistant.feeds_self, or its meter says system_hint: self
+	CodeFeedsSelf             = "feeds_self"              // 403: the socket's switch is in home_assistant.feeds_self, or its meter's system_hint means this machine
 	CodeSocketChanged         = "socket_changed"          // 409: the tag is not the tag of this socket now (SocketTag)
 	CodeSocketUnavailable     = "socket_unavailable"      // 409: Home Assistant has no "on" or "off" for the socket right now
 	CodeSwitchInProgress      = "switch_in_progress"      // 409: another switch is running on this agent

@@ -21,9 +21,9 @@ type Socket struct {
 	Tag        string // api.SocketTag(Source, ID, Name, Entity)
 	// Allowed: Entity is in home_assistant.switch_allow.
 	Allowed bool
-	// FeedsSelf: Entity is in home_assistant.feeds_self. SelfHint: the meter says system_hint: self (it
-	// measures the machine this agent runs on). Either one: never switched, in either direction, whatever
-	// Allowed says.
+	// FeedsSelf: Entity is in home_assistant.feeds_self. SelfHint: the meter's system_hint means the machine
+	// this agent runs on (the word self in any letter case, or the machine's own name: the agent's config
+	// decides, hintKind there). Either one: never switched, in either direction, whatever Allowed says.
 	FeedsSelf, SelfHint bool
 }
 
@@ -160,7 +160,7 @@ func (p *Plugs) Find(source, socket string) (Socket, bool) {
 
 // Lock says why this machine's config never lets the socket be switched, as the word of a row ("": it does
 // not forbid it): switching is off; it feeds this machine, Home Assistant or the network (feeds_self, or its
-// meter's system_hint: self), which counts before the allow list; or it is not in the allow list.
+// meter's system_hint means this machine), which counts before the allow list; or it is not in the allow list.
 func (p *Plugs) Lock(s Socket) string {
 	switch {
 	case !p.Switching():

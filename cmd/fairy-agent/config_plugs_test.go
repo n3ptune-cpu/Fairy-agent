@@ -205,6 +205,43 @@ note: switch.no_such_socket is in switch_allow and no socket in this file has th
 	}
 }
 
+// A plug whose system_hint means this machine is locked however "self" is spelled, and check-config says so in
+// the socket's line. A hint that means nothing to the agent locks nothing, and that is said in a note.
+func TestCheckConfigSystemHint(t *testing.T) {
+	plugVars(t)
+	env := plugReadVar + "=x\n" + plugSwitchVar + "=y\n"
+	block := plugBlock("  switching: true\n", "  switch_allow: [switch.own_plug]\n", "  feeds_self: []\n")
+	const note = "note: power source own-plug: its system_hint is neither \"self\" nor this machine's name, so this plug is taken as feeding another machine: " +
+		"its sockets can be switched if allowed. If it feeds this machine, write system_hint: self, or list its switches in home_assistant.feeds_self.\n"
+	for hint, c := range map[string]struct {
+		line string
+		note bool
+	}{
+		"self":            {"never switched (its power source says system_hint: self)", false},
+		"Self":            {"never switched (its power source says system_hint: self)", false},
+		`" SELF "`:        {"never switched (its power source says system_hint: self)", false},
+		"another-machine": {"can be switched", true},
+		`"not this one"`:  {"can be switched", true},
+		`"selfish-thing"`: {"can be switched", true},
+	} {
+		p := plugFiles(t, block, strings.Replace(plugSources, "system_hint: self", "system_hint: "+hint, 1), env, api.ApprovalRequired)
+		var out, errb bytes.Buffer
+		code := checkConfigCmd(p, &out, &errb)
+		if want := `socket "own-plug/main" (This machine): switch.own_plug, ` + c.line + "\n"; code != 0 || !strings.Contains(out.String(), want) || strings.Contains(out.String(), note) != c.note {
+			t.Errorf("system_hint: %s: exit %d\n%s%s", hint, code, out.String(), errb.String())
+		}
+		if c.note && strings.Contains(out.String(), strings.Trim(hint, `"`)) {
+			t.Errorf("system_hint: %s: check-config repeats the hint:\n%s", hint, out.String())
+		}
+	}
+	// no hint at all: nothing is said about it
+	p := plugFiles(t, block, strings.Replace(plugSources, "    system_hint: self\n", "", 1), env, api.ApprovalRequired)
+	var out, errb bytes.Buffer
+	if code := checkConfigCmd(p, &out, &errb); code != 0 || strings.Contains(out.String(), "system_hint") || !strings.Contains(out.String(), "switch.own_plug, can be switched\n") {
+		t.Errorf("no system_hint: exit %d\n%s%s", code, out.String(), errb.String())
+	}
+}
+
 func TestCheckConfigPlugProblems(t *testing.T) {
 	plugVars(t)
 	secret := strings.Join([]string{"made", "up", "token", "pasted", "into", "the", "file"}, "-")

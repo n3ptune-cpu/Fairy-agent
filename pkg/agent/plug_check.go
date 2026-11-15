@@ -45,13 +45,21 @@ func (c *Config) PlugReport(p *plugs.Plugs, approvalState string) PlugReport {
 	}
 	rep.Lines = append(rep.Lines, fmt.Sprintf("home assistant: host %s (%s), token: %s, switching: %s", ha.Host(), ha.Scheme(), token, switching))
 	used := map[string]bool{}
+	hints, name := c.sourceHints(), ownName()
+	var elsewhere []string // the entries with sockets whose system_hint does not mean this machine, in config order
 	for _, s := range p.Sockets() {
 		rep.Sockets++
 		used[s.Entity] = true
+		kind := hintKind(hints[s.Source], name)
+		if kind == hintOther && !slices.Contains(elsewhere, s.Source) {
+			elsewhere = append(elsewhere, s.Source)
+		}
 		var what string
 		switch {
 		case s.FeedsSelf:
 			what = "never switched (home_assistant.feeds_self)"
+		case s.SelfHint && kind == hintName:
+			what = "never switched (the system_hint of its power source is this machine's name)"
 		case s.SelfHint:
 			what = "never switched (its power source says system_hint: self)"
 		case !s.Allowed:
@@ -96,6 +104,13 @@ func (c *Config) PlugReport(p *plugs.Plugs, approvalState string) PlugReport {
 				"With a second Home Assistant user for switching, its token can be revoked alone, and Home Assistant's own logbook shows which switches came from Fairy.")
 			break
 		}
+	}
+	// A hint that is neither the word self nor this machine's name locks nothing (hintKind). Said for every such
+	// entry, whatever its sockets are allowed today: the owner may count on a lock that is not there. The hint
+	// itself is not repeated (a value of a homeassistant entry never is).
+	for _, id := range elsewhere {
+		rep.Notes = append(rep.Notes, "power source "+id+": its system_hint is neither \"self\" nor this machine's name, so this plug is taken as feeding another machine: "+
+			"its sockets can be switched if allowed. If it feeds this machine, write system_hint: self, or list its switches in home_assistant.feeds_self.")
 	}
 	for _, id := range h.SwitchAllow {
 		switch {

@@ -23,7 +23,7 @@ const (
 // Why a socket cannot be switched (SocketRow.Why). The first that applies, in this order.
 const (
 	WhySwitchingOff = "switching_off" // home_assistant.switching is false on this machine: nothing is ever switched
-	WhyFeedsSelf    = "feeds_self"    // its switch is in home_assistant.feeds_self, or its meter says system_hint: self; never switched, in either direction
+	WhyFeedsSelf    = "feeds_self"    // its switch is in home_assistant.feeds_self, or its meter's system_hint means this machine; never switched, in either direction
 	WhyNotAllowed   = "not_allowed"   // its switch is not in home_assistant.switch_allow
 	WhyNoToken      = "no_token"      // the variable of the switching token holds nothing on this machine
 	// WhyApprovalOff: this machine has no passkey check (no trust file). A socket is switched only with one.

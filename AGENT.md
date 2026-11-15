@@ -1250,9 +1250,22 @@ The rules, all of them enforced by the agent on the machine that talks to Home A
 * **Only what you allowed, by its exact id.** A socket is switched only if its switch is in `switch_allow`.
   There are no patterns and no "everything on this plug".
 * **A socket that feeds this machine, Home Assistant or the network is never switched**, on or off: its switch
-  goes into `feeds_self`, which wins over `switch_allow`. A plug whose entry says `system_hint: self` is
-  treated the same without being listed. If the agent switched off the socket it hangs on itself, or the one
-  Home Assistant or the network gear hangs on, nothing could switch it on again from the panel.
+  goes into `feeds_self`, which wins over `switch_allow`. If the agent switched off the socket it hangs on
+  itself, or the one Home Assistant or the network gear hangs on, nothing could switch it on again from the
+  panel.
+
+  A plug whose entry has a `system_hint` that means this machine is treated the same without being listed.
+  The hint means this machine in two forms: the word `self`, in any letter case and with spaces around it
+  (`self`, `Self`, `"SELF "`), and this machine's own name as its operating system has it (`hostname`; the
+  whole name or the part before its first dot, in any letter case). **The id the panel has given this agent
+  is not one of them, unless it is the machine's name:** the panel links a plug to the agent's machine for
+  `self` and for that id, but the agent is never told the id, so it cannot lock for it. Every other hint is
+  taken as "this plug feeds another machine" and locks nothing: its sockets can be switched if
+  `switch_allow` has them. `check-config` and the agent's start log say so for every such entry
+  (`note: power source <id>: its system_hint is neither "self" nor this machine's name, ...`). If the plug
+  feeds this machine, write `system_hint: self`, or list its switches in `feeds_self`. The socket's line of
+  `check-config` shows the result: `never switched (its power source says system_hint: self)`, or
+  `never switched (the system_hint of its power source is this machine's name)`.
 * **Only on and off.** The agent sends `switch.turn_on` or `switch.turn_off` and nothing else: never
   `toggle`, never another kind of entity (no light, lock, cover, script), never a service somebody names.
 * **The address, the token, the two lists and the on/off of all this are in `config.yaml` on this machine
@@ -2511,8 +2524,10 @@ are lists of devices: edit those in the file (also the `sockets:` of an entry; t
   that this agent checks itself, for exactly one socket in one direction (an approval that lists more than
   that one request is refused), and a machine without the passkey check refuses every switch
   (`409 approval_off`), the opposite of what it does for fans, power and updates. A socket is switched only
-  when its switch is in `switch_allow` by its exact id, and never when it is in `feeds_self` or its plug says
-  `system_hint: self`. The agent can send Home Assistant exactly two requests that change something,
+  when its switch is in `switch_allow` by its exact id, and never when it is in `feeds_self` or its plug's
+  `system_hint` means this machine (the word `self` in any letter case, or the machine's own name; not the
+  id the panel uses for the agent, which the agent does not know: `check-config` notes every other hint).
+  The agent can send Home Assistant exactly two requests that change something,
   `switch.turn_on` and `switch.turn_off` for a `switch.` entity from its own config; it has no `toggle` and
   no way to name another service, entity or address, and a request to the agent names ids only. The request
   is sent once and never again by itself. The token for switching is a variable of its own, is never logged
