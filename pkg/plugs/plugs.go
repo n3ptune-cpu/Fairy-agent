@@ -50,6 +50,9 @@ type Options struct {
 	MinGap time.Duration
 	// Interval between two rounds of state reads (0: DefaultInterval; never below MinInterval).
 	Interval time.Duration
+	// ReadTimeout and SwitchTimeout are how long the state read before a switch and the switch request may
+	// take (0: the constants of switch.go). Tests make them short.
+	ReadTimeout, SwitchTimeout time.Duration
 	// Now is the clock and Pause the wait (nil: time.Now, and a timer that ends early when ctx does). Tests put
 	// their own here.
 	Now   func() time.Time
@@ -62,8 +65,8 @@ type reading struct {
 	err   string // "" when the state was read
 }
 
-// Plugs are the sockets of this machine's config and their states, read from Home Assistant by a loop of its
-// own.
+// Plugs are the sockets of this machine's config: their states, read from Home Assistant by a loop of its
+// own, and (switch.go) the one way to switch one.
 //
 // The states are not part of the meters' readings. A meter's reading is limited to its four requests for
 // sensors (power.MaxHARequests), and the type that reads watts can send nothing but a GET for a sensor. The
@@ -76,8 +79,10 @@ type Plugs struct {
 
 	mu       sync.Mutex
 	states   []reading
-	refusals int       // refusals of the token in a row
-	holdTill time.Time // no request is made before this (zero: none): the long wait after a refused token
+	refusals int                     // refusals of the token in a row
+	holdTill time.Time               // no request is made before this (zero: none): the long wait after a refused token
+	lastAt   map[[2]string]time.Time // when each socket was switched last (the request was about to be sent)
+	busy     bool                    // a switch is running
 }
 
 // New returns the sockets' keeper. Nothing is asked of Home Assistant before Run or PollOnce.
@@ -95,7 +100,13 @@ func New(o Options) *Plugs {
 		o.Interval = DefaultInterval
 	}
 	o.Interval = max(o.Interval, MinInterval)
-	p := &Plugs{o: o, sockets: append([]Socket(nil), o.Sockets...), index: map[[2]string]int{}}
+	if o.ReadTimeout <= 0 {
+		o.ReadTimeout = ReadTimeout
+	}
+	if o.SwitchTimeout <= 0 {
+		o.SwitchTimeout = SwitchTimeout
+	}
+	p := &Plugs{o: o, sockets: append([]Socket(nil), o.Sockets...), index: map[[2]string]int{}, lastAt: map[[2]string]time.Time{}}
 	p.states = make([]reading, len(p.sockets))
 	for i, s := range p.sockets {
 		p.index[[2]string{s.Source, s.ID}] = i
@@ -191,7 +202,7 @@ func (p *Plugs) Rows(source string) []Row {
 // an hour for the third and every further refusal in a row. A revoked token would otherwise be sent with every
 // socket every ten seconds, and Home Assistant counts each as a failed login and can ban this machine's
 // address, which would end the meters' readings too. The count goes back to zero with the first state that is
-// read; a restart of the agent starts it anew.
+// read; a restart of the agent starts it anew. A refusal that a switch met counts the same (switch.go).
 func (p *Plugs) Run(ctx context.Context) {
 	if p.Empty() {
 		return
@@ -291,4 +302,12 @@ func (p *Plugs) round(ctx context.Context) time.Duration {
 		p.mu.Unlock()
 	}
 	return p.o.Interval
+}
+
+// note keeps a state that was read outside the reader's round (by a switch), or why it could not be read.
+// Caller holds p.mu.
+func (p *Plugs) note(s Socket, state, why string) {
+	if i, ok := p.index[[2]string{s.Source, s.ID}]; ok {
+		p.states[i] = reading{state: state, err: why}
+	}
 }

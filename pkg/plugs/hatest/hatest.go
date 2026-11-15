@@ -60,6 +60,7 @@ type Server struct {
 	redirAs  int           // the status of that redirect (0: 307)
 	hang     bool          // POST: do not answer at all (until Close)
 	hangGet  bool          // GET: do not answer at all (until Close)
+	slowGet  time.Duration // GET: answer after this long
 	cut      bool          // POST: close the connection without an answer
 	late     time.Duration // POST: answer after this long
 	ignore   bool          // POST: answer 200 and switch nothing
@@ -187,6 +188,9 @@ func (s *Server) HangSwitch(applied bool) { s.set(func() { s.hang, s.lost = true
 // HangState makes state reads get no answer until Close (false: honest again).
 func (s *Server) HangState(on bool) { s.set(func() { s.hangGet = on }) }
 
+// SlowState makes state reads be answered only after d (0: at once again).
+func (s *Server) SlowState(d time.Duration) { s.set(func() { s.slowGet = d }) }
+
 // CutSwitch makes the connection of a switch request be closed without an answer.
 func (s *Server) CutSwitch(applied bool) { s.set(func() { s.cut, s.lost = true, !applied }) }
 
@@ -205,7 +209,7 @@ func (s *Server) AnswerAs(entity string) { s.set(func() { s.wrongID = entity }) 
 func (s *Server) Honest() {
 	s.set(func() {
 		s.settle, s.answer, s.getCode, s.redirect, s.redirAs = settle{}, 0, 0, "", 0
-		s.hang, s.hangGet, s.cut, s.late, s.ignore, s.lost, s.wrongID = false, false, false, 0, false, false, ""
+		s.hang, s.hangGet, s.cut, s.late, s.ignore, s.lost, s.wrongID, s.slowGet = false, false, false, 0, false, false, "", 0
 	})
 }
 
@@ -409,8 +413,14 @@ func (s *Server) serveState(w http.ResponseWriter, r *http.Request) {
 	s.read(entity)
 	state, has := s.states[entity]
 	unit := s.units[entity]
-	code, hang, as := s.getCode, s.hangGet, s.wrongID
+	code, hang, as, slow := s.getCode, s.hangGet, s.wrongID, s.slowGet
 	s.mu.Unlock()
+	if slow > 0 {
+		s.wait(r, slow)
+		s.mu.Lock()
+		state, has = s.states[entity] // as it is when the answer is written
+		s.mu.Unlock()
+	}
 	switch {
 	case hang:
 		s.wait(r, 0)

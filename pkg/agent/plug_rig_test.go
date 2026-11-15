@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"sync"
 	"testing"
 	"time"
 
@@ -32,7 +33,8 @@ const (
 
 // plugRig is an agent as the panel sees it that reads the made-up plugs of agenttest.PlugConfig from a fake
 // Home Assistant: the relay for the watts, pkg/plugs for the sockets, the agent's own approval gate on a trust
-// file in its own folder, and the made-up Pocket ID.
+// file in its own folder, and the made-up Pocket ID. Power control is on too, with an executor that only
+// records: a shutdown is the request these tests hold a socket switch against.
 type plugRig struct {
 	base  string
 	ha    *hatest.Server
@@ -43,13 +45,33 @@ type plugRig struct {
 	iss   *approvaltest.Issuer
 	trust string // the trust file
 	log   *logBuf
+	clk   *plugClock
+	power *agenttest.PowerExec // the machine's own shutdown, for the tests of what differs from it
+}
+
+// plugClock is the clock of the sockets' keeper in these tests: a wait moves it on and returns at once.
+type plugClock struct {
+	mu  sync.Mutex
+	now time.Time
+}
+
+func (c *plugClock) Now() time.Time { c.mu.Lock(); defer c.mu.Unlock(); return c.now }
+func (c *plugClock) add(d time.Duration) {
+	c.mu.Lock()
+	c.now = c.now.Add(d)
+	c.mu.Unlock()
+}
+func (c *plugClock) Pause(ctx context.Context, d time.Duration) bool {
+	c.add(d)
+	return true
 }
 
 type plugRigOpts struct {
 	agenttest.PlugOptions
 	off     bool   // home_assistant.switching: false
-	trust   string // "" a trust file is set; "none": no trust file; "broken": one that cannot be used
+	trust   string // "" a trust file is set; "admin": set on the machine; "none": no trust file; "broken": one that cannot be used
 	noGate  bool   // the agent was built without a gate
+	quick   bool   // short timeouts for a Home Assistant that does not answer
 	rate    int    // control_rate_per_min (0: 60)
 	helper  agent.HelperControl
 	gateOpt func(*approval.Options)
@@ -57,7 +79,7 @@ type plugRigOpts struct {
 
 func newPlugRig(t *testing.T, o plugRigOpts) *plugRig {
 	t.Helper()
-	r := &plugRig{ha: hatest.New(agenttest.PlugStates()), iss: approvaltest.New(), log: &logBuf{},
+	r := &plugRig{ha: hatest.New(agenttest.PlugStates()), iss: approvaltest.New(), log: &logBuf{}, power: &agenttest.PowerExec{},
 		trust: filepath.Join(t.TempDir(), approval.TrustFileName)}
 	t.Cleanup(r.ha.Close)
 	r.ha.SetSensor(agenttest.PlugBarSensor, "95.5", "W")
@@ -69,7 +91,7 @@ func newPlugRig(t *testing.T, o plugRigOpts) *plugRig {
 		o.rate = 60
 	}
 	o.ReadEnv, o.SwitchEnv, o.Switching = plugReadEnv, plugSwitchEnv, !o.off
-	cfg, err := agent.Parse([]byte("control_rate_per_min: "+strconv.Itoa(o.rate)+"\n"+agenttest.PlugConfig(r.ha.URL, o.PlugOptions)),
+	cfg, err := agent.Parse([]byte("control_rate_per_min: "+strconv.Itoa(o.rate)+"\npower_control: {enabled: true}\n"+agenttest.PlugConfig(r.ha.URL, o.PlugOptions)),
 		filepath.Join(t.TempDir(), "config.yaml"))
 	if err != nil {
 		t.Fatal(err)
@@ -78,10 +100,22 @@ func newPlugRig(t *testing.T, o plugRigOpts) *plugRig {
 	if r.relay, err = cfg.NewRelay(); err != nil {
 		t.Fatal(err)
 	}
-	if r.plugs, err = cfg.NewPlugs(r.relay); err != nil {
+	// as Config.NewPlugs, with a clock of the test's: the waits of a switch (half a second, then a second, ten
+	// seconds in all) move the clock on and take no time
+	po, ok, err := cfg.PlugOptions(r.relay)
+	if err != nil {
 		t.Fatal(err)
 	}
-	d := agent.Deps{Collector: agenttest.NewCollector(), Version: "test", Relay: r.relay, Plugs: r.plugs, Helper: o.helper}
+	if ok {
+		r.clk = &plugClock{now: time.Unix(1794000000, 0)}
+		po.Now, po.Pause = r.clk.Now, r.clk.Pause
+		if o.quick {
+			po.ReadTimeout, po.SwitchTimeout = 300*time.Millisecond, 300*time.Millisecond
+		}
+		r.plugs = plugs.New(po)
+	}
+	d := agent.Deps{Collector: agenttest.NewCollector(), Version: "test", Relay: r.relay, Plugs: r.plugs, Helper: o.helper,
+		Power: agent.NewPower(r.power, cfg.PowerControl.MinDelayS)}
 	if !o.noGate {
 		gopts := approval.Options{Files: approval.Files{Path: r.trust}, EnforcedBy: api.EnforcedByAgent, Log: slog.New(slog.NewTextHandler(r.log, nil))}
 		if o.gateOpt != nil {
@@ -97,6 +131,14 @@ func newPlugRig(t *testing.T, o plugRigOpts) *plugRig {
 			}
 			if st, ref := r.gate.Init(r.iss.Prove(time.Now(), in, api.MachineEntry{MachineID: in.MachineID, Challenge: c.Challenge, Request: c.Request})); ref != nil || st.State != api.ApprovalRequired {
 				t.Fatalf("first-time set: %+v, %v", st, ref)
+			}
+		case "admin": // written on the machine, as helper-trust set does (for a gate that only reads)
+			tr, err := approval.FromInit(r.iss.Init(), time.Now(), nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := (approval.Files{Path: r.trust}).Replace(tr); err != nil {
+				t.Fatal(err)
 			}
 		case "broken":
 			r.breakTrust(t)

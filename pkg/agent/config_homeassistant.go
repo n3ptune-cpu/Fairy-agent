@@ -195,13 +195,23 @@ func (c *Config) socketChecks(r *Relay) error {
 // whether its switch is in switch_allow, whether it is in feeds_self, and whether its meter says system_hint:
 // self. The ids are compared as the exact texts they are.
 func (c *Config) NewPlugs(r *Relay) (*plugs.Plugs, error) {
+	o, ok, err := c.PlugOptions(r)
+	if err != nil || !ok {
+		return nil, err
+	}
+	return plugs.New(o), nil
+}
+
+// PlugOptions is what NewPlugs builds the keeper from (ok false: there is none to build). A test that needs a
+// clock of its own changes the clock in it and calls plugs.New; nothing else has a use for it.
+func (c *Config) PlugOptions(r *Relay) (o plugs.Options, ok bool, err error) {
 	h := c.HomeAssistant
 	if h.URL == "" || h.TokenEnv == "" {
-		return nil, nil
+		return o, false, nil
 	}
 	ha, err := plugs.NewHA(h.URL, h.TokenEnv, h.CAFile)
 	if err != nil {
-		return nil, err
+		return o, false, err
 	}
 	var sockets []plugs.Socket
 	for _, src := range r.SocketSources() {
@@ -212,7 +222,7 @@ func (c *Config) NewPlugs(r *Relay) (*plugs.Plugs, error) {
 				SelfHint: src.Hint == selfHint})
 		}
 	}
-	return plugs.New(plugs.Options{HA: ha, Sockets: sockets, Switching: h.Switching, MinGap: time.Duration(h.MinGapS) * time.Second}), nil
+	return plugs.Options{HA: ha, Sockets: sockets, Switching: h.Switching, MinGap: time.Duration(h.MinGapS) * time.Second}, true, nil
 }
 
 // selfHint is the system_hint of a power source that measures the machine this agent runs on.

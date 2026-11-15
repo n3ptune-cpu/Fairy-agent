@@ -19,7 +19,8 @@ package agent
 // over, because the process is the one that checks.
 //
 // What needs an approval while trust is set: POST /fan/duty and /fan/mode, POST /power with shutdown, reboot
-// or sleep, POST /update. What never does: POST /power cancel, POST /wol and POST /bmc/power (they wake
+// or sleep, POST /update, POST /plug/switch. The last one differs from the others in one thing: it is refused
+// while trust is NOT set (plug.go), where the others run unchecked. What never does: POST /power cancel, POST /wol and POST /bmc/power (they wake
 // machines; the relay has no "off"), POST /helper/stop and /start (the service manager, and stop only hands
 // the fans back to the BMC), and everything the agent does by itself with nobody present (the fan watchdog,
 // fans to automatic when it stops).
@@ -56,8 +57,9 @@ func (a *Agent) helperApproval() (HelperApproval, bool) {
 	return h, true
 }
 
-// approvalVerbs are the requests that need an approval while trust is set.
-var approvalVerbs = []string{api.ApproveFanSet, api.ApproveFanMode, api.ApprovePower, api.ApproveApplyUpdate}
+// approvalVerbs are the requests that need an approval while trust is set. The last one, the switch of a plug
+// socket, is also refused while it is not (plug.go); this agent process always carries it out itself.
+var approvalVerbs = []string{api.ApproveFanSet, api.ApproveFanMode, api.ApprovePower, api.ApproveApplyUpdate, api.ApproveSocketSet}
 
 // helperRuns reports whether the Windows helper carries out the request verb, and so is the one that checks
 // its approval: fans through the helper (ipmi.transport: wmi), power through the helper, and the update of an
@@ -364,6 +366,8 @@ func (a *Agent) featureOff(verb string) string {
 		return "power_control_disabled" // a run ends with a shutdown
 	case verb == api.ApproveApplyUpdate && a.d.Updater == nil:
 		return "self_update_disabled"
+	case verb == api.ApproveSocketSet && !a.d.Plugs.Switching():
+		return api.CodePlugSwitchingDisabled
 	}
 	return "" // also trust_set: no part to switch off
 }
@@ -377,7 +381,15 @@ func approvalDisabled(w http.ResponseWriter) {
 // file is the helper's), this agent for what it carries out itself.
 func (a *Agent) approvalChallenge(w http.ResponseWriter, r *http.Request) {
 	var req api.ApprovalRequest
-	if err := decodeStrictBody(r, &req); err != nil {
+	err := decodeStrictBody(r, &req)
+	// The route is open on every agent that switches plug sockets, also on one where nothing checks approvals
+	// (challengeOpen): such a machine must answer a socket's challenge request itself, with a refusal. Every
+	// other request gets there what it always got on such a machine.
+	if !a.hasApproval() && (err != nil || req.Verb != api.ApproveSocketSet) {
+		approvalDisabled(w)
+		return
+	}
+	if err != nil {
 		writeJSON(w, 400, map[string]any{"error": err.Error()})
 		return
 	}
@@ -391,6 +403,10 @@ func (a *Agent) approvalChallenge(w http.ResponseWriter, r *http.Request) {
 	}
 	if code := a.featureOff(req.Verb); code != "" {
 		writeJSON(w, 404, map[string]any{"error": "that is disabled on this agent", "code": code})
+		return
+	}
+	if req.Verb == api.ApproveSocketSet { // never the helper's, and never "needs none" (plug.go)
+		a.socketChallenge(w, r, req)
 		return
 	}
 	h, viaHelper := a.helperApproval()

@@ -27,6 +27,10 @@ func strictOff() *Refusal {
 		Msg: "this machine has no passkey check (no approval trust file), and this request is carried out only with a passkey approval, so it is refused. Set the check up first: from the panel, or on the machine with fairy-agent helper-trust set"}
 }
 
+// Off is strictOff for a caller that has to give the answer itself: the agent, where its own gate cannot read
+// the trust file and the helper, whose file it is, says that there is none.
+func Off() *Refusal { return strictOff() }
+
 // strictWithoutGate is what a nil Gate answers: nothing for the requests it has always let run, strictOff for
 // a strict one.
 func strictWithoutGate(verb string) *Refusal {

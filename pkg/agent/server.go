@@ -392,12 +392,16 @@ func (a *Agent) Handler() http.Handler {
 		api.PathHelperStop:  {method: http.MethodPost, control: true, budget: budgetControl, feature: a.hasHelper, h: a.helperStop},
 		api.PathHelperStart: {method: http.MethodPost, control: true, budget: budgetControl, feature: a.hasHelper, h: a.helperStart},
 		// the passkey approval of the routes above (approval.go)
-		api.PathApprovalChallenge: {method: http.MethodPost, control: true, budget: budgetChallenge, maxBody: approvalBody, feature: a.hasApproval, code: api.CodeApprovalDisabled, h: a.approvalChallenge},
+		api.PathApprovalChallenge: {method: http.MethodPost, control: true, budget: budgetChallenge, maxBody: approvalBody, feature: a.challengeOpen, code: api.CodeApprovalDisabled, h: a.approvalChallenge},
 		api.PathApprovalTrust:     {method: http.MethodPost, control: true, budget: budgetControl, maxBody: approvalBody, feature: a.hasApproval, code: api.CodeApprovalDisabled, h: a.approvalTrust},
 		// the ticket and the confirmation of a wake / update / shutdown run (api, "Runs"): both carry a passkey
 		// approval, and nothing is done for a body without one
 		api.PathRunArm: {method: http.MethodPost, control: true, budget: budgetControl, maxBody: approvalBody, feature: a.hasApproval, code: api.CodeApprovalDisabled, h: a.runArm},
 		api.PathRunGo:  {method: http.MethodPost, control: true, budget: budgetControl, maxBody: approvalBody, feature: a.hasApproval, code: api.CodeApprovalDisabled, h: a.runGo},
+		// one socket of a plug in Home Assistant, on or off: only on an agent whose own config turns switching
+		// on, only with a passkey approval that this agent checks itself, and refused where there is no such
+		// check (plug.go)
+		api.PathPlugSwitch: {method: http.MethodPost, control: true, budget: budgetControl, maxBody: approvalBody, feature: a.d.Plugs.Switching, code: api.CodePlugSwitchingDisabled, h: a.plugSwitch},
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ip := clientIP(r)
