@@ -1090,3 +1090,30 @@ func TestPlugSwitchOnWindows(t *testing.T) {
 		}
 	})
 }
+
+// The challenge route on the one arrangement where its first condition decides: Windows, a helper that knows
+// no approvals, and no trust file. The agent has a gate there and nothing "checks approvals", so the route is
+// open only because sockets are switched. Every other request must get there what it always got, 404
+// approval_disabled, and not "needs no approval"; a socket's request gets 409 approval_off.
+func TestPlugChallengeOnWindowsWithAHelperThatKnowsNoApprovals(t *testing.T) {
+	r := newPlugRig(t, plugRigOpts{helper: agenttest.NewHelper(), trust: "none"})
+	r.ha.Forget()
+	for name, body := range map[string]any{
+		"a shutdown":     map[string]any{"verb": "power", "action": "shutdown", "delay_s": 60},
+		"a fan request":  map[string]any{"verb": "fan_mode", "mode": "optimal"},
+		"an update":      map[string]any{"verb": "apply_update"},
+		"no verb at all": map[string]any{},
+		"not JSON":       "not json",
+	} {
+		c := r.post(t, api.PathApprovalChallenge, body)
+		if c.status != 404 || c.code() != api.CodeApprovalDisabled || c.body["needed"] != nil || c.body["challenge"] != nil {
+			t.Errorf("a challenge request for %s: %s", name, c)
+		}
+	}
+	for _, to := range []string{"on", "off"} {
+		if c := r.challenge(t, sockCh1, to); c.status != 409 || c.code() != api.CodeApprovalOff || c.body["challenge"] != nil {
+			t.Errorf("a socket's challenge request (%s): %s", to, c)
+		}
+	}
+	r.quiet(t, "challenge requests on a machine whose helper knows no approvals")
+}
