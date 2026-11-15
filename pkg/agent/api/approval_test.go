@@ -513,3 +513,188 @@ func TestTrustHashIsUnambiguous(t *testing.T) {
 		seen[h] = name
 	}
 }
+
+// vectorTag is a well-formed tag for the tests of the request text: the 16 bytes first, first+1, ...
+func vectorTag(first byte) string {
+	b := make([]byte, 16)
+	for i := range b {
+		b[i] = first + byte(i)
+	}
+	return base64.RawURLEncoding.EncodeToString(b)
+}
+
+// TestSocketTagVectors are worked examples of the tag of a socket: the panel never computes a tag (it copies
+// the one the machine shows), but a second implementation, or a reviewer with another tool, must get the same.
+// The values were computed with an independent Python hashlib script.
+func TestSocketTagVectors(t *testing.T) {
+	for _, c := range []struct{ source, socket, name, entity, want string }{
+		{"desk-bar", "ch1", "Channel 1", "switch.desk_bar_socket_1", "RPOoLy2ZT8y1WE61UayT2w"},
+		{"desk-bar", "ch2", "Channel 2", "switch.desk_bar_socket_2", "7DQdZz8fAGeJXjSXc0mtCA"},
+		{"a", "b", "", "", "DmuqP2ZGxLYUyygt6H8MGA"},
+		{"desk-bar", "ch1", "Left monitor ☀", "switch.desk_bar_socket_1", "kho1A8vGMOQeEj3VZ-z0ww"},
+	} {
+		got := SocketTag(c.source, c.socket, c.name, c.entity)
+		if got != c.want {
+			t.Errorf("SocketTag(%q, %q, %q, %q) = %s, want %s", c.source, c.socket, c.name, c.entity, got, c.want)
+		}
+		if err := CheckSocketTag(got); err != nil || len(got) != SocketTagLen {
+			t.Errorf("the tag %q is not one a request may carry: %v", got, err)
+		}
+	}
+}
+
+// The tag is another one as soon as one of its four parts is: the source, the socket, the name or the entity.
+// And no part can be moved into its neighbour (every part has its length in front).
+func TestSocketTagChangesWithEveryPart(t *testing.T) {
+	base := [4]string{"desk-bar", "ch1", "Channel 1", "switch.desk_bar_socket_1"}
+	tag := func(p [4]string) string { return SocketTag(p[0], p[1], p[2], p[3]) }
+	seen := map[string]string{tag(base): "the socket itself"}
+	try := func(what string, p [4]string) {
+		t.Helper()
+		got := tag(p)
+		if other, dup := seen[got]; dup {
+			t.Errorf("%s has the tag of %s", what, other)
+		}
+		seen[got] = what
+	}
+	for i, name := range []string{"source", "socket", "name", "entity"} {
+		p := base
+		p[i] += "x"
+		try("another "+name, p)
+		p = base
+		p[i] = ""
+		try("an empty "+name, p)
+	}
+	// the same bytes, cut at another place
+	try("a character moved from the source to the socket", [4]string{"desk-ba", "rch1", base[2], base[3]})
+	try("a character moved from the socket to the name", [4]string{base[0], "ch", "1Channel 1", base[3]})
+	try("a character moved from the name to the entity", [4]string{base[0], base[1], "Channel ", "1switch.desk_bar_socket_1"})
+	try("name and entity swapped", [4]string{base[0], base[1], base[3], base[2]})
+	try("source and socket swapped", [4]string{base[1], base[0], base[2], base[3]})
+	if tag(base) != tag(base) {
+		t.Error("the same socket has two tags")
+	}
+}
+
+// The exact bytes of the request "socket_set ...", for on and for off, and everything that has no such text.
+func TestCanonicalSocketSet(t *testing.T) {
+	tag := vectorTag(0x40)
+	if tag != "QEFCQ0RFRkdISUpLTE1OTw" {
+		t.Fatalf("vector tag = %s", tag)
+	}
+	long40, long16 := strings.Repeat("s", MaxSocketSource), strings.Repeat("k", MaxSocketID)
+	for _, c := range []struct {
+		r    ApprovalRequest
+		want string
+	}{
+		{SocketSetRequest("desk-bar", "ch1", "off", tag), "socket_set source=desk-bar socket=ch1 to=off tag=QEFCQ0RFRkdISUpLTE1OTw"},
+		{SocketSetRequest("desk-bar", "ch1", "on", tag), "socket_set source=desk-bar socket=ch1 to=on tag=QEFCQ0RFRkdISUpLTE1OTw"},
+		{SocketSetRequest("0", "0", "on", tag), "socket_set source=0 socket=0 to=on tag=QEFCQ0RFRkdISUpLTE1OTw"},
+		{SocketSetRequest(long40, long16, "off", tag), "socket_set source=" + long40 + " socket=" + long16 + " to=off tag=QEFCQ0RFRkdISUpLTE1OTw"},
+	} {
+		got, err := c.r.Canonical()
+		if err != nil || got != c.want {
+			t.Errorf("%q, %v; want %q", got, err, c.want)
+		}
+		if len(got) > MaxApprovalRequest {
+			t.Errorf("%q is longer than an entry may be (%d bytes)", got, len(got))
+		}
+		if _, err := ApprovalNonce([]MachineEntry{{MachineID: vectorMachineA, Challenge: vectorChallenge(1), Request: got}}); err != nil {
+			t.Errorf("%q cannot be an entry: %v", got, err)
+		}
+	}
+	// the longest text there is: 116 bytes, as the limits' comment says
+	if longest, _ := SocketSetRequest(long40, long16, "off", tag).Canonical(); len(longest) != 116 {
+		t.Errorf("the longest socket_set text is %d bytes, want 116", len(longest))
+	}
+	for name, r := range map[string]ApprovalRequest{
+		"toggle":                    SocketSetRequest("desk-bar", "ch1", "toggle", tag),
+		"to in capitals":            SocketSetRequest("desk-bar", "ch1", "OFF", tag),
+		"to empty":                  SocketSetRequest("desk-bar", "ch1", "", tag),
+		"to with a second field":    SocketSetRequest("desk-bar", "ch1", "on tag=x", tag),
+		"to as a run names it":      SocketSetRequest("desk-bar", "ch1", "-", tag),
+		"a source of 41 characters": SocketSetRequest(long40+"s", "ch1", "off", tag),
+		"a socket of 17 characters": SocketSetRequest("desk-bar", long16+"k", "off", tag),
+		"an empty source":           SocketSetRequest("", "ch1", "off", tag),
+		"an empty socket":           SocketSetRequest("desk-bar", "", "off", tag),
+		"a source with a space":     SocketSetRequest("desk bar", "ch1", "off", tag),
+		"a source with an equals":   SocketSetRequest("desk=bar", "ch1", "off", tag),
+		"a source in capitals":      SocketSetRequest("Desk-Bar", "ch1", "off", tag),
+		"a source that starts -":    SocketSetRequest("-desk", "ch1", "off", tag),
+		"a socket that starts -":    SocketSetRequest("desk-bar", "-1", "off", tag),
+		"a socket with a slash":     SocketSetRequest("desk-bar", "ch/1", "off", tag),
+		"a socket with a dot":       SocketSetRequest("desk-bar", "switch.x", "off", tag),
+		"a socket with a newline":   SocketSetRequest("desk-bar", "ch1\n", "off", tag),
+		"a tag of 21 characters":    SocketSetRequest("desk-bar", "ch1", "off", tag[:21]),
+		"a tag of 23 characters":    SocketSetRequest("desk-bar", "ch1", "off", tag+"A"),
+		"a tag with padding":        SocketSetRequest("desk-bar", "ch1", "off", tag[:21]+"="),
+		"a tag with a space":        SocketSetRequest("desk-bar", "ch1", "off", tag[:10]+" "+tag[11:]),
+		"a tag in plain base64":     SocketSetRequest("desk-bar", "ch1", "off", tag[:10]+"/"+tag[11:]),
+		"a tag with stray bits":     SocketSetRequest("desk-bar", "ch1", "off", tag[:21]+"x"),
+		"no tag":                    {Verb: "socket_set", Source: sp("desk-bar"), Socket: sp("ch1"), To: sp("off")},
+		"no to":                     {Verb: "socket_set", Source: sp("desk-bar"), Socket: sp("ch1"), Tag: sp(tag)},
+		"no socket":                 {Verb: "socket_set", Source: sp("desk-bar"), To: sp("off"), Tag: sp(tag)},
+		"no source":                 {Verb: "socket_set", Socket: sp("ch1"), To: sp("off"), Tag: sp(tag)},
+		"nothing":                   {Verb: "socket_set"},
+		"with a delay":              {Verb: "socket_set", Source: sp("desk-bar"), Socket: sp("ch1"), To: sp("off"), Tag: sp(tag), DelayS: ip(0)},
+		"with a run":                {Verb: "socket_set", Source: sp("desk-bar"), Socket: sp("ch1"), To: sp("off"), Tag: sp(tag), Run: sp("0123456789abcdef")},
+		"with an action":            {Verb: "socket_set", Source: sp("desk-bar"), Socket: sp("ch1"), To: sp("off"), Tag: sp(tag), Action: sp("shutdown")},
+		"a power request, a socket": {Verb: "power", Action: sp("shutdown"), DelayS: ip(60), Socket: sp("ch1")},
+		"a fan request with a tag":  {Verb: "fan_mode", Mode: sp("full"), Tag: sp(tag)},
+		"an update with a source":   {Verb: "apply_update", Source: sp("desk-bar")},
+		"a run_go with a source":    {Verb: "run_go", Run: sp("0123456789abcdef"), To: sp("-"), ShutdownDelayS: ip(30), WithinS: ip(600), Source: sp("desk-bar")},
+		"the verb plug_switch":      {Verb: "plug_switch", Source: sp("desk-bar"), Socket: sp("ch1"), To: sp("off"), Tag: sp(tag)},
+		"the verb socket_toggle":    {Verb: "socket_toggle", Source: sp("desk-bar"), Socket: sp("ch1"), Tag: sp(tag)},
+	} {
+		if got, err := r.Canonical(); err == nil {
+			t.Errorf("%s: canonical form %q", name, got)
+		}
+	}
+	// the sentence for a verb nobody knows is the one of v0.8.0, byte for byte, also now
+	_, err := ApprovalRequest{Verb: "socket_toggle"}.Canonical()
+	if err == nil || err.Error() != "verb must be fan_set, fan_mode, power, apply_update or trust_set" {
+		t.Errorf("an unknown verb is answered %v", err)
+	}
+	// a socket_set text is never read as a run request
+	if r, err := ParseRunRequest("socket_set source=desk-bar socket=ch1 to=off tag=" + tag); err == nil {
+		t.Errorf("ParseRunRequest read a socket_set text: %+v", r)
+	}
+}
+
+// FuzzCanonicalSocketSet: whatever four values get a text, the text is at most MaxApprovalRequest bytes of
+// printable ASCII, can be an entry, and reads back as exactly those four values: the verb and four fields,
+// split at single spaces, each "name=value" in the fixed order. So no value can smuggle a second field in, and
+// two different requests never have one text.
+func FuzzCanonicalSocketSet(f *testing.F) {
+	tag := vectorTag(0x40)
+	f.Add("desk-bar", "ch1", "off", tag)
+	f.Add("desk-bar", "ch1", "on", tag)
+	f.Add("desk-bar", "ch1", "toggle", tag)
+	f.Add("desk bar", "ch1 to=on", "off tag="+tag, tag)
+	f.Add("", "", "", "")
+	f.Add("a", "b", "on", tag[:21]+"x")
+	f.Add("desk-bar\x00", "ch1\n", "on\r", tag+"=")
+	f.Fuzz(func(t *testing.T, source, socket, to, tag string) {
+		text, err := SocketSetRequest(source, socket, to, tag).Canonical()
+		if err != nil {
+			return
+		}
+		if len(text) > MaxApprovalRequest {
+			t.Fatalf("%q is %d bytes", text, len(text))
+		}
+		parts := strings.Split(text, " ")
+		if len(parts) != 5 || parts[0] != ApproveSocketSet || parts[1] != "source="+source || parts[2] != "socket="+socket ||
+			parts[3] != "to="+to || parts[4] != "tag="+tag {
+			t.Fatalf("%q does not read back as (%q, %q, %q, %q)", text, source, socket, to, tag)
+		}
+		if strings.Count(text, "=") != 4 {
+			t.Fatalf("%q has a value with an equals sign", text)
+		}
+		if to != SocketOn && to != SocketOff {
+			t.Fatalf("%q: a direction that is neither on nor off", text)
+		}
+		if _, err := ApprovalNonce([]MachineEntry{{MachineID: vectorMachineA, Challenge: vectorChallenge(1), Request: text}}); err != nil {
+			t.Fatalf("%q cannot be an entry: %v", text, err)
+		}
+	})
+}

@@ -90,6 +90,24 @@ const (
 	CodeRunUnavailable = "run_unavailable"
 )
 
+// Error codes of POST /plug/switch (and, where the action itself would be refused for a reason that needs no
+// approval to know, of POST /approval/challenge for the verb socket_set). With every one of them but
+// CodeHARefused and CodeNoAnswer nothing was sent that changes anything, and the approval is not used up.
+const (
+	CodePlugSwitchingDisabled = "plug_switching_disabled" // 404: home_assistant.switching is false on this machine
+	CodeUnknownSocket         = "unknown_socket"          // 404: no such power source, or it has no such socket
+	CodeNotAllowed            = "not_allowed"             // 403: the socket's switch is not in home_assistant.switch_allow
+	CodeFeedsSelf             = "feeds_self"              // 403: the socket's switch is in home_assistant.feeds_self, or its meter says system_hint: self
+	CodeSocketChanged         = "socket_changed"          // 409: the tag is not the tag of this socket now (SocketTag)
+	CodeSocketUnavailable     = "socket_unavailable"      // 409: Home Assistant has no "on" or "off" for the socket right now
+	CodeSwitchInProgress      = "switch_in_progress"      // 409: another switch is running on this agent
+	CodeTooSoon               = "too_soon"                // 429: less than home_assistant.min_gap_s since the last switch of this socket
+	CodeNoSwitchToken         = "no_token"                // 409: the variable home_assistant.token_env names holds no token on this machine
+	CodeHAUnreachable         = "ha_unreachable"          // 502: the socket's state could not be read before the switch
+	CodeHARefused             = "ha_refused"              // 502: Home Assistant answered the switch request with an error status (the approval is used up)
+	CodeNoAnswer              = "no_answer"               // 502: the switch request got no answer and the socket did not show the new state (the approval is used up; it may still happen)
+)
+
 // ApprovalRuns is the "runs" of the "approval" block: the version of the run scheme below that this machine
 // speaks. Absent: an agent (or, on Windows, a helper) from before runs, or a machine that cannot keep a run
 // (Windows without the helper). It is not part of ApprovalProto, which stays what it was: every approval that
@@ -257,12 +275,113 @@ const (
 	// The two requests of a run (see "Runs").
 	ApproveRunArm = "run_arm" // POST /run/arm: the ticket; never the answer to a challenge
 	ApproveRunGo  = "run_go"  // POST /run/go: the confirmation
+	// ApproveSocketSet is POST /plug/switch: one socket of a plug that a Home Assistant knows, in one direction.
+	// It is the one request that is refused on a machine WITHOUT a trust file (409 approval_off), where every
+	// verb above runs unchecked; and its approval's list must hold exactly one entry (pkg/approval).
+	ApproveSocketSet = "socket_set"
+)
+
+// Limits of the socket_set request. With them its canonical text is at most 116 bytes (MaxApprovalRequest is
+// 128): "socket_set source=" 18, the source 40, " socket=" 8, the socket 16, " to=" 4, "off" 3, " tag=" 5, the
+// tag 22.
+const (
+	MaxSocketSource = 40 // characters of the id of a power source that has sockets (an id may otherwise be 63)
+	MaxSocketID     = 16 // characters of a socket's id
+	SocketTagLen    = 22 // characters of a socket's tag: 16 bytes, base64url without padding
+	SocketOn        = "on"
+	SocketOff       = "off"
 )
 
 var (
 	approveFanModes     = []string{"standard", "full", "optimal", "heavyio"}
 	approvePowerActions = []string{"shutdown", "reboot", "sleep"}
 )
+
+// idText reports whether s is an id of 1 to most characters: lower-case letters, digits and dashes, the first a
+// letter or a digit (the rule of a power source's id, pkg/configutil, with a length of its own).
+func idText(s string, most int) bool {
+	if len(s) < 1 || len(s) > most || s[0] == '-' {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if c := s[i]; !(c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || c == '-') {
+			return false
+		}
+	}
+	return true
+}
+
+// CheckSocketSource says whether s can be the id of a power source that has sockets.
+func CheckSocketSource(s string) error {
+	if !idText(s, MaxSocketSource) {
+		return fmt.Errorf("source must be the id of a power source: 1-%d lower-case letters, digits and dashes", MaxSocketSource)
+	}
+	return nil
+}
+
+// CheckSocketID says whether s can be a socket's id.
+func CheckSocketID(s string) error {
+	if !idText(s, MaxSocketID) {
+		return fmt.Errorf("socket must be a socket's id: 1-%d lower-case letters, digits and dashes", MaxSocketID)
+	}
+	return nil
+}
+
+// CheckSocketTag says whether s can be a socket's tag: exactly SocketTagLen characters of the URL-safe
+// alphabet that are 16 bytes, no padding, no stray bits.
+func CheckSocketTag(s string) error {
+	bad := errors.New("tag must be 22 characters of base64url (16 bytes, no padding)")
+	if len(s) != SocketTagLen {
+		return bad
+	}
+	for i := 0; i < len(s); i++ { // encoding/base64 skips line breaks even in strict mode
+		c := s[i]
+		if !(c >= 'A' && c <= 'Z' || c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || c == '-' || c == '_') {
+			return bad
+		}
+	}
+	if b, err := base64.RawURLEncoding.Strict().DecodeString(s); err != nil || len(b) != 16 {
+		return bad
+	}
+	return nil
+}
+
+// socketDomain starts every socket tag input: nothing else Fairy hashes begins with it.
+const socketDomain = "fairy-socket-v1"
+
+// SocketTag is the tag of one socket as a machine describes it:
+//
+//	base64url_nopad( first 16 bytes of SHA-256( "fairy-socket-v1" || 0x00 ||
+//	    str(source) || str(socket) || str(name) || str(switch_entity) ) )
+//
+// str(x) is be32(len(x)) || x, as in TrustHash. source is the id of the power source, socket the socket's id,
+// name the name the machine shows for it and switch_entity the entity id of its switch in Home Assistant. The
+// values are not checked here.
+//
+// It is the "tag" of the request "socket_set ...": an approval is for the socket as the machine described it
+// when the person looked. The machine publishes the tag with the socket, the panel sends it back with the
+// request, and the machine compares it with the tag of its present config when it gives the challenge and
+// again when it switches. A socket id that has another name or another switch by then is refused before
+// anything is used up. The entity id itself is never sent; the tag stands for it. It is 16 bytes and not the
+// whole hash because the request text must fit into MaxApprovalRequest.
+func SocketTag(source, socket, name, switchEntity string) string {
+	h := sha256.New()
+	h.Write([]byte(socketDomain))
+	h.Write([]byte{0})
+	var n [4]byte
+	for _, s := range []string{source, socket, name, switchEntity} {
+		binary.BigEndian.PutUint32(n[:], uint32(len(s)))
+		h.Write(n[:])
+		h.Write([]byte(s))
+	}
+	return base64.RawURLEncoding.EncodeToString(h.Sum(nil)[:16])
+}
+
+// SocketSetRequest is the request one switch of a socket must be approved as: the body of the POST
+// /approval/challenge that comes before POST /plug/switch.
+func SocketSetRequest(source, socket, to, tag string) ApprovalRequest {
+	return ApprovalRequest{Verb: ApproveSocketSet, Source: &source, Socket: &socket, To: &to, Tag: &tag}
+}
 
 // ApprovalRequest is one exact request: the body of POST /approval/challenge, and what a challenge is bound to.
 type ApprovalRequest struct {
@@ -283,6 +402,11 @@ type ApprovalRequest struct {
 	To             *string `json:"to,omitempty"`
 	ShutdownDelayS *int    `json:"shutdown_delay_s,omitempty"`
 	WithinS        *int    `json:"within_s,omitempty"`
+	// The members of socket_set: source (the power source's id), socket (the socket's id), to (on | off; the
+	// member run_go has too, with its own values there) and tag (SocketTag).
+	Source *string `json:"source,omitempty"`
+	Socket *string `json:"socket,omitempty"`
+	Tag    *string `json:"tag,omitempty"`
 }
 
 // Canonical is the one text form of the request, the "request" of an entry:
@@ -294,16 +418,19 @@ type ApprovalRequest struct {
 //	trust_set hash=<43 characters: TrustHash of the proposed trust>
 //	run_arm run=<16 hex> valid_s=<120-600> wait_s=<120-3600> notice_s=<30-600>
 //	run_go run=<16 hex> to=<version | -> shutdown_delay_s=<10-600> within_s=<300-1800>
+//	socket_set source=<power source id, 1-40> socket=<socket id, 1-16> to=<on|off> tag=<22 characters: SocketTag>
 //
 // ASCII, single spaces, numbers in decimal without sign or leading zeros, the fields in exactly this order.
-// Every value is a small number, one word of a fixed list, 43 characters of the base64url alphabet, 16 hex
-// characters or a version of A-Z a-z 0-9 . _ + -, so no value can contain a space or "=".
+// Every value is a small number, one word of a fixed list, 43 or 22 characters of the base64url alphabet, 16
+// hex characters, a version of A-Z a-z 0-9 . _ + - or an id of a-z 0-9 -, so no value can contain a space or
+// "=".
 // A request with a missing or an extra field, or a value outside these lists, has no canonical form.
 func (r ApprovalRequest) Canonical() (string, error) {
 	set := map[string]bool{"zone": r.Zone != nil, "percent": r.Percent != nil, "mode": r.Mode != nil,
 		"action": r.Action != nil, "delay_s": r.DelayS != nil, "trust_hash": r.TrustHash != nil,
 		"run": r.Run != nil, "valid_s": r.ValidS != nil, "wait_s": r.WaitS != nil, "notice_s": r.NoticeS != nil,
-		"to": r.To != nil, "shutdown_delay_s": r.ShutdownDelayS != nil, "within_s": r.WithinS != nil}
+		"to": r.To != nil, "shutdown_delay_s": r.ShutdownDelayS != nil, "within_s": r.WithinS != nil,
+		"source": r.Source != nil, "socket": r.Socket != nil, "tag": r.Tag != nil}
 	only := func(fields ...string) error {
 		for f, present := range set {
 			if want := slices.Contains(fields, f); present != want {
@@ -392,8 +519,26 @@ func (r ApprovalRequest) Canonical() (string, error) {
 			return "", fmt.Errorf("within_s must be %d-%d", RunWithinMinS, RunWithinMaxS)
 		}
 		return "run_go run=" + *r.Run + " to=" + *r.To + " shutdown_delay_s=" + strconv.Itoa(*r.ShutdownDelayS) + " within_s=" + strconv.Itoa(*r.WithinS), nil
+	case ApproveSocketSet:
+		if err := only("source", "socket", "to", "tag"); err != nil {
+			return "", err
+		}
+		if err := CheckSocketSource(*r.Source); err != nil {
+			return "", err
+		}
+		if err := CheckSocketID(*r.Socket); err != nil {
+			return "", err
+		}
+		if *r.To != SocketOn && *r.To != SocketOff { // two words and nothing else: there is no toggle
+			return "", errors.New("to must be on or off")
+		}
+		if err := CheckSocketTag(*r.Tag); err != nil {
+			return "", err
+		}
+		return "socket_set source=" + *r.Source + " socket=" + *r.Socket + " to=" + *r.To + " tag=" + *r.Tag, nil
 	}
-	// the sentence of v0.8.0, byte for byte (the two verbs of a run are known verbs and never get here)
+	// the sentence of v0.8.0, byte for byte (the two verbs of a run and socket_set are known verbs and never get
+	// here)
 	return "", errors.New("verb must be fan_set, fan_mode, power, apply_update or trust_set")
 }
 
