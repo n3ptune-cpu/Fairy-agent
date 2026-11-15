@@ -99,9 +99,11 @@ func (c *Config) PlugReport(p *plugs.Plugs, approvalState string) PlugReport {
 		if typ, _ := raw["type"].(string); typ != "homeassistant" {
 			continue
 		}
+		// Only a file with switching off gets here like this: with switching on it does not load (tokenEnvShared).
 		if env, _ := raw["token_env"].(string); strings.EqualFold(env, h.TokenEnv) {
-			rep.Notes = append(rep.Notes, "home_assistant.token_env names the variable the power sources read with: one token reads the sensors and switches the sockets. "+
-				"With a second Home Assistant user for switching, its token can be revoked alone, and Home Assistant's own logbook shows which switches came from Fairy.")
+			rep.Notes = append(rep.Notes, "home_assistant.token_env names the variable the power sources read with: one token reads the sensors and the sockets' states. "+
+				"This loads only while switching is false: with switching: true the token for switching needs a variable of its own. "+
+				"Make a second Home Assistant user for it: its token can be revoked alone, and Home Assistant's own logbook shows which switches came from Fairy.")
 			break
 		}
 	}

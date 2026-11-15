@@ -129,7 +129,11 @@ ups: []
 #   url: "http://192.168.1.10:8123"        # Home Assistant itself, the same address as the entries with sockets
 #   token_env: HA_SWITCH_TOKEN             # the variable (env_file) with the token for the sockets: a token of
 #                                          #   its own, from a second Home Assistant user. The token the entries
-#                                          #   read their sensors with is never used in its place
+#                                          #   read their sensors with is never used in its place. With
+#                                          #   switching: true this must NOT be the variable an entry names in
+#                                          #   its token_env (HA_TOKEN above): the file does not load then.
+#                                          #   The sockets' states are read with this token every 10 s, so it
+#                                          #   is in use all the time, not only at a switch
 #   # ca_file: /etc/fairy-agent/ha.pem     # https only
 #   switching: false                       # true: POST /plug/switch answers. Needs the line feeds_self
 #   switch_allow: []                       # the exact switch.* ids that may be switched; no patterns

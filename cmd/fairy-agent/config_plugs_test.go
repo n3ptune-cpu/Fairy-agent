@@ -172,11 +172,21 @@ note: switch.no_such_socket is in switch_allow and no socket in this file has th
 		}
 	}
 
-	// one token for both: said, with what a second one would give
-	p := plugFiles(t, strings.Replace(plugBlock("  switching: true\n", "  feeds_self: []\n"), plugSwitchVar, plugReadVar, 1), plugSources, both, api.ApprovalRequired)
+	// one variable for both tokens. While switching is off: a note, with what is to come. With switching on:
+	// a config problem that names the two places and not the variable.
+	p := plugFiles(t, strings.Replace(plugBlock("  feeds_self: []\n"), plugSwitchVar, plugReadVar, 1), plugSources, both, api.ApprovalRequired)
 	var out, errb bytes.Buffer
-	if code := checkConfigCmd(p, &out, &errb); code != 0 || !strings.Contains(out.String(), "note: home_assistant.token_env names the variable the power sources read with: one token reads the sensors and switches the sockets.") {
-		t.Errorf("one token for both: exit %d\n%s%s", code, out.String(), errb.String())
+	if code := checkConfigCmd(p, &out, &errb); code != 0 || !strings.Contains(out.String(), "note: home_assistant.token_env names the variable the power sources read with: one token reads the sensors and the sockets' states. "+
+		"This loads only while switching is false: with switching: true the token for switching needs a variable of its own.") {
+		t.Errorf("one variable for both, switching off: exit %d\n%s%s", code, out.String(), errb.String())
+	}
+	p = plugFiles(t, strings.Replace(plugBlock("  switching: true\n", "  feeds_self: []\n"), plugSwitchVar, plugReadVar, 1), plugSources, both, api.ApprovalRequired)
+	out.Reset()
+	errb.Reset()
+	if code := checkConfigCmd(p, &out, &errb); code != 1 || out.Len() != 0 || !strings.HasPrefix(errb.String(), "config problem: ") ||
+		!strings.Contains(errb.String(), "home_assistant: token_env names the same variable as token_env of power source desk-bar: with switching: true the token that switches the sockets needs a variable of its own") ||
+		strings.Contains(errb.String(), plugReadVar) || strings.Contains(errb.String(), read) {
+		t.Errorf("one variable for both, switching on: exit %d\nstdout: %s\nstderr: %s", code, out.String(), errb.String())
 	}
 
 	// https: no note about the network
@@ -315,6 +325,29 @@ func TestConfigSetSwitching(t *testing.T) {
 	cfg, err := agent.Load(p)
 	if err != nil || !cfg.HomeAssistant.Switching || len(cfg.HomeAssistant.SwitchAllow) != 2 || len(cfg.HomeAssistant.FeedsSelf) != 1 {
 		t.Fatalf("%+v %v", cfg, err)
+	}
+	// with switching on, the block's variable cannot be made the one the entries read with; and in a file where
+	// it is that one, switching cannot be turned on
+	before, _ = os.ReadFile(p)
+	out.Reset()
+	errb.Reset()
+	if code := configCmd([]string{"set", "home_assistant.token_env", plugReadVar, "--config", p}, &out, &errb); code != 1 ||
+		!strings.Contains(errb.String(), "not changed, the agent could not start with it") || !strings.Contains(errb.String(), "the token that switches the sockets needs a variable of its own") {
+		t.Fatalf("the read token's variable for switching: exit %d\n%s%s", code, out.String(), errb.String())
+	}
+	if now, _ := os.ReadFile(p); !bytes.Equal(now, before) {
+		t.Fatal("the file was changed")
+	}
+	shared := plugFiles(t, strings.Replace(plugBlock("  feeds_self: []\n"), plugSwitchVar, plugReadVar, 1), plugSources, env, api.ApprovalRequired)
+	before, _ = os.ReadFile(shared)
+	out.Reset()
+	errb.Reset()
+	if code := configCmd([]string{"set", "home_assistant.switching", "true", "--config", shared}, &out, &errb); code != 1 ||
+		!strings.Contains(errb.String(), "not changed, the agent could not start with it") || !strings.Contains(errb.String(), "token_env names the same variable as token_env of power source desk-bar") {
+		t.Fatalf("switching on with one variable for both: exit %d\n%s%s", code, out.String(), errb.String())
+	}
+	if now, _ := os.ReadFile(shared); !bytes.Equal(now, before) {
+		t.Fatal("the file was changed")
 	}
 	out.Reset()
 	if code := configCmd([]string{"show", "--config", p}, &out, &errb); code != 0 || !strings.Contains(out.String(), "home_assistant.switching: true\n") ||

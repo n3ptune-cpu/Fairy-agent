@@ -1052,10 +1052,12 @@ begins a YAML escape, and the agent does not start (`found unknown escape charac
 > Assistant user made only for Fairy) that has nothing but the plugs in it, keep the token only in `env_file`,
 > and delete the token in Home Assistant when the agent no longer needs it.
 >
-> With `home_assistant.switching: true` (0.10.0) the agent sends two requests more,
-> `POST /api/services/switch/turn_on` and `.../turn_off` for a socket you allowed, and reads the states of the
-> sockets' switches. Those go with **another** token, the one `home_assistant.token_env` names, never with the
-> token of an entry; see [Switching a plug's sockets](#switching-a-plugs-sockets-home_assistant-0100).
+> With the block `home_assistant:` (0.10.0) the agent also reads the states of the sockets' switches, every
+> 10 seconds, and with `home_assistant.switching: true` it sends two requests more,
+> `POST /api/services/switch/turn_on` and `.../turn_off` for a socket you allowed. Those go with **another**
+> token, the one `home_assistant.token_env` names, never with the token of an entry; with switching on it
+> must be kept in a variable of its own. See
+> [Switching a plug's sockets](#switching-a-plugs-sockets-home_assistant-0100).
 
 Setting it up:
 
@@ -1301,13 +1303,32 @@ A socket has an `id` (1 to 16 lower-case letters, digits and dashes, unique in i
 the id is shown) and a `switch_entity` (an id that begins with `switch.`; one switch belongs to one socket in
 the whole file). An entry with sockets must have the same address as `home_assistant.url`.
 
-**Two tokens.** The entries read their sensors with the token their own `token_env` names, as before. The
-states of the sockets are read, and the sockets are switched, with the token `home_assistant.token_env`
-names. Neither is ever used in the other's place: while the block's variable is empty, the sockets show
-`unknown`, every switch is refused (`409 no_token`), `check-config` says so, and the watts are read as
-always. Make a **second Home Assistant user** for the block's token: its token can then be deleted without
-losing the readings, and Home Assistant's own logbook shows which switches came from Fairy. (One variable for
-both is accepted, and `check-config` notes it.) Like every Home Assistant token, this one can do whatever its
+**Two tokens, in two variables.** The entries read their sensors with the token their own `token_env`
+names, as before. The states of the sockets are read, and the sockets are switched, with the token
+`home_assistant.token_env` names. Neither is ever used in the other's place: while the block's variable is
+empty, the sockets show `unknown`, every switch is refused (`409 no_token`), `check-config` says so, and the
+watts are read as always. Make a **second Home Assistant user** for the block's token: its token can then be
+deleted without losing the readings, and Home Assistant's own logbook shows which switches came from Fairy.
+
+**With `switching: true` the two must be different variables.** A file in which `home_assistant.token_env`
+names the variable a `type: homeassistant` entry reads with (in any letter case) does not load: the agent
+does not start, `check-config` and `config set` refuse it, and the problem names the two places, not the
+variable:
+
+```
+config problem: home_assistant: token_env names the same variable as token_env of power source desk-bar: with switching: true the token that switches the sockets needs a variable of its own, ...
+```
+
+While `switching` is false the same file loads, and `check-config` has a note that it will not once
+switching is turned on. The agent compares the names of the variables. It cannot see whether two variables
+hold the same token: that the second one is another user's token is yours to keep.
+
+**The switching token is in use all the time, not only at a switch.** The agent reads the state of every
+socket with it every 10 seconds (one `GET /api/states/<its switch>` each), from the moment the block and the
+sockets are in the file, also while `switching` is false. So it crosses the network to Home Assistant as
+often as the reading token does, and over an `http://` address just as unencrypted. "A token only for
+switching" means: a token that can be revoked alone and that the sensor readings do not carry. It does not
+mean a token that rests until somebody switches. Like every Home Assistant token, it can do whatever its
 user can; what Fairy does with it is limited by what the agent can send, which is the two requests above
 and `GET /api/states/<a switch>`.
 
@@ -2530,8 +2551,10 @@ are lists of devices: edit those in the file (also the `sockets:` of an entry; t
   The agent can send Home Assistant exactly two requests that change something,
   `switch.turn_on` and `switch.turn_off` for a `switch.` entity from its own config; it has no `toggle` and
   no way to name another service, entity or address, and a request to the agent names ids only. The request
-  is sent once and never again by itself. The token for switching is a variable of its own, is never logged
-  or sent to the panel, and is never replaced by the token the sensors are read with. A request without a
+  is sent once and never again by itself. The token for switching is a variable of its own (with switching
+  on, a file that names one variable for it and for a sensor's token does not load), is never logged or sent
+  to the panel, and is never replaced by the token the sensors are read with. It is also what the sockets'
+  states are read with every 10 seconds, so it is on that network all the time and not only at a switch. A request without a
   good approval causes no request to Home Assistant at all. What is left: a panel that was taken over can
   show one name and ask your passkey for another allowed socket (one socket for each touch); and over plain
   `http://` whoever is on that network can change a switch request on its way

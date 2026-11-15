@@ -37,8 +37,10 @@ type HomeAssistantConfig struct {
 	// TokenEnv names the environment variable that holds the long-lived access token the sockets' states are
 	// read with and the sockets are switched with. It is this block's own: the homeassistant entries read their
 	// sensors with the token their own token_env names, and nothing ever falls back from one to the other. The
-	// owner's plan is a second Home Assistant user for switching, whose token can be revoked alone. While the
-	// variable holds nothing, no state is read and nothing is switched.
+	// owner's decision is a second Home Assistant user for switching, whose token can be revoked alone: with
+	// Switching true this must not be the variable of a homeassistant entry (Config.tokenEnvShared; the config
+	// does not load). The token is not only used at a switch: the sockets' states are read with it every 10 s.
+	// While the variable holds nothing, no state is read and nothing is switched.
 	TokenEnv string `yaml:"token_env"`
 	// CAFile (https only): the certificate, or its CA, that Home Assistant must show.
 	CAFile string `yaml:"ca_file"`

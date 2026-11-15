@@ -95,9 +95,15 @@ func (c *Config) NewRelay() (*Relay, error) {
 // homeassistant entry repeats no value of the entry. Several homeassistant entries may name one variable (the
 // plugs of one Home Assistant share its token), and an ignored entry (tuya) is not looked at.
 //
-// The same holds for home_assistant.token_env, the token plug sockets are switched with: it may be the variable
-// the homeassistant entries read with (one token for both) or one of its own, and never one that another kind
-// of secret is kept in.
+// The same holds for home_assistant.token_env, the token plug sockets are switched with: never a variable that
+// another kind of secret is kept in.
+//
+// And with home_assistant.switching: true it is not the variable of a homeassistant entry either. The owner
+// decided on a token of its own for switching: one that can be revoked alone, from a second Home Assistant
+// user, so that the token every sensor reading carries is not the one that can switch. A config that names one
+// variable in both places does not load then; the error names the block and the entry, never the variable.
+// While switching is false the same file loads, and Config.PlugReport has a note. What this cannot see: two
+// variables that hold the same token.
 func (c *Config) tokenEnvShared() error {
 	type named struct{ what, env string }
 	var tokens, others []named
@@ -142,6 +148,15 @@ func (c *Config) tokenEnvShared() error {
 					who = "home_assistant" // the block, not an entry
 				}
 				return fmt.Errorf("%s: token_env names the same variable as %s: what that variable holds would be sent to Home Assistant as the token. The token needs a variable that nothing else names", who, o.what)
+			}
+		}
+	}
+	if h := c.HomeAssistant; h.Switching && h.TokenEnv != "" {
+		for _, tok := range tokens {
+			if tok.what != "home_assistant" && strings.EqualFold(tok.env, h.TokenEnv) {
+				return fmt.Errorf("home_assistant: token_env names the same variable as token_env of power source %s: with switching: true the token that switches the sockets "+
+					"needs a variable of its own, so that it can be revoked alone and is not the token the sensors are read with. "+
+					"Give home_assistant.token_env a name that no power source uses, and store the second token under it (fairy-agent secret set <that name>)", tok.what)
 			}
 		}
 	}
