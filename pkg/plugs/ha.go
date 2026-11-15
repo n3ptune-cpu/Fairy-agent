@@ -99,8 +99,32 @@ func (h *HA) Scheme() string   { return h.scheme }
 func (h *HA) Host() string     { return h.host }
 func (h *HA) TokenEnv() string { return h.tokenEnv }
 
-// TokenSet reports whether the token's variable holds something. The token is not looked at.
-func (h *HA) TokenSet() bool { return os.Getenv(h.tokenEnv) != "" }
+// What the token's variable holds, as far as anybody is told (TokenState). Nothing else about the value is
+// ever said: not the value, not a part of it, not how long it is.
+const (
+	TokenOK       = iota // a value that is sent as the token
+	TokenMissing         // nothing
+	TokenUnusable        // a value that is never sent: a space, a line break, another control character or a byte that is not plain ASCII is in it
+)
+
+// TokenState says what the token's variable holds right now, by the rule a request goes by (token): TokenOK
+// only for a value that a request would send.
+func (h *HA) TokenState() int {
+	_, err := h.token()
+	var nt *NoToken
+	switch {
+	case err == nil:
+		return TokenOK
+	case errors.As(err, &nt) && nt.Unusable:
+		return TokenUnusable
+	}
+	return TokenMissing
+}
+
+// TokenSet reports whether the token's variable holds a token that a request would send. A value that token
+// refuses is not "set": /metrics then says no_token for the sockets, no challenge is given for a switch, and
+// check-config does not say "present" for it.
+func (h *HA) TokenSet() bool { return h.TokenState() == TokenOK }
 
 // Close gives up the kept connections.
 func (h *HA) Close() {
@@ -123,11 +147,18 @@ func errRefused() error {
 }
 
 // NoToken is the error of a request that was not made because the token's variable holds nothing that can be a
-// token. Its text names the variable, never a value.
-type NoToken struct{ Env string }
+// token: nothing at all, or (Unusable) a value that is never sent. Its text names the variable, never a value.
+type NoToken struct {
+	Env      string
+	Unusable bool
+}
 
 func (e *NoToken) Error() string {
-	return "the variable " + e.Env + " holds no token for Home Assistant (fairy-agent secret set " + e.Env + ", then restart the agent)"
+	holds := "holds no token"
+	if e.Unusable {
+		holds = "holds a value that cannot be a token"
+	}
+	return "the variable " + e.Env + " " + holds + " for Home Assistant (fairy-agent secret set " + e.Env + ", then restart the agent)"
 }
 
 // token reads the token from the environment, for one request. It is never kept, logged or put into an error.
@@ -138,7 +169,7 @@ func (h *HA) token() (string, error) {
 	}
 	for i := 0; i < len(tok); i++ { // what cannot be sent in a header as it is, is not a token
 		if tok[i] <= ' ' || tok[i] >= 0x7f {
-			return "", &NoToken{Env: h.tokenEnv}
+			return "", &NoToken{Env: h.tokenEnv, Unusable: true}
 		}
 	}
 	return tok, nil

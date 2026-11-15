@@ -35,9 +35,14 @@ func (c *Config) PlugReport(p *plugs.Plugs, approvalState string) PlugReport {
 		return rep
 	}
 	h, ha := c.HomeAssistant, p.HA()
-	token := "present (" + ha.TokenEnv() + ")"
-	if !ha.TokenSet() {
+	// "present" only for a value the agent would send (plugs.HA.TokenState). Of a value it would not send,
+	// nothing is said but that: not the value and not its length.
+	token, tokenState := "present ("+ha.TokenEnv()+")", ha.TokenState()
+	switch tokenState {
+	case plugs.TokenMissing:
 		token = "missing (" + ha.TokenEnv() + " is not set: fairy-agent secret set " + ha.TokenEnv() + ", then restart the agent)"
+	case plugs.TokenUnusable:
+		token = "unusable (" + ha.TokenEnv() + " holds a value that cannot be a token: fairy-agent secret set " + ha.TokenEnv() + ", then restart the agent)"
 	}
 	switching := "off (sockets are shown, nothing is ever switched)"
 	if h.Switching {
@@ -79,9 +84,15 @@ func (c *Config) PlugReport(p *plugs.Plugs, approvalState string) PlugReport {
 	}
 	rep.Lines = append(rep.Lines, "never switched (feeds_self): "+never)
 
-	if !ha.TokenSet() && (rep.Sockets > 0 || h.Switching) {
-		rep.Notes = append(rep.Notes, "the variable "+ha.TokenEnv()+" holds no token: no socket's state is read and nothing is switched until it does. "+
-			"The token the power sources read with is never used in its place.")
+	if rep.Sockets > 0 || h.Switching {
+		switch tokenState {
+		case plugs.TokenMissing:
+			rep.Notes = append(rep.Notes, "the variable "+ha.TokenEnv()+" holds no token: no socket's state is read and nothing is switched until it does. "+
+				"The token the power sources read with is never used in its place.")
+		case plugs.TokenUnusable:
+			rep.Notes = append(rep.Notes, "the variable "+ha.TokenEnv()+" holds a value that cannot be a token (a space, a line break or a character that is not plain ASCII is in it): "+
+				"no socket's state is read and nothing is switched until it holds one. The token the power sources read with is never used in its place.")
+		}
 	}
 	if h.Switching {
 		if ha.Scheme() == "http" {

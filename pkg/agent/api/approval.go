@@ -102,7 +102,7 @@ const (
 	CodeSocketUnavailable     = "socket_unavailable"      // 409: Home Assistant has no "on" or "off" for the socket right now
 	CodeSwitchInProgress      = "switch_in_progress"      // 409: another switch is running on this agent
 	CodeTooSoon               = "too_soon"                // 429: less than home_assistant.min_gap_s since the last switch of this socket
-	CodeNoSwitchToken         = "no_token"                // 409: the variable home_assistant.token_env names holds no token on this machine
+	CodeNoSwitchToken         = "no_token"                // 409: the variable home_assistant.token_env names holds no token on this machine (nothing, or a value that is never sent as one)
 	CodeHAUnreachable         = "ha_unreachable"          // 502: the socket's state could not be read before the switch; with "retry_after_s" and Retry-After: the wait after a refused token is on, and nothing is asked before it is over (the challenge route answers the same then)
 	CodeHARefused             = "ha_refused"              // 502: Home Assistant answered the switch request with an error status, 401 and 403 included (the approval is used up)
 	CodeNoAnswer              = "no_answer"               // 502: the switch request got no answer and the socket did not show the new state (the approval is used up; it may still happen)

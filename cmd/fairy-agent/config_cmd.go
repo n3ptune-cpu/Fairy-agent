@@ -74,9 +74,10 @@ var plugTrustState = func(cfg *agent.Config) string { return agent.ApprovalState
 //	note: switching goes over http: the token and every request cross that network unencrypted, ...
 //	note: this machine has no passkey check: every switch request is refused (approval_off) until the check is turned on.
 //
-// They say, every time, which sockets can be switched and which never are. Nothing without the block. As for
-// the power sources, "present" means the variable has a value; the token is not read, shown or tried, and a
-// missing one is said and is not an exit code. The note about the passkey check is printed only when this
+// They say, every time, which sockets can be switched and which never are. Nothing without the block.
+// "present" means the variable holds a value the agent would send as the token; the token is not shown or
+// tried. A missing one, and a value that cannot be a token ("unusable": a space, a line break or a character
+// that is not plain ASCII in it), is said and is not an exit code; of such a value nothing else is printed. The note about the passkey check is printed only when this
 // command can look at the trust file: a user who may not look into its folder is told nothing about it.
 func plugReport(cfg *agent.Config) (lines, notes []string) {
 	relay, err := cfg.NewRelay()

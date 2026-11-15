@@ -25,7 +25,7 @@ const (
 	WhySwitchingOff = "switching_off" // home_assistant.switching is false on this machine: nothing is ever switched
 	WhyFeedsSelf    = "feeds_self"    // its switch is in home_assistant.feeds_self, or its meter's system_hint means this machine; never switched, in either direction
 	WhyNotAllowed   = "not_allowed"   // its switch is not in home_assistant.switch_allow
-	WhyNoToken      = "no_token"      // the variable of the switching token holds nothing on this machine
+	WhyNoToken      = "no_token"      // the variable of the switching token holds nothing on this machine, or a value that is never sent as a token
 	// WhyApprovalOff: this machine has no passkey check (no trust file). A socket is switched only with one.
 	WhyApprovalOff = "approval_off"
 	// WhyApprovalUnavailable: the trust file is there and cannot be used.

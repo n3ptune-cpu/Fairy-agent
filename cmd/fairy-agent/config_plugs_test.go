@@ -252,6 +252,39 @@ func TestCheckConfigSystemHint(t *testing.T) {
 	}
 }
 
+// A value in the switching token's variable that cannot be a token (a space, a line break or a character that
+// is not plain ASCII in it; the agent never sends such a value) is not "present": check-config says so, by the
+// variable's name, and prints neither the value nor anything about it.
+func TestCheckConfigTokenThatCannotBeOne(t *testing.T) {
+	plugVars(t)
+	read := strings.Join([]string{"fake", "read", "token"}, "-")
+	block := plugBlock("  switching: true\n", "  switch_allow: [switch.desk_bar_socket_1]\n", "  feeds_self: []\n")
+	for name, value := range map[string]string{ // made-up values; their parts are words that are in no line of check-config
+		"two words":        "zqfirst zqsecond",
+		"a tab in it":      "zqbefore\tzqafter",
+		"not plain ASCII":  "zqpästed-zqdocument",
+		"quoted, a space":  `"zqquoted zqspaced"`,
+		"a no-break space": "zqleft\u00a0zqright",
+	} {
+		p := plugFiles(t, block, plugSources, plugReadVar+"="+read+"\n"+plugSwitchVar+"="+value+"\n", api.ApprovalRequired)
+		var out, errb bytes.Buffer
+		code := checkConfigCmd(p, &out, &errb)
+		line := "home assistant: host 192.0.2.10:8123 (http), token: unusable (" + plugSwitchVar + " holds a value that cannot be a token: fairy-agent secret set " + plugSwitchVar +
+			", then restart the agent), switching: on, 10 s between two switches of one socket\n"
+		note := "note: the variable " + plugSwitchVar + " holds a value that cannot be a token (a space, a line break or a character that is not plain ASCII is in it): " +
+			"no socket's state is read and nothing is switched until it holds one. The token the power sources read with is never used in its place.\n"
+		if code != 0 || !strings.Contains(out.String(), line) || !strings.Contains(out.String(), note) || errb.Len() != 0 {
+			t.Errorf("%s: exit %d\n%s%s", name, code, out.String(), errb.String())
+		}
+		if strings.Contains(out.String()+errb.String(), "zq") {
+			t.Errorf("%s: check-config repeats the value, or a part of it:\n%s", name, out.String())
+		}
+		if strings.Contains(out.String(), "present ("+plugSwitchVar+")") || strings.Contains(out.String(), "missing (") {
+			t.Errorf("%s:\n%s", name, out.String())
+		}
+	}
+}
+
 func TestCheckConfigPlugProblems(t *testing.T) {
 	plugVars(t)
 	secret := strings.Join([]string{"made", "up", "token", "pasted", "into", "the", "file"}, "-")

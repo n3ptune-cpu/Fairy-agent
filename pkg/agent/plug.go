@@ -130,7 +130,7 @@ var plugRefusals = map[string]plugRefusal{
 		"(home_assistant.feeds_self, or a system_hint on its meter that means this machine). Nothing was switched"},
 	api.CodeSocketChanged: {409, "this socket is not what it was when the request was made: its name or its switch was changed in this machine's config (the tag is another one). " +
 		"Nothing was switched; look at the socket again"},
-	api.CodeNoSwitchToken: {409, "this machine has no token for switching: the variable that home_assistant.token_env names holds nothing " +
+	api.CodeNoSwitchToken: {409, "this machine has no token for switching: the variable that home_assistant.token_env names holds nothing that can be a token " +
 		"(on the machine: fairy-agent secret set <that variable>, then restart the agent). Nothing was switched"},
 	api.CodeSocketUnavailable: {409, "Home Assistant has no \"on\" or \"off\" for this socket right now (it does not reach it, or has no state for it). Nothing was switched, " +
 		"and the approval was not used"},

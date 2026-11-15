@@ -145,14 +145,21 @@ func TestNoRequestForWhatIsNotASwitchOrWithoutAToken(t *testing.T) {
 			}
 		}
 	}
-	for name, tok := range map[string]string{"empty": "", "with a line break": hatest.Token() + "\n", "two words": "Bearer " + hatest.Token(), "not ASCII": "tökén"} {
+	// TokenSet says about the variable what a request would find: a value that is not sent is not "set". So
+	// nobody is told that a socket can be switched, or given a challenge, for a token that is then refused here.
+	for name, tok := range map[string]string{"empty": "", "with a line break": hatest.Token() + "\n", "two words": "Bearer " + hatest.Token(), "not ASCII": "tökén",
+		"a space in front": " " + hatest.Token(), "a tab in it": "made\tup", "a DEL in it": "made\x7fup", "a header after it": "made-up\r\nX-Other: 1"} {
 		t.Setenv(tokenEnv, tok)
-		if h.TokenSet() != (tok != "") {
-			t.Errorf("%s: TokenSet", name)
+		wantState, wantText := TokenUnusable, "the variable "+tokenEnv+" holds a value that cannot be a token for Home Assistant (fairy-agent secret set "+tokenEnv+", then restart the agent)"
+		if tok == "" {
+			wantState, wantText = TokenMissing, "the variable "+tokenEnv+" holds no token for Home Assistant (fairy-agent secret set "+tokenEnv+", then restart the agent)"
+		}
+		if h.TokenSet() || h.TokenState() != wantState {
+			t.Errorf("a token that is %s: TokenSet %v, TokenState %d (want %d)", name, h.TokenSet(), h.TokenState(), wantState)
 		}
 		_, err := h.State(bg(), bar1, time.Second)
 		var nt *NoToken
-		if !errors.As(err, &nt) || nt.Env != tokenEnv || !strings.Contains(Describe(err), tokenEnv) || (tok != "" && strings.Contains(Describe(err), tok)) {
+		if !errors.As(err, &nt) || nt.Env != tokenEnv || Describe(err) != wantText || (tok != "" && strings.Contains(Describe(err), tok)) {
 			t.Errorf("a token that is %s, state: %v", name, err)
 		}
 		err = h.Switch(bg(), bar1, false, time.Second)
@@ -163,6 +170,10 @@ func TestNoRequestForWhatIsNotASwitchOrWithoutAToken(t *testing.T) {
 	}
 	if n := srv.Count(); n != 0 {
 		t.Fatalf("%d requests were made: %+v", n, srv.Requests())
+	}
+	t.Setenv(tokenEnv, hatest.Token())
+	if !h.TokenSet() || h.TokenState() != TokenOK {
+		t.Errorf("a token that can be sent: TokenSet %v, TokenState %d", h.TokenSet(), h.TokenState())
 	}
 }
 

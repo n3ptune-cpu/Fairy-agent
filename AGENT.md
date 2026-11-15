@@ -1359,6 +1359,13 @@ Setting it up, in this order:
    It names, every time, which sockets can be switched and which never are. Read it before every restart
    after a change to these lists.
 
+   `token: present` means: the variable holds a value the agent would send. The token is not shown and not
+   tried. `token: missing (...)` is an empty variable. `token: unusable (HA_SWITCH_TOKEN holds a value that
+   cannot be a token: ...)` is a value with a space, a line break or a character that is not plain ASCII in
+   it (a token pasted with something around it, or two lines of it): the agent never sends such a value, so
+   the sockets show `unknown` with `no_token`, no challenge is given and every switch is refused
+   (`409 no_token`) until the variable holds a token. Neither the value nor its length is printed.
+
 The same settings from the command line (they are checked like `check-config` before anything is written):
 
 ```sh
@@ -1432,7 +1439,7 @@ request, and the wait starts then.
 | `409 approval_off` | this machine has no passkey check | not used |
 | `403 approval_required`, `403 approval_refused`, `503 approval_unavailable` | as for every approved request; `approval_refused (one_entry)`: the approval was for more than this one switch | not used |
 | `409 socket_changed` | the socket's name or switch was changed in `config.yaml` since you looked | not used |
-| `409 no_token` | the variable of the switching token is empty | not used |
+| `409 no_token` | the variable of the switching token is empty, or holds a value that cannot be a token (below) | not used |
 | `409 switch_in_progress`, `429 too_soon` | another switch is running; this socket was switched less than `min_gap_s` ago (`Retry-After` says when) | not used |
 | `409 socket_unavailable` | Home Assistant has no "on" or "off" for the socket right now | not used |
 | `502 ha_unreachable` | the state could not be read (no answer, an error, the entity is gone, the token refused). With `Retry-After`: the wait after a refused token is on (above); the challenge request is answered the same then, and the text says how the wait ends | not used |

@@ -67,6 +67,12 @@ func TestStartLogOfTheSockets(t *testing.T) {
 	if !strings.Contains(noToken, "token_set=false") || !strings.Contains(noToken, `level=WARN msg="plug sockets: the variable `+switchEnv+` holds no token: no socket's state is read and nothing is switched until it does.`) {
 		t.Errorf("no token:\n%s", noToken)
 	}
+	t.Setenv(switchEnv, "made up, with a space")
+	unusable := said(t, agenttest.PlugOptions{Switching: true}, api.ApprovalRequired)
+	if !strings.Contains(unusable, "token_set=false") || strings.Contains(unusable, "made up") ||
+		!strings.Contains(unusable, `level=WARN msg="plug sockets: the variable `+switchEnv+` holds a value that cannot be a token (a space, a line break or a character that is not plain ASCII is in it): no socket's state is read and nothing is switched until it holds one.`) {
+		t.Errorf("a value that cannot be a token:\n%s", unusable)
+	}
 	if none := said(t, agenttest.PlugOptions{NoBlock: true}, api.ApprovalOff); none != "" {
 		t.Errorf("an agent without the block says:\n%s", none)
 	}

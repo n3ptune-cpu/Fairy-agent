@@ -189,6 +189,43 @@ own-plug/main "This machine" unknown false feeds_self ` + noTok
 			}
 		}
 	})
+	// a value that is never sent as a token (a space, a line break, a letter that is not ASCII in it) is no
+	// token: nothing says "can be switched", no challenge is given, and the value is in no answer
+	t.Run("a value in the variable that cannot be a token", func(t *testing.T) {
+		for _, tok := range []string{"two words", "tökén-of-the-tests", hatest.Token() + "\n", " " + hatest.Token()} {
+			r := newPlugRig(t, plugRigOpts{})
+			t.Setenv(plugSwitchEnv, tok)
+			r.ha.Forget()
+			r.poll()
+			m, raw := r.metrics(t)
+			bad := "the variable " + plugSwitchEnv + " holds a value that cannot be a token for Home Assistant (fairy-agent secret set " + plugSwitchEnv + ", then restart the agent)"
+			want := `desk-bar/ch1 "Left monitor" unknown false no_token ` + bad + `
+desk-bar/ch2 "ch2" unknown false no_token ` + bad + `
+desk-bar/ch3 "Lamp" unknown false not_allowed ` + bad + `
+server-corner/main "Server corner" unknown false feeds_self ` + bad + `
+own-plug/main "This machine" unknown false feeds_self ` + bad
+			if got := allSaid(t, m); got != want {
+				t.Errorf("%q in the variable: sockets:\n%s\nwant:\n%s", tok, got, want)
+			}
+			if strings.Contains(raw, strings.TrimSpace(tok)) {
+				t.Errorf("%q in the variable: /metrics repeats it", tok)
+			}
+			for _, to := range []string{"on", "off"} {
+				c := r.challenge(t, sockCh1, to)
+				if c.status != 409 || c.code() != api.CodeNoSwitchToken || c.body["challenge"] != nil || strings.Contains(c.raw, plugSwitchEnv) || strings.Contains(c.raw, strings.TrimSpace(tok)) {
+					t.Errorf("%q in the variable: challenge for %s: %s", tok, to, c)
+				}
+				if a := r.flip(t, sockCh1, to, nil); a.status != 409 || a.code() != api.CodeNoSwitchToken || strings.Contains(a.raw, strings.TrimSpace(tok)) {
+					t.Errorf("%q in the variable: switch to %s: %s", tok, to, a)
+				}
+			}
+			for _, q := range r.ha.Requests() {
+				if !q.ReadToken || !strings.HasPrefix(q.Path, "/api/states/sensor.") {
+					t.Errorf("%q in the variable: Home Assistant was asked %s %s", tok, q.Method, q.Path)
+				}
+			}
+		}
+	})
 	t.Run("the meters' token is gone, the switching token is there", func(t *testing.T) {
 		r := newPlugRig(t, plugRigOpts{})
 		t.Setenv(plugReadEnv, "")
