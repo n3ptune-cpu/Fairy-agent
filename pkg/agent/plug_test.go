@@ -900,8 +900,13 @@ func TestPlugSwitchOneAtATime(t *testing.T) {
 	if r.ha.Count() != 1 {
 		t.Errorf("Home Assistant was asked %v", r.asked())
 	}
-	r.ha.HangState(false)
-	r.ha.Close() // ends the read that hangs
+	// Close ends the read that hangs, and the fake stays as it is until then: state reads are not made honest
+	// again first. The agent's HTTP client asks a second time when its connection is cut before an answer came,
+	// and the fake listens for a moment longer after it cut the connections: made honest, it answered that
+	// second read now and then on a busy machine, and the first switch went on to its request (no_answer, or
+	// switched). As it is, no state read of this test is ever answered with a state, so the first switch cannot
+	// get past its read.
+	r.ha.Close()
 	select {
 	case a := <-first:
 		if a.status != 502 || a.code() != api.CodeHAUnreachable {
@@ -909,6 +914,9 @@ func TestPlugSwitchOneAtATime(t *testing.T) {
 		}
 	case <-time.After(15 * time.Second):
 		t.Fatal("the first switch did not end")
+	}
+	if n := len(r.ha.Posts()); n != 0 {
+		t.Errorf("%d switch requests were sent, want none: %v", n, r.asked())
 	}
 }
 
