@@ -388,6 +388,10 @@ func (g *Gate) Challenge(req api.ApprovalRequest) (api.ChallengeResponse, *Refus
 		if g.o.ReadOnly {
 			return out, notHere()
 		}
+	case g.state == api.ApprovalOff && isStrict(req.Verb):
+		// the opposite of the next case: this request is never carried out unchecked, so there is no "needs none"
+		g.o.Log.Warn("approval: no challenge given, this machine has no trust file and the request is one that is never run without an approval", "result", "refused", "request", canon)
+		return out, strictOff()
 	case g.state == api.ApprovalOff:
 		out.Reason = "off"
 		return out, nil
@@ -463,11 +467,16 @@ func (g *Gate) find(id []byte) int {
 
 // enforced answers what every question about a request starts with. on is false when nothing is checked (no
 // trust file): the request may run. A refusal: the trust file cannot be used, or the request has no canonical
-// form. Otherwise trust is set and canon is the request's text. Caller holds g.mu.
+// form, or there is no trust file and the request is one that is never run without an approval (isStrict:
+// 409 approval_off). Otherwise trust is set and canon is the request's text. Caller holds g.mu.
 func (g *Gate) enforced(req api.ApprovalRequest) (canon string, on bool, ref *Refusal) {
 	g.reload(false)
 	switch g.state {
 	case api.ApprovalOff:
+		if isStrict(req.Verb) {
+			g.o.Log.Warn("approval: refused", "result", "refused", "reason", "no trust file, and the request is one that is never run without an approval", "verb", req.Verb)
+			return "", true, strictOff()
+		}
 		return "", false, nil
 	case api.ApprovalRequired:
 		if g.trust == nil || g.trust.MachineID == "" { // cannot happen (Files.Load); nothing is ever checked with an empty id
@@ -504,7 +513,7 @@ func noneSent() *Refusal {
 // pending, a duty the fans do not take) costs neither the approval nor the shutdown after boot.
 func (g *Gate) Precheck(req api.ApprovalRequest, sent bool) *Refusal {
 	if g == nil {
-		return nil
+		return strictWithoutGate(req.Verb)
 	}
 	if req.Verb == api.ApproveTrustSet {
 		return notCarriedOut()
@@ -539,11 +548,15 @@ func (g *Gate) Precheck(req api.ApprovalRequest, sent bool) *Refusal {
 // right now (the fan window, or the one shutdown after boot, which is recorded here). An approval that is
 // sent is always checked in full. A nil Gate lets everything run.
 //
+// Not so for a request that is never carried out without an approval (isStrict, today socket_set): with trust
+// off, and with a nil Gate, it is refused (409 approval_off); no window and no setting lets it through; and the
+// approval it carries must have a list of exactly one entry (strict.go says why).
+//
 // The pass is not nil when an approval of a fan change was accepted: the caller tells it when the change was
 // applied (Pass.Applied), and only that opens the fan window.
 func (g *Gate) Admit(req api.ApprovalRequest, ap *api.Approval) (*Pass, *Refusal) {
 	if g == nil {
-		return nil, nil
+		return nil, strictWithoutGate(req.Verb)
 	}
 	if req.Verb == api.ApproveTrustSet { // not a request that is carried out: Init checks its own approval
 		return nil, notCarriedOut()
@@ -580,6 +593,9 @@ func (g *Gate) Admit(req api.ApprovalRequest, ap *api.Approval) (*Pass, *Refusal
 		g.o.Log.Warn("approval: required, none sent", "result", "refused", "request", canon)
 		return nil, noneSent()
 	}
+	if ref := g.oneEntry(req, canon, ap); ref != nil {
+		return nil, ref
+	}
 	c, cl, reason, other := g.verify(g.trust, g.trust.MachineID, canon, ap, now)
 	if reason != "" {
 		attrs := []any{"result", "refused", "reason", reason, "request", canon, "sub", cl.Sub, "kid", cl.Kid, "challenge", c}
@@ -615,6 +631,13 @@ func (g *Gate) Admit(req api.ApprovalRequest, ap *api.Approval) (*Pass, *Refusal
 // challenge, this request, another machine's id), which is what a panel signs when it was handed this
 // machine's challenge in the name of another machine, has another nonce and is refused.
 func (g *Gate) verify(t *Trust, machineID, canon string, ap *api.Approval, now time.Time) (string, claims, string, bool) {
+	return g.check(t, machineID, canon, ap, now, true)
+}
+
+// check is verify, and with use false it is verify without its last step: everything is looked at in the same
+// way, and a challenge whose approval holds stays open (Look). A challenge whose time is over is dropped either
+// way. Caller holds g.mu.
+func (g *Gate) check(t *Trust, machineID, canon string, ap *api.Approval, now time.Time, use bool) (string, claims, string, bool) {
 	if len(ap.Token) > api.MaxApprovalToken {
 		return "", claims{}, ReasonFormat, false
 	}
@@ -660,7 +683,9 @@ func (g *Gate) verify(t *Trust, machineID, canon string, ap *api.Approval, now t
 	if reason != "" {
 		return p, cl, reason, other
 	}
-	g.open = append(g.open[:mine], g.open[mine+1:]...) // used up, before anything runs
+	if use {
+		g.open = append(g.open[:mine], g.open[mine+1:]...) // used up, before anything runs
+	}
 	return p, cl, "", other
 }
 
@@ -769,6 +794,7 @@ var refusalText = map[string]string{
 	ReasonAuthTime:    "the passkey check is older than the request for approval",
 	ReasonAMR:         "the sign-in was not made with a passkey",
 	ReasonNonce:       "the token was not issued for this list of entries on this machine",
+	ReasonOneEntry:    "an approval for this request must be for this request alone: its list has exactly one entry",
 }
 
 // proofText says some reasons differently for the proof of a first-time set, where "this machine's trust" is

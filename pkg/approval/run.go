@@ -859,7 +859,7 @@ func noneSentRun(why string) *Refusal {
 // named (for an update).
 func (g *Gate) RunCovers(req api.ApprovalRequest, id string) (to string, ref *Refusal) {
 	if g == nil {
-		return "", nil
+		return "", strictWithoutGate(req.Verb)
 	}
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -871,7 +871,7 @@ func (g *Gate) RunCovers(req api.ApprovalRequest, id string) (to string, ref *Re
 // it cannot be written, the request is refused). The shutdown ends the run.
 func (g *Gate) AdmitRun(req api.ApprovalRequest, id string) (to string, ref *Refusal) {
 	if g == nil {
-		return "", nil
+		return "", strictWithoutGate(req.Verb)
 	}
 	g.mu.Lock()
 	defer g.mu.Unlock()

@@ -40,6 +40,9 @@ const (
 	ReasonAuthTime    = "auth_time" // no auth_time, or the user authenticated before the challenge was issued
 	ReasonAMR         = "amr"       // not a passkey sign-in
 	ReasonNonce       = "nonce"
+	// ReasonOneEntry: the approval of a request that takes an approval of its own only (socket_set) lists more
+	// than one entry. Nothing of the token is looked at.
+	ReasonOneEntry = "one_entry"
 )
 
 // headerRefused are header members a token for this check never needs: each would select a key from the token
