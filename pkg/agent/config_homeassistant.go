@@ -2,12 +2,15 @@ package agent
 
 import (
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
+	"time"
 
 	"gopkg.in/yaml.v3"
 
 	"github.com/n3ptune-cpu/Fairy-agent/pkg/agent/api"
+	"github.com/n3ptune-cpu/Fairy-agent/pkg/plugs"
 	"github.com/n3ptune-cpu/Fairy-agent/pkg/power"
 )
 
@@ -182,3 +185,35 @@ func (c *Config) socketChecks(r *Relay) error {
 	}
 	return nil
 }
+
+// NewPlugs builds the keeper of this config's sockets from the home_assistant block and the relay's sources
+// (r is this config's own relay, Config.NewRelay, which has made the checks of the sockets). nil without an
+// error: the block names no Home Assistant, or no token's variable, so there is nothing to ask and nothing to
+// switch. The running agent and check-config build it with this.
+//
+// What can be switched is decided here, from config.yaml alone, and nowhere else: each socket is marked with
+// whether its switch is in switch_allow, whether it is in feeds_self, and whether its meter says system_hint:
+// self. The ids are compared as the exact texts they are.
+func (c *Config) NewPlugs(r *Relay) (*plugs.Plugs, error) {
+	h := c.HomeAssistant
+	if h.URL == "" || h.TokenEnv == "" {
+		return nil, nil
+	}
+	ha, err := plugs.NewHA(h.URL, h.TokenEnv, h.CAFile)
+	if err != nil {
+		return nil, err
+	}
+	var sockets []plugs.Socket
+	for _, src := range r.SocketSources() {
+		for _, s := range src.Sockets {
+			sockets = append(sockets, plugs.Socket{Source: src.ID, SourceName: src.Name, ID: s.ID, Name: s.Name, Entity: s.SwitchEntity,
+				Tag:     api.SocketTag(src.ID, s.ID, s.Name, s.SwitchEntity),
+				Allowed: slices.Contains(h.SwitchAllow, s.SwitchEntity), FeedsSelf: slices.Contains(h.FeedsSelf, s.SwitchEntity),
+				SelfHint: src.Hint == selfHint})
+		}
+	}
+	return plugs.New(plugs.Options{HA: ha, Sockets: sockets, Switching: h.Switching, MinGap: time.Duration(h.MinGapS) * time.Second}), nil
+}
+
+// selfHint is the system_hint of a power source that measures the machine this agent runs on.
+const selfHint = "self"

@@ -144,6 +144,9 @@ func (h *HA) token() (string, error) {
 	return tok, nil
 }
 
+// asNoToken reports whether err is a NoToken.
+func asNoToken(err error, target **NoToken) bool { return errors.As(err, target) }
+
 // Describe is a short fixed text for an error of this package that is safe to show and to log: never a
 // header, an address or anything Home Assistant sent.
 func Describe(err error) string {

@@ -157,10 +157,14 @@ func Run(ctx context.Context, cfg *Config, b Build) error {
 	if err != nil {
 		return err
 	}
+	sockets, err := cfg.NewPlugs(relay)
+	if err != nil {
+		return err
+	}
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	d := Deps{Collector: collect.NewSystem(), Relay: relay, Version: version}
+	d := Deps{Collector: collect.NewSystem(), Relay: relay, Plugs: sockets, Version: version}
 	if b.Migration != nil {
 		d.Migration = b.Migration
 	}
@@ -358,6 +362,9 @@ func Run(ctx context.Context, cfg *Config, b Build) error {
 	}
 	if !relay.Empty() {
 		go relay.Run(ctx)
+	}
+	if !sockets.Empty() {
+		go sockets.Run(ctx) // the states of the plugs' sockets, read by a loop of their own (pkg/plugs)
 	}
 	pairPath := PairingPath(cfg)
 	d.Pairer = NewPairer(pairPath, cfg.LoadTokens, func() enroll.Response { return a.PairInfo() })

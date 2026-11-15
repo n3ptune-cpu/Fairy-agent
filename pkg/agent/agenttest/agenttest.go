@@ -5,6 +5,8 @@ package agenttest
 
 import (
 	"context"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -175,4 +177,76 @@ func (h *Helper) Start(context.Context, string) (api.HelperStatus, error) {
 	h.State = api.HelperRunning
 	h.Starts++
 	return h.status(), nil
+}
+
+// The made-up plugs of PlugConfig: a powerbar with three sockets, the plug that feeds the whole corner the
+// agent stands in, and the plug the agent's own machine hangs on. The ids of the sources and the sockets, and
+// the entity ids a fake Home Assistant has to know (pkg/plugs/hatest).
+const (
+	PlugBar        = "desk-bar"                    // power source: "Monitor powerbar", sockets ch1, ch2, ch3
+	PlugBarSensor  = "sensor.desk_bar_power"       //
+	PlugBar1       = "switch.desk_bar_socket_1"    // ch1 "Left monitor"
+	PlugBar2       = "switch.desk_bar_socket_2"    // ch2 (no name)
+	PlugBar3       = "switch.desk_bar_socket_3"    // ch3 "Lamp": in no list
+	PlugCorner     = "server-corner"               // power source, socket main "Server corner"
+	PlugCornerSens = "sensor.server_corner_power"  //
+	PlugCornerSw   = "switch.server_corner_socket" // the socket that must never be switched
+	PlugOwn        = "own-plug"                    // power source with system_hint: self, socket main "This machine"
+	PlugOwnSensor  = "sensor.own_plug_power"       //
+	PlugOwnSw      = "switch.own_plug"             //
+)
+
+// PlugOptions say how the home_assistant block of PlugConfig is written.
+type PlugOptions struct {
+	// ReadEnv and SwitchEnv name the variables of the two tokens: the one the meters read with and the one of
+	// the block. The test sets them.
+	ReadEnv, SwitchEnv string
+	Switching          bool
+	// Allow is switch_allow (nil: PlugBar1, PlugBar2 and PlugOwnSw). FeedsSelf is feeds_self (nil: PlugCornerSw).
+	Allow, FeedsSelf []string
+	MinGapS          int // 0: 5
+	// NoBlock leaves the block and every socket out: the plugs are meters only, as before sockets.
+	NoBlock bool
+}
+
+// PlugConfig is the home_assistant block and the power_sources of an agent that reads the made-up plugs from
+// the Home Assistant at haURL, as config.yaml text. A caller adds its own lines in front.
+func PlugConfig(haURL string, o PlugOptions) string {
+	if o.Allow == nil {
+		o.Allow = []string{PlugBar1, PlugBar2, PlugOwnSw}
+	}
+	if o.FeedsSelf == nil {
+		o.FeedsSelf = []string{PlugCornerSw}
+	}
+	if o.MinGapS == 0 {
+		o.MinGapS = 5
+	}
+	meter := func(id, name, sensor, more string) string {
+		return "  - id: " + id + "\n    type: homeassistant\n    name: \"" + name + "\"\n    url: \"" + haURL + "\"\n    token_env: " + o.ReadEnv +
+			"\n    entity: " + sensor + "\n" + more
+	}
+	sockets := func(lines ...string) string {
+		if o.NoBlock {
+			return ""
+		}
+		return "    sockets:\n      - " + strings.Join(lines, "\n      - ") + "\n"
+	}
+	out := ""
+	if !o.NoBlock {
+		out = "home_assistant:\n  url: \"" + haURL + "\"\n  token_env: " + o.SwitchEnv + "\n  switching: " + strconv.FormatBool(o.Switching) +
+			"\n  switch_allow: [" + strings.Join(o.Allow, ", ") + "]\n  feeds_self: [" + strings.Join(o.FeedsSelf, ", ") + "]\n  min_gap_s: " + strconv.Itoa(o.MinGapS) + "\n"
+	}
+	return out + "power_sources:\n" +
+		meter(PlugBar, "Monitor powerbar", PlugBarSensor, sockets(
+			"{id: ch1, name: \"Left monitor\", switch_entity: "+PlugBar1+"}",
+			"{id: ch2, switch_entity: "+PlugBar2+"}",
+			"{id: ch3, name: Lamp, switch_entity: "+PlugBar3+"}")) +
+		meter(PlugCorner, "Server corner", PlugCornerSens, sockets("{id: main, name: \"Server corner\", switch_entity: "+PlugCornerSw+"}")) +
+		meter(PlugOwn, "Own plug", PlugOwnSensor, "    system_hint: self\n"+sockets("{id: main, name: \"This machine\", switch_entity: "+PlugOwnSw+"}"))
+}
+
+// PlugStates are the states a fake Home Assistant starts with for PlugConfig's switches: the first socket of
+// the bar on, the second off, everything else on. (Its sensors are set with hatest's SetSensor.)
+func PlugStates() map[string]string {
+	return map[string]string{PlugBar1: "on", PlugBar2: "off", PlugBar3: "on", PlugCornerSw: "on", PlugOwnSw: "on"}
 }

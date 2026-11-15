@@ -27,6 +27,7 @@ import (
 	"github.com/n3ptune-cpu/Fairy-agent/pkg/approval"
 	"github.com/n3ptune-cpu/Fairy-agent/pkg/devices"
 	"github.com/n3ptune-cpu/Fairy-agent/pkg/enroll"
+	"github.com/n3ptune-cpu/Fairy-agent/pkg/plugs"
 	"github.com/n3ptune-cpu/Fairy-agent/pkg/redact"
 )
 
@@ -126,9 +127,12 @@ type Deps struct {
 	Power     *Power       // nil unless power_control is enabled
 	WOL       *WOL         // nil unless wol is enabled
 	Relay     *Relay       // may be nil
-	Updater   *Updater     // nil unless self_update is enabled
-	BMCRelay  *BMCRelay    // nil unless bmc_relay is enabled
-	Pairer    *Pairer      // POST /pair ("Add host" in the panel); nil = never answers
+	// Plugs are the sockets of the plugs that are in Home Assistant: their states for /metrics and, when this
+	// machine's config turns it on, switching (Config.NewPlugs). nil: no home_assistant block.
+	Plugs    *plugs.Plugs
+	Updater  *Updater  // nil unless self_update is enabled
+	BMCRelay *BMCRelay // nil unless bmc_relay is enabled
+	Pairer   *Pairer   // POST /pair ("Add host" in the panel); nil = never answers
 	// Helper is the Windows elevated helper (fairy-agent-helper); nil on Linux. Its state goes into /metrics
 	// and /helper/stop, /helper/start control it.
 	Helper HelperControl
@@ -635,6 +639,7 @@ func (a *Agent) Metrics(ctx context.Context) map[string]any {
 		feat[k] = v
 	}
 	ps, us := a.d.Relay.Rows()
+	ps = a.withSockets(ctx, ps)
 	m := map[string]any{
 		"agent_version": a.d.Version, "timestamp": collect.Round(float64(time.Now().UnixMilli())/1000, 3),
 		"hostname": nil, "uptime_s": s.UptimeS, "platform": st.Platform,
@@ -748,7 +753,7 @@ func (a *Agent) helperControl(w http.ResponseWriter, r *http.Request, start bool
 func (a *Agent) Features() map[string]bool {
 	return map[string]bool{"processes": a.cfg.ProcessesEnabled(), "cmdline": a.cfg.ProcessesEnabled() && a.cfg.CmdlineEnabled(),
 		"fan_control": a.d.Fan != nil, "power_control": a.d.Power != nil, "wol_relay": a.d.WOL != nil,
-		"self_update": a.d.Updater != nil, "bmc_relay": a.d.BMCRelay != nil}
+		"self_update": a.d.Updater != nil, "bmc_relay": a.d.BMCRelay != nil, api.FeaturePlugSwitching: a.d.Plugs.Switching()}
 }
 
 // PairInfo is the /pair answer without the tokens.

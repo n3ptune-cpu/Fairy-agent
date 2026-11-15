@@ -16,9 +16,16 @@ import (
 	"time"
 )
 
-// Token is the long-lived access token the fake accepts. Made up, and put together here.
+// Token is the long-lived access token of the fake's user for switching. Made up, and put together here.
 func Token() string {
 	return strings.Join([]string{"fake", "ha", "switch", "token", "for", "tests"}, "-")
+}
+
+// ReadToken is the token of the fake's second user, the one the meters' sensors are read with. Like a real
+// Home Assistant the fake lets either user do everything; it records which one asked (Request.TokenOK,
+// Request.ReadToken), so a test can hold that the two are never mixed up.
+func ReadToken() string {
+	return strings.Join([]string{"fake", "ha", "read", "token", "for", "tests"}, "-")
 }
 
 // Request is one request the fake saw.
@@ -26,8 +33,10 @@ type Request struct {
 	Method  string
 	Path    string // the request URI as it was sent, a query included
 	Body    string
-	TokenOK bool   // it carried "Authorization: Bearer <Token()>"
-	Auth    string // the Authorization header as it was sent
+	TokenOK bool // it carried "Authorization: Bearer <Token()>", the token for switching
+	// ReadToken: it carried the token of the user that reads the sensors (ReadToken()).
+	ReadToken bool
+	Auth      string // the Authorization header as it was sent
 }
 
 // Server is the fake. The zero behaviour is an honest Home Assistant: a switch request for an entity that is
@@ -39,6 +48,7 @@ type Server struct {
 
 	mu       sync.Mutex
 	states   map[string]string
+	units    map[string]string // sensors: entity id -> unit of measurement
 	reqs     []Request
 	stop     chan struct{} // closed by Close: requests that hang end
 	now      func() time.Time
@@ -109,6 +119,16 @@ func (s *Server) Close() {
 	s.mu.Unlock()
 	s.srv.CloseClientConnections()
 	s.srv.Close()
+}
+
+// SetSensor gives the fake a sensor with a value and a unit ("95.5", "W"), for the meter of a plug.
+func (s *Server) SetSensor(entity, value, unit string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.units == nil {
+		s.units = map[string]string{}
+	}
+	s.states[entity], s.units[entity] = value, unit
 }
 
 // Set gives an entity a state, as if somebody pressed the button on the plug.
@@ -226,8 +246,9 @@ func (s *Server) of(method string) []Request {
 
 // Problems says what the requests the fake saw should never have been, "" when there is nothing: a path with
 // "toggle" in it, a method other than GET and POST, a POST to anything but the two switch services, a POST
-// whose body is not exactly {"entity_id": "switch.<id>"}, a GET for anything but the state of one switch, a
-// GET with a body.
+// whose body is not exactly {"entity_id": "switch.<id>"}, a GET for anything but the state of one switch or
+// one sensor, a GET with a body, and a token used for the other user's work: a switch asked or switched with
+// the token that reads the sensors, a sensor asked with the token for switching.
 func (s *Server) Problems() string {
 	var bad []string
 	for _, r := range s.Requests() {
@@ -236,8 +257,14 @@ func (s *Server) Problems() string {
 		case strings.Contains(strings.ToLower(r.Path), "toggle"):
 			bad = append(bad, "toggle: "+r.Method+" "+r.Path)
 		case r.Method == http.MethodGet:
-			if !strings.HasPrefix(path, "/api/states/switch.") || path != r.Path || r.Body != "" || strings.Count(path, "/") != 3 {
-				bad = append(bad, "a GET that is not the state of one switch: "+r.Path)
+			if !(strings.HasPrefix(path, "/api/states/switch.") || strings.HasPrefix(path, "/api/states/sensor.")) || path != r.Path || r.Body != "" || strings.Count(path, "/") != 3 {
+				bad = append(bad, "a GET that is not the state of one switch or sensor: "+r.Path)
+			}
+			if strings.HasPrefix(path, "/api/states/switch.") && r.ReadToken {
+				bad = append(bad, "the state of a switch asked with the token that reads the sensors: "+r.Path)
+			}
+			if strings.HasPrefix(path, "/api/states/sensor.") && r.TokenOK {
+				bad = append(bad, "a sensor asked with the token for switching: "+r.Path)
 			}
 		case r.Method == http.MethodPost:
 			var b map[string]any
@@ -245,6 +272,9 @@ func (s *Server) Problems() string {
 			id, _ := b["entity_id"].(string)
 			if (r.Path != "/api/services/switch/turn_on" && r.Path != "/api/services/switch/turn_off") || len(b) != 1 || !strings.HasPrefix(id, "switch.") {
 				bad = append(bad, "a POST that is not one switch turned on or off: "+r.Path+" "+r.Body)
+			}
+			if r.ReadToken {
+				bad = append(bad, "a switch request with the token that reads the sensors: "+r.Path)
 			}
 		default:
 			bad = append(bad, "a method that is never used: "+r.Method+" "+r.Path)
@@ -309,9 +339,13 @@ func (s *Server) take(entity, to string) []string {
 	return []string{entity}
 }
 
-func stateObject(entity, state string) map[string]any {
+func stateObject(entity, state, unit string) map[string]any {
+	attrs := map[string]any{"friendly_name": "Socket " + strings.TrimPrefix(entity, "switch.")}
+	if unit != "" {
+		attrs = map[string]any{"friendly_name": entity, "unit_of_measurement": unit, "state_class": "measurement"}
+	}
 	return map[string]any{"entity_id": entity, "state": state,
-		"attributes":   map[string]any{"friendly_name": "Socket " + strings.TrimPrefix(entity, "switch.")},
+		"attributes":   attrs,
 		"last_changed": "2026-11-15T12:00:00.000000+00:00", "last_updated": "2026-11-15T12:00:00.000000+00:00",
 		"context": map[string]any{"id": "ctx-1", "parent_id": nil, "user_id": nil}}
 }
@@ -335,14 +369,14 @@ func (s *Server) wait(r *http.Request, d time.Duration) {
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	body, _ := io.ReadAll(io.LimitReader(r.Body, 1<<20))
 	auth := r.Header.Get("Authorization")
-	ok := auth == "Bearer "+Token()
+	ok, read := auth == "Bearer "+Token(), auth == "Bearer "+ReadToken()
 	s.mu.Lock()
-	s.reqs = append(s.reqs, Request{Method: r.Method, Path: r.URL.RequestURI(), Body: string(body), TokenOK: ok, Auth: auth})
+	s.reqs = append(s.reqs, Request{Method: r.Method, Path: r.URL.RequestURI(), Body: string(body), TokenOK: ok, ReadToken: read, Auth: auth})
 	s.apply()
 	redirect, redirAs := s.redirect, s.redirAs
 	s.mu.Unlock()
 	w.Header().Set("Content-Type", "application/json")
-	if !ok {
+	if !ok && !read {
 		w.WriteHeader(http.StatusUnauthorized)
 		_, _ = io.WriteString(w, "401: Unauthorized")
 		return
@@ -374,6 +408,7 @@ func (s *Server) serveState(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	s.read(entity)
 	state, has := s.states[entity]
+	unit := s.units[entity]
 	code, hang, as := s.getCode, s.hangGet, s.wrongID
 	s.mu.Unlock()
 	switch {
@@ -392,7 +427,7 @@ func (s *Server) serveState(w http.ResponseWriter, r *http.Request) {
 	if as != "" {
 		entity = as
 	}
-	_ = json.NewEncoder(w).Encode(stateObject(entity, state))
+	_ = json.NewEncoder(w).Encode(stateObject(entity, state, unit))
 }
 
 func (s *Server) serveSwitch(w http.ResponseWriter, r *http.Request, body []byte) {
@@ -439,7 +474,7 @@ func (s *Server) serveSwitch(w http.ResponseWriter, r *http.Request, body []byte
 	}
 	list := []map[string]any{}
 	for _, e := range changed {
-		list = append(list, stateObject(e, to))
+		list = append(list, stateObject(e, to, ""))
 	}
 	_ = json.NewEncoder(w).Encode(list)
 }
