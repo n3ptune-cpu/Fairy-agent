@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1187,4 +1188,98 @@ func TestPlugChallengeOnWindowsWithAHelperThatKnowsNoApprovals(t *testing.T) {
 		}
 	}
 	r.quiet(t, "challenge requests on a machine whose helper knows no approvals")
+}
+
+// The last check decides also when the approval runs out, not only when the trust file breaks: a challenge
+// that was open at the first look and is too old when the state has been read sends nothing. (A second test
+// of what TestPlugSwitchChecksAgainAtTheLastMoment holds, by another way to the gate's "no".)
+func TestPlugSwitchWithAnApprovalThatRunsOutBeforeTheRequest(t *testing.T) {
+	var later atomic.Int64 // how far the gate's clock is ahead of the wall clock
+	r := newPlugRig(t, plugRigOpts{gateOpt: func(o *approval.Options) {
+		o.Now = func() time.Time { return time.Now().Add(time.Duration(later.Load())) }
+	}})
+	ap := r.approve(t, sockCh1, "off")
+	r.ha.SlowState(700 * time.Millisecond)
+	r.ha.Forget()
+	done := make(chan answer, 1)
+	go func() { done <- r.flip(t, sockCh1, "off", ap) }()
+	for i := 0; i < 400 && r.ha.Count() == 0; i++ {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if r.ha.Count() != 1 {
+		t.Fatal("the state read did not start: the first look refused the approval")
+	}
+	later.Store(int64(approval.ChallengeTTL + time.Minute)) // between the first look and the last, the challenge runs out
+	var a answer
+	select {
+	case a = <-done:
+	case <-time.After(15 * time.Second):
+		t.Fatal("the switch did not end")
+	}
+	if a.status != 403 || a.code() != api.CodeApprovalRefused {
+		t.Errorf("%s", a)
+	}
+	if got := r.asked(); !slices.Equal(got, []string{"GET /api/states/" + agenttest.PlugBar1}) || r.ha.State(agenttest.PlugBar1) != "on" {
+		t.Fatalf("Home Assistant was asked %v, and the socket is %s", got, r.ha.State(agenttest.PlugBar1))
+	}
+}
+
+// What the switch request is answered with never takes the request, the token or a word of the address
+// anywhere else: a redirect is the answer and is not followed (the server it points to sees nothing), and
+// neither it nor a connection that is cut puts Home Assistant's address into the answer or the log.
+func TestPlugSwitchRequestStaysAtTheConfiguredAddress(t *testing.T) {
+	log := captureLog(t)
+	elsewhere := hatest.New(agenttest.PlugStates()) // where the redirect points
+	defer elsewhere.Close()
+	addresses := func(r *plugRig) []string {
+		return []string{strings.TrimPrefix(r.ha.URL, "http://"), strings.TrimPrefix(elsewhere.URL, "http://"), "http://", "Post \"", "EOF", "connection reset"}
+	}
+	for _, status := range []int{307, 308, 302} {
+		r := newPlugRig(t, plugRigOpts{})
+		ap := r.approve(t, sockCh1, "off")
+		r.ha.SlowState(500 * time.Millisecond)
+		r.ha.Forget()
+		done := make(chan answer, 1)
+		go func() { done <- r.flip(t, sockCh1, "off", ap) }()
+		for i := 0; i < 400 && r.ha.Count() == 0; i++ {
+			time.Sleep(5 * time.Millisecond)
+		}
+		r.ha.RedirectAs(elsewhere.URL, status) // from now on: the state read under way is answered honestly, the switch request with the redirect
+		var a answer
+		select {
+		case a = <-done:
+		case <-time.After(15 * time.Second):
+			t.Fatal("the switch did not end")
+		}
+		if a.status != 502 || a.code() != api.CodeHARefused || !strings.Contains(a.raw, "(home assistant answered http "+strconv.Itoa(status)+")") {
+			t.Errorf("a %d to the switch request: %s", status, a)
+		}
+		if posts := r.ha.Posts(); len(posts) != 1 || posts[0].Path != "/api/services/switch/turn_off" {
+			t.Errorf("a %d to the switch request: Home Assistant was asked %v", status, r.asked())
+		}
+		if n := elsewhere.Count(); n != 0 {
+			t.Fatalf("a %d to the switch request was followed: the other server saw %+v", status, elsewhere.Requests())
+		}
+		for _, never := range addresses(r) {
+			if strings.Contains(a.raw, never) || strings.Contains(log.String(), never) {
+				t.Errorf("a %d to the switch request: the answer or the log has %q: %s\n%s", status, never, a, log.String())
+			}
+		}
+	}
+	// the connection is cut without an answer
+	r := newPlugRig(t, plugRigOpts{quick: true})
+	ap := r.approve(t, sockCh1, "off")
+	r.ha.CutSwitch(false)
+	a := r.flip(t, sockCh1, "off", ap)
+	if a.status != 502 || a.code() != api.CodeNoAnswer || !strings.HasSuffix(a.body["error"].(string), "(no answer)") || len(r.ha.Posts()) != 1 {
+		t.Errorf("the connection cut: %s; asked %v", a, r.asked())
+	}
+	for _, never := range addresses(r) {
+		if strings.Contains(a.raw, never) || strings.Contains(log.String(), never) {
+			t.Errorf("the connection cut: the answer or the log has %q: %s\n%s", never, a, log.String())
+		}
+	}
+	if !strings.Contains(log.String(), `msg="plug: failed after the approval was used" reason=no_answer why="no answer"`) {
+		t.Errorf("log:\n%s", log.String())
+	}
 }
