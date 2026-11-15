@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"runtime"
 	"slices"
 	"strings"
 
@@ -11,6 +12,18 @@ import (
 	"github.com/n3ptune-cpu/Fairy-agent/pkg/approval"
 	"github.com/n3ptune-cpu/Fairy-agent/pkg/plugs"
 )
+
+// envNamesFold says whether this system takes two names of environment variables that differ in letter case
+// only as one variable. Windows does; every other system has two variables then (tests put their own here).
+var envNamesFold = runtime.GOOS == "windows"
+
+// sameEnvName says whether a and b name one environment variable on this system.
+func sameEnvName(a, b string) bool {
+	if envNamesFold {
+		return strings.EqualFold(a, b)
+	}
+	return a == b
+}
 
 // PlugReport is what this machine's config says about its Home Assistant and its sockets, in words: the lines
 // check-config prints after its "config OK", and what the agent writes to its log when it starts. It is made
@@ -111,12 +124,14 @@ func (c *Config) PlugReport(p *plugs.Plugs, approvalState string) PlugReport {
 		}
 	}
 	// One variable for both tokens, the normal setup: said once, with the variable's name (as the block writes
-	// it), and as a remark. It is no problem and no warning.
+	// it), and as a remark. It is no problem and no warning. "One variable" is what this system takes as one
+	// (sameEnvName): where letter case tells two names apart, the block's variable is another one than the
+	// entries', the block has its own token or none, and the line would be wrong.
 	for _, raw := range c.PowerSources {
 		if typ, _ := raw["type"].(string); typ != "homeassistant" {
 			continue
 		}
-		if env, _ := raw["token_env"].(string); env != "" && strings.EqualFold(env, h.TokenEnv) {
+		if env, _ := raw["token_env"].(string); env != "" && sameEnvName(env, h.TokenEnv) {
 			const why = "Home Assistant gives every token of an account the same rights, so a second token only lets you revoke one without the other."
 			if h.Switching {
 				rep.Remarks = append(rep.Remarks, "switching and reading use the same token ("+h.TokenEnv+"): "+why)

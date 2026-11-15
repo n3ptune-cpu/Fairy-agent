@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -133,5 +134,58 @@ func TestApprovalStateOnDisk(t *testing.T) {
 	}
 	if ents, _ := os.ReadDir(filepath.Dir(files.Path)); len(ents) != 1 || buf.Len() != 0 {
 		t.Errorf("the look left %d files and wrote to the log: %s", len(ents), buf.String())
+	}
+}
+
+// The line "switching and reading use the same token" is said when the block and an entry name one variable,
+// and one variable is what this system takes as one: two names that differ in letter case only are one
+// variable on Windows and two anywhere else. On Linux a block that reads pchk_one_token while the entries
+// read PCHK_ONE_TOKEN has no token when only the second is set: the report says "missing", and must not say
+// in the next line that the two use the same token.
+func TestTheSameTokenLineTakesVariableNamesAsTheSystemDoes(t *testing.T) {
+	const upper, lower = "PCHK_ONE_TOKEN", "pchk_one_token"
+	t.Setenv(upper, strings.Join([]string{"made", "up", "one", "token"}, "-"))
+	report := func(t *testing.T, readEnv, switchEnv string) PlugReport {
+		t.Helper()
+		cfg := mustParse(t, agenttest.PlugConfig("http://192.0.2.10:8123", agenttest.PlugOptions{Switching: true, ReadEnv: readEnv, SwitchEnv: switchEnv}))
+		relay, err := cfg.NewRelay()
+		if err != nil {
+			t.Fatal(err)
+		}
+		p, err := cfg.NewPlugs(relay)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return cfg.PlugReport(p, api.ApprovalRequired)
+	}
+	same := func(rep PlugReport) int { return strings.Count(strings.Join(rep.Remarks, "\n"), "the same token") }
+	old := envNamesFold
+	t.Cleanup(func() { envNamesFold = old })
+	for _, fold := range []bool{false, true} {
+		envNamesFold = fold
+		if rep := report(t, upper, upper); same(rep) != 1 || !strings.Contains(rep.Remarks[0], "("+upper+")") {
+			t.Errorf("fold %v, one name in both places: remarks %v", fold, rep.Remarks)
+		}
+		rep := report(t, upper, lower)
+		want := 0
+		if fold {
+			want = 1 // on Windows the two names are one variable
+		}
+		if same(rep) != want {
+			t.Errorf("fold %v, two names that differ in letter case: remarks %v, want the line %d times", fold, rep.Remarks, want)
+		}
+		if rep := report(t, upper, "PCHK_OTHER_TOKEN"); same(rep) != 0 {
+			t.Errorf("fold %v, two variables: remarks %v", fold, rep.Remarks)
+		}
+	}
+	if envNamesFold = old; envNamesFold != (runtime.GOOS == "windows") {
+		t.Errorf("names of variables fold their letter case: %v on %s", envNamesFold, runtime.GOOS)
+	}
+	// where the two names are two variables, the block's own is the one that counts: it is not set here
+	if runtime.GOOS != "windows" {
+		rep := report(t, upper, lower)
+		if lines := strings.Join(rep.Lines, "\n"); !strings.Contains(lines, "token: missing ("+lower+" is not set") || same(rep) != 0 {
+			t.Errorf("the block's variable in another letter case than the entries':\n%s\nremarks %v", lines, rep.Remarks)
+		}
 	}
 }
