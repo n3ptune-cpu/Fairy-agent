@@ -66,7 +66,8 @@ const CodeNotAdmitted = "not_admitted"
 //     request is made.
 //  2. One switch at a time on this agent: a second one is not queued but refused (switch_in_progress).
 //  3. Not sooner than MinGap after the last switch of this socket (too_soon). And not while the wait after a
-//     refused token is on (ha_unreachable): the token is not sent again before that is over.
+//     refused token is on (ha_unreachable, with HeldWhy and the time left): the token is not sent again before
+//     that is over.
 //  4. The state is read. No state (ha_unreachable, no_token) and a state that is neither on nor off
 //     (socket_unavailable) refuse: Home Assistant answers a switch request for an entity it does not reach
 //     with 200 and does nothing, so a socket that is known to be unreachable is refused while the approval
@@ -76,6 +77,11 @@ const CodeNotAdmitted = "not_admitted"
 //     is sent also when the state read in 4 is the one asked for: Home Assistant's state can be old, the
 //     request does nothing to a socket that is in that state already, and the person approved "make it off".
 //     An error status ends here (ha_refused). No answer does not: the request may have arrived.
+//     A 401 or 403 here is an error status like the others and does not start the wait after a refused
+//     token. Home Assistant answers a service call like that also when the token is good and its user may not
+//     control this entity; taken as "the token is refused" it would lock every socket of this agent, the
+//     reads included, for five minutes and longer, for one socket's sake. If the token is really refused,
+//     the reader's next state read is answered the same (within Interval, one request) and starts the wait.
 //  7. The state is read again, after ConfirmFirst and then every ConfirmEvery for ConfirmFor at the most,
 //     until it is the one asked for. Only that makes Confirmed true: the answer to the request is never
 //     taken for success. No answer in 6 and no change here is no_answer.
@@ -123,7 +129,7 @@ func (p *Plugs) Switch(ctx context.Context, source, socket string, on bool, admi
 	}
 	if left := p.held(); left > 0 {
 		p.mu.Unlock()
-		res.Code, res.Why, res.RetryAfter = api.CodeHAUnreachable, "home assistant refused the token a while ago, and it is not sent again before the wait is over", left
+		res.Code, res.Why, res.RetryAfter = api.CodeHAUnreachable, HeldWhy, left
 		return res
 	}
 	p.busy = true
@@ -179,10 +185,9 @@ func (p *Plugs) Switch(ctx context.Context, source, socket string, on bool, admi
 			res.Code, res.Why = api.CodeNoSwitchToken, Describe(err)
 			return res
 		case se.Status != 0:
-			if se.Refused() {
-				p.mu.Lock()
-				p.refused(Describe(err))
-				p.mu.Unlock()
+			if se.Denied() { // not a refusal of the token for the reader's wait: see step 6 above
+				p.o.Log.Warn("plug: home assistant refused the switch request; the approval is used up. The wait after a refused token is not started by this",
+					"status", se.Status, "source", s.Source, "socket", s.ID, "name", s.Name, "entity", s.Entity, "to", want)
 			}
 			res.Code, res.Why = api.CodeHARefused, Describe(err)
 			return res

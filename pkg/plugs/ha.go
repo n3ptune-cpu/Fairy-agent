@@ -233,8 +233,11 @@ type SwitchError struct {
 
 func (e *SwitchError) Error() string { return e.why }
 
-// Refused reports whether Home Assistant refused the token (401 or 403): power.Refused is true for it.
-func (e *SwitchError) Refused() bool {
+// Denied reports whether Home Assistant answered the switch request with 401 or 403. That is not the same as
+// "the token is refused": it answers a service call so also when the token is good and its user may not
+// control this entity. So a SwitchError is never a refusal in the sense of power.Refused (it has no method
+// Refused), and nothing waits because of it; only a state read tells that the token is not accepted.
+func (e *SwitchError) Denied() bool {
 	return e.Status == http.StatusUnauthorized || e.Status == http.StatusForbidden
 }
 
@@ -294,7 +297,8 @@ func (h *HA) Switch(ctx context.Context, entity string, on bool, timeout time.Du
 	case http.StatusOK, http.StatusCreated:
 		return nil
 	case http.StatusUnauthorized, http.StatusForbidden:
-		return &SwitchError{Status: resp.StatusCode, why: "home assistant refused the token"}
+		return &SwitchError{Status: resp.StatusCode, why: "home assistant refused the switch request with http " + strconv.Itoa(resp.StatusCode) +
+			": its token is not accepted, or its user may not switch this socket"}
 	}
 	return &SwitchError{Status: resp.StatusCode, why: "home assistant answered http " + strconv.Itoa(resp.StatusCode)}
 }

@@ -1395,8 +1395,32 @@ One socket is switched at most every `min_gap_s`, and one switch runs at a time 
 `name`, `state` (`on`, `off`, `unavailable`, `unknown`), whether it can be switched, why not if not
 (`switching_off`, `feeds_self`, `not_allowed`, `no_token`, `approval_off`, `approval_unavailable`), a `tag`
 and an `error` when the state could not be read. The entity id is not sent. The states are read every 10
-seconds, one request for each socket; after a token that Home Assistant refuses, nothing is asked for 5
-minutes, then 15, then an hour, as for the sensors. A plug's watts are shown whatever its sockets say.
+seconds, one request for each socket, with the token `home_assistant.token_env` names. A plug's watts are
+shown whatever its sockets say.
+
+**The wait after a refused token.** When Home Assistant answers a state read with 401 or 403, the token for
+the sockets is not sent again for 5 minutes; after the next refusal in a row for 15 minutes, then for an
+hour each time, as for the sensors (Home Assistant counts every request with a token it does not accept as a
+failed login and can ban the agent's address). While the wait is on:
+
+* every socket shows `unknown` with the error `home assistant refused the token`;
+* a switch is answered `502 ha_unreachable` with `Retry-After` and `"retry_after_s"` (the seconds that are
+  left), and nothing is asked of Home Assistant. Your approval is not used;
+* **the request for a challenge is answered the same**, so the panel does not send you to your passkey for
+  a switch that is certain to be refused.
+
+The answer says how the wait ends: **when its time is over, or when the agent is restarted after the token
+was corrected** (`sudo fairy-agent secret set HA_SWITCH_TOKEN`, then `sudo systemctl restart fairy-agent`;
+Windows: `Restart-Service fairy-agent`). A restart starts the count anew and reads at once. Nothing else
+ends it: no request to the agent can shorten or prolong it.
+
+Only a state read starts the wait. **A 401 or 403 that Home Assistant gives to the switch request itself
+does not**: it answers so also when the token is good and its user is not allowed to switch that socket,
+and one such socket must not stop all the others. That switch is answered `502 ha_refused` (your approval is
+used up, nothing is said about the socket's state), the agent's log has
+`plug: home assistant refused the switch request; the approval is used up. ...`, and the other sockets go on.
+If the token really is no longer accepted, the next state read finds that out within 10 seconds, with one
+request, and the wait starts then.
 
 **What it answers** when something is not as it should be (the panel turns these into sentences):
 
@@ -1411,15 +1435,17 @@ minutes, then 15, then an hour, as for the sensors. A plug's watts are shown wha
 | `409 no_token` | the variable of the switching token is empty | not used |
 | `409 switch_in_progress`, `429 too_soon` | another switch is running; this socket was switched less than `min_gap_s` ago (`Retry-After` says when) | not used |
 | `409 socket_unavailable` | Home Assistant has no "on" or "off" for the socket right now | not used |
-| `502 ha_unreachable` | the state could not be read (no answer, an error, the entity is gone, the token refused) | not used |
-| `502 ha_refused` | Home Assistant answered the switch request with an error | **used** |
+| `502 ha_unreachable` | the state could not be read (no answer, an error, the entity is gone, the token refused). With `Retry-After`: the wait after a refused token is on (above); the challenge request is answered the same then, and the text says how the wait ends | not used |
+| `502 ha_refused` | Home Assistant answered the switch request with an error, 401 and 403 included (the token, or what its user may switch). Nothing more was sent and the socket was not looked at again; the wait after a refused token is not started by it | **used** |
 | `502 no_answer` | no answer to the switch request, and the socket did not change in 10 s. It may still switch: look at it | **used** |
 
 **The log.** Every switch request that carried the control token leaves one line in the agent's log (Linux:
 `journalctl -u fairy-agent | grep 'plug:'`; Windows: `logs\agent.log`): `plug: switched` with the socket, the
 entity, the direction, the state before and after and who asked; `plug: not confirmed`; `plug: refused` with
 the reason; `plug: failed after the approval was used` (an error line: `ha_refused` or `no_answer`). Before the
-one request is sent there is also `plug: switching`. The line of the passkey check next to it (`approval: accepted request="socket_set ..."`) says
+one request is sent there is also `plug: switching`. A request for a challenge that is refused leaves
+`plug: no challenge given` with the reason (`feeds_self`, `not_allowed`, `approval_off`, `ha_unreachable`
+during the wait after a refused token, ...). The line of the passkey check next to it (`approval: accepted request="socket_set ..."`) says
 whose passkey it was. The token is never in the log. The panel has its own audit log; the agent's is the one
 a panel that was taken over cannot change.
 

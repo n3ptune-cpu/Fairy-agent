@@ -137,7 +137,7 @@ var plugRefusals = map[string]plugRefusal{
 	api.CodeSwitchInProgress: {409, "another socket is being switched on this machine right now; one at a time. Nothing was switched, and the approval was not used"},
 	api.CodeTooSoon:          {429, "this socket was switched a moment ago; the same socket is not switched again so soon (home_assistant.min_gap_s). Nothing was switched"},
 	api.CodeHAUnreachable:    {502, "the socket's state could not be read from Home Assistant, so nothing was switched and the approval was not used"},
-	api.CodeHARefused:        {502, "Home Assistant answered the switch request with an error. Nothing more was sent; the approval is used up"},
+	api.CodeHARefused:        {502, "Home Assistant answered the switch request with an error. Nothing more was sent, and the socket was not looked at again; the approval is used up"},
 	api.CodeNoAnswer: {502, "the switch request got no answer from Home Assistant, and the socket did not show the new state within 10 s. " +
 		"It may still switch: look at the socket. The approval is used up"},
 	api.CodePlugSwitchingDisabled: {404, "plug switching is disabled on this agent"},
@@ -195,16 +195,27 @@ func (a *Agent) socketKnown(source, socket, tag string) (plugs.Socket, string) {
 //
 // It never answers "needs no approval". What would be refused at the switch for a reason that needs no
 // approval to know is refused here (socketKnown), and so is a machine without a passkey check: 409
-// approval_off, where every other verb is told "needed: false, reason: off".
+// approval_off, where every other verb is told "needed: false, reason: off". And while the wait after a
+// refused token is on, it answers what the switch would: 502 ha_unreachable with Retry-After.
 func (a *Agent) socketChallenge(w http.ResponseWriter, r *http.Request, req api.ApprovalRequest) {
 	if _, code := a.socketKnown(*req.Source, *req.Socket, *req.Tag); code != "" {
 		slog.Warn("plug: no challenge given", "source", *req.Source, "socket", *req.Socket, "to", *req.To, "reason", code, "remote", clientIP(r))
 		refusePlug(w, code, "", 0)
 		return
 	}
-	if a.socketGate(r.Context(), true) == api.WhyApprovalOff {
+	gate := a.socketGate(r.Context(), true)
+	if gate == api.WhyApprovalOff {
 		slog.Warn("plug: no challenge given", "source", *req.Source, "socket", *req.Socket, "to", *req.To, "reason", api.CodeApprovalOff, "remote", clientIP(r))
 		writeRefusal(w, approval.Off())
+		return
+	}
+	// While the wait after a refused token is on, the switch itself would be answered 502 ha_unreachable without
+	// Home Assistant being asked (plugs.Switch). The same answer is given here, with the time that is left:
+	// nobody is sent to the passkey for a switch that is certain to be refused. Only where the passkey check
+	// can be used: a trust file that cannot is said by the gate below, as at the switch.
+	if left := a.d.Plugs.Held(); gate == "" && left > 0 {
+		slog.Warn("plug: no challenge given", "source", *req.Source, "socket", *req.Socket, "to", *req.To, "reason", api.CodeHAUnreachable, "remote", clientIP(r))
+		refusePlug(w, api.CodeHAUnreachable, plugs.HeldWhy, left)
 		return
 	}
 	c, ref := a.d.Approval.Challenge(req) // not nil: socketGate says approval_off for an agent without a gate

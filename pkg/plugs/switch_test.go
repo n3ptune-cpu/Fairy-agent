@@ -287,7 +287,10 @@ func TestSwitchWithoutAnAnswer(t *testing.T) {
 }
 
 // Home Assistant answers the switch request with an error: ha_refused, nothing more is sent (no look at the
-// state, no second request), and the approval is spent. A refusal of the token starts the reader's long wait.
+// state, no second request), and the approval is spent. So it is for 401 and 403, and they do not start the
+// long wait after a refused token: Home Assistant answers a service call like that also when the token is good
+// and its user may not switch this socket, and one such answer must not stop every socket of the agent. A
+// token that is really refused is found by the reader, at its next round.
 func TestSwitchRefusedByHomeAssistant(t *testing.T) {
 	for _, status := range []int{400, 401, 403, 404, 405, 500, 502, 503, 307, 204} {
 		r := newRig(t, true)
@@ -299,34 +302,121 @@ func TestSwitchRefusedByHomeAssistant(t *testing.T) {
 			}
 		}}
 		res := r.p.Switch(bg(), "desk-bar", "ch1", false, ad.admit)
-		if res.Code != api.CodeHARefused || !res.Spent || res.Confirmed || res.Was != "on" || ad.asked != 1 {
+		if res.Code != api.CodeHARefused || !res.Spent || res.Confirmed || res.Was != "on" || res.RetryAfter != 0 || ad.asked != 1 {
 			t.Fatalf("http %d: %+v", status, res)
 		}
-		if tokenRefused := status == 401 || status == 403; tokenRefused != (res.Why == "home assistant refused the token") ||
-			(!tokenRefused && res.Why != "home assistant answered http "+strconv.Itoa(status)) {
+		denied := status == 401 || status == 403
+		want := "home assistant answered http " + strconv.Itoa(status)
+		if denied {
+			want = "home assistant refused the switch request with http " + strconv.Itoa(status) + ": its token is not accepted, or its user may not switch this socket"
+		}
+		if res.Why != want {
 			t.Errorf("http %d: %q", status, res.Why)
 		}
 		if got := paths(r.srv.Requests()); !slices.Equal(got, []string{"GET /api/states/" + bar1, "POST /api/services/switch/turn_off"}) {
 			t.Errorf("http %d: asked %v", status, got)
 		}
-		// after a refused token nothing is asked for a while: not by the reader, not by the next switch
+		if said := strings.Contains(r.log.String(), `msg="plug: home assistant refused the switch request; the approval is used up. The wait after a refused token is not started by this" status=`+strconv.Itoa(status)); said != denied {
+			t.Errorf("http %d: log:\n%s", status, r.log.String())
+		}
+		// no wait is on after it, whatever the status was: the reader asks every socket at its next round, and
+		// the next switch is sent
+		if left := r.p.Held(); left != 0 {
+			t.Errorf("http %d: the wait after a refused token is on, %v left", status, left)
+		}
 		r.srv.Honest()
 		r.srv.Forget()
 		r.p.PollOnce(bg())
+		if n := r.srv.Count(); n != len(testSockets()) {
+			t.Errorf("http %d: the reader's next round asked %v", status, paths(r.srv.Requests()))
+		}
+		if got := r.states("desk-bar"); got != "ch1=on, ch2=off, ch3=on" {
+			t.Errorf("http %d: after the reader's round: %s", status, got)
+		}
 		r.clk.add(time.Minute) // past the gap
-		next := r.p.Switch(bg(), "desk-bar", "ch1", false, (&admitter{}).admit)
-		if status == 401 || status == 403 {
-			if r.srv.Count() != 0 || next.Code != api.CodeHAUnreachable || next.Spent || next.RetryAfter <= 0 || next.RetryAfter > 5*time.Minute {
-				t.Errorf("http %d: after the refusal Home Assistant was asked %v; the next switch: %+v", status, paths(r.srv.Requests()), next)
-			}
-			for _, row := range r.p.Rows("desk-bar") {
-				if row.State != api.SocketStateUnknown || row.Error != "home assistant refused the token" {
-					t.Errorf("http %d: row %s says %s (%s)", status, row.ID, row.State, row.Error)
-				}
-			}
-		} else if next.Code != "" || !next.Confirmed {
+		if next := r.p.Switch(bg(), "desk-bar", "ch1", false, (&admitter{}).admit); next.Code != "" || !next.Confirmed {
 			t.Errorf("http %d: the next switch: %+v", status, next)
 		}
+	}
+
+	// a token that is really refused: the switch request's 401 did not start the wait, the reader's next
+	// state read does, with one request
+	r := newRig(t, true)
+	ad := &admitter{then: func() { t.Setenv(tokenEnv, "a-token-that-was-revoked") }}
+	if res := r.p.Switch(bg(), "desk-bar", "ch1", false, ad.admit); res.Code != api.CodeHARefused || !res.Spent || r.p.Held() != 0 {
+		t.Fatalf("a revoked token at the switch request: %+v, %v left of a wait", res, r.p.Held())
+	}
+	r.srv.Forget()
+	r.p.PollOnce(bg())
+	if r.srv.Count() != 1 || r.p.Held() != 5*time.Minute {
+		t.Errorf("the reader after it: asked %v, %v left of the wait", paths(r.srv.Requests()), r.p.Held())
+	}
+}
+
+// While the wait after a refused token is on, a switch is refused before anybody is asked anything: Home
+// Assistant, and the passkey check. The refusal says how long the wait still is and how it ends. Every state
+// read that is answered 401 or 403 starts the wait: the reader's, the one before a switch, one after it.
+func TestSwitchDuringTheWaitAfterARefusedToken(t *testing.T) {
+	r := newRig(t, true)
+	if left := r.p.Held(); left != 0 {
+		t.Fatalf("a wait of %v before anything was refused", left)
+	}
+	r.srv.AnswerState(401)
+	r.p.PollOnce(bg()) // the reader meets the refusal
+	r.srv.Honest()     // Home Assistant takes the token again at once; the agent cannot know
+	r.srv.Forget()
+	if left := r.p.Held(); left != 5*time.Minute {
+		t.Fatalf("%v left of the wait, want 5 minutes", left)
+	}
+	ad := &admitter{}
+	for _, on := range []bool{false, true} {
+		res := r.p.Switch(bg(), "desk-bar", "ch1", on, ad.admit)
+		if res.Code != api.CodeHAUnreachable || res.Spent || res.RetryAfter != 5*time.Minute || res.Why != HeldWhy {
+			t.Errorf("a switch (on=%v) during the wait: %+v", on, res)
+		}
+	}
+	for _, how := range []string{"when its time is over", "when the agent is restarted after the token was corrected"} {
+		if !strings.Contains(HeldWhy, how) {
+			t.Errorf("the refusal does not say that the wait ends %s: %q", how, HeldWhy)
+		}
+	}
+	r.clk.add(4*time.Minute + 59*time.Second)
+	if res := r.p.Switch(bg(), "desk-bar", "ch2", true, ad.admit); res.Code != api.CodeHAUnreachable || res.RetryAfter != time.Second {
+		t.Errorf("one second before the end: %+v", res)
+	}
+	if ad.asked != 0 || r.srv.Count() != 0 {
+		t.Fatalf("during the wait the passkey check was asked %d times and Home Assistant %v", ad.asked, paths(r.srv.Requests()))
+	}
+	r.clk.add(time.Second)
+	if left := r.p.Held(); left != 0 {
+		t.Errorf("%v left after the wait", left)
+	}
+	if res := r.p.Switch(bg(), "desk-bar", "ch1", false, ad.admit); res.Code != "" || !res.Confirmed || ad.asked != 1 {
+		t.Errorf("after the wait: %+v, admit asked %d times", res, ad.asked)
+	}
+
+	// the state read before a switch is refused: nothing is admitted, and the wait is on for the next one
+	r = newRig(t, true)
+	r.srv.AnswerState(403)
+	ad = &admitter{}
+	if res := r.p.Switch(bg(), "desk-bar", "ch1", false, ad.admit); res.Code != api.CodeHAUnreachable || res.Why != "home assistant refused the token" || res.Spent || ad.asked != 0 || r.srv.Count() != 1 {
+		t.Errorf("the state read before a switch refused: %+v", res)
+	}
+	r.srv.Honest()
+	r.srv.Forget()
+	if res := r.p.Switch(bg(), "desk-bar", "ch2", true, ad.admit); res.Code != api.CodeHAUnreachable || res.Why != HeldWhy || res.RetryAfter != 5*time.Minute || ad.asked != 0 || r.srv.Count() != 0 {
+		t.Errorf("the switch after it: %+v; asked %v", res, paths(r.srv.Requests()))
+	}
+
+	// a state read after the request is refused: the request was sent once and is not confirmed, and the wait is on
+	r = newRig(t, true)
+	ad = &admitter{then: func() { r.srv.AnswerState(401) }}
+	res := r.p.Switch(bg(), "desk-bar", "ch1", false, ad.admit)
+	if res.Code != "" || !res.Spent || res.Confirmed || res.State != api.SocketStateUnknown || len(r.srv.Posts()) != 1 || len(r.srv.Gets()) != 2 {
+		t.Errorf("a state read after the request refused: %+v; asked %v", res, paths(r.srv.Requests()))
+	}
+	if left := r.p.Held(); left <= 0 || left > 5*time.Minute {
+		t.Errorf("%v left of the wait after it", left)
 	}
 }
 

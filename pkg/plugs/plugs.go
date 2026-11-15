@@ -202,7 +202,8 @@ func (p *Plugs) Rows(source string) []Row {
 // an hour for the third and every further refusal in a row. A revoked token would otherwise be sent with every
 // socket every ten seconds, and Home Assistant counts each as a failed login and can ban this machine's
 // address, which would end the meters' readings too. The count goes back to zero with the first state that is
-// read; a restart of the agent starts it anew. A refusal that a switch met counts the same (switch.go).
+// read; a restart of the agent starts it anew. A state read that a switch makes counts the same when it is
+// refused; the answer to the switch request itself does not (switch.go).
 func (p *Plugs) Run(ctx context.Context) {
 	if p.Empty() {
 		return
@@ -219,6 +220,28 @@ func (p *Plugs) PollOnce(ctx context.Context) {
 	if !p.Empty() {
 		p.round(ctx)
 	}
+}
+
+// HeldWhy is why a switch, and a challenge for one, is refused while the wait after a refused token is on: what
+// happened, and the two ways the wait ends. (Retry-After of the answer says the first; the second is the way
+// out for whoever has put the right token into the variable.)
+const HeldWhy = "home assistant refused the token for the sockets a while ago, and it is not sent again while the wait is on. " +
+	"The wait ends when its time is over, or when the agent is restarted after the token was corrected"
+
+// Held is how much is left of the wait after a refusal of the token (0: no wait is on). While it is on nothing
+// is asked of Home Assistant: no state is read and no switch is sent (Switch answers ha_unreachable with this
+// as RetryAfter and HeldWhy as the reason), and the agent's route gives no challenge for a switch.
+//
+// The wait is started by a state read that Home Assistant answers with 401 or 403, whoever makes it (the
+// reader's round, the read before a switch, the reads after one), and by nothing else: not by the answer to a
+// switch request (switch.go says why).
+func (p *Plugs) Held() time.Duration {
+	if p == nil {
+		return 0
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.held()
 }
 
 // held is how much of the wait after a refusal is left (0: none). Caller holds p.mu.

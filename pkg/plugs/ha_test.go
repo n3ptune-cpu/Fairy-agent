@@ -240,8 +240,10 @@ func TestSwitchIsNeverSentTwice(t *testing.T) {
 			if !errors.As(err, &se) || se.NotSent || se.Status != c.status {
 				t.Fatalf("%s: %v", name, err)
 			}
-			if se.Refused() != (c.status == 401 || c.status == 403) || power.Refused(err) != se.Refused() {
-				t.Errorf("%s: counts as a refusal of the token: %v", name, se.Refused())
+			// 401 and 403 included: Home Assistant answers a service call so also when its user may not switch
+			// this entity. Only a state read tells that the token is refused.
+			if power.Refused(err) {
+				t.Errorf("%s: the answer to a switch request counts as a refusal of the token", name)
 			}
 			if took := time.Since(start); took > 5*time.Second {
 				t.Errorf("%s: given up after %v", name, took)

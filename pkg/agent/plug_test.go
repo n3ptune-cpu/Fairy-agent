@@ -621,20 +621,31 @@ func TestPlugSwitchWithoutAnAnswer(t *testing.T) {
 	}
 }
 
-// Home Assistant refuses the switch request: 502 ha_refused, nothing more is sent, the approval is spent.
-// For a refused token the sockets' reader goes into its long wait.
+// Home Assistant refuses the switch request: 502 ha_refused, nothing more is sent, the approval is spent, and
+// the answer claims nothing about the socket. A 401 or 403 to the switch request is such a refusal and no
+// more: it does not start the wait after a refused token, so the reader and the other sockets go on.
 func TestPlugSwitchRefusedByHomeAssistant(t *testing.T) {
-	for _, status := range []int{401, 500} {
+	log := captureLog(t)
+	for _, status := range []int{401, 403, 500} {
 		r := newPlugRig(t, plugRigOpts{})
 		ap := r.approve(t, sockCh1, "off")
 		r.ha.AnswerSwitch(status)
 		r.ha.Forget()
 		a := r.flip(t, sockCh1, "off", ap)
-		if a.status != 502 || a.code() != api.CodeHARefused {
+		if a.status != 502 || a.code() != api.CodeHARefused || !strings.Contains(a.raw, "the approval is used up") {
 			t.Fatalf("http %d: %s", status, a)
 		}
-		if tokenText := strings.Contains(a.raw, "(home assistant refused the token)"); tokenText != (status == 401) || strings.Contains(a.raw, "made up") {
+		denied := "(home assistant refused the switch request with http " + strconv.Itoa(status) + ": its token is not accepted, or its user may not switch this socket)"
+		if strings.Contains(a.raw, denied) != (status != 500) || strings.Contains(a.raw, "(home assistant answered http 500)") != (status == 500) || strings.Contains(a.raw, "made up") {
 			t.Errorf("http %d: %s", status, a)
+		}
+		for _, member := range []string{"confirmed", "state", "was", "retry_after_s"} { // nothing is claimed about the socket, and no wait is told
+			if _, has := a.body[member]; has {
+				t.Errorf("http %d: the answer has %q: %s", status, member, a)
+			}
+		}
+		if a.hdr["Retry-After"] != nil {
+			t.Errorf("http %d: Retry-After %v", status, a.hdr["Retry-After"])
 		}
 		if got := r.asked(); !slices.Equal(got, []string{"GET /api/states/" + agenttest.PlugBar1, "POST /api/services/switch/turn_off"}) {
 			t.Errorf("http %d: Home Assistant was asked %v", status, got)
@@ -644,17 +655,122 @@ func TestPlugSwitchRefusedByHomeAssistant(t *testing.T) {
 		if again := r.flip(t, sockCh1, "off", ap); again.status != 403 || again.code() != api.CodeApprovalRefused {
 			t.Errorf("http %d: the approval used again: %s", status, again)
 		}
+		r.quiet(t, "the spent approval")
+		// no wait is on: the reader asks every socket at its next round, /metrics has the states, and the next
+		// socket gets its challenge and is switched
 		r.plugs.PollOnce(context.Background())
-		if status == 401 {
-			r.quiet(t, "after a refused token")
-			m, _ := r.metrics(t)
-			list, row := socketsOf(t, m, agenttest.PlugBar)
-			if said(list[0]) != `ch1 "Left monitor" unknown true - home assistant refused the token` || row["ok"] != true {
-				t.Errorf("/metrics after the refusal: %s; the meter's row %v", said(list[0]), row)
-			}
-		} else if len(r.ha.Gets()) != 5 {
-			t.Errorf("http %d: the reader asked %v", status, r.asked())
+		if len(r.ha.Gets()) != 5 || len(r.ha.Posts()) != 0 {
+			t.Errorf("http %d: the reader's next round asked %v", status, r.asked())
 		}
+		m, _ := r.metrics(t)
+		list, row := socketsOf(t, m, agenttest.PlugBar)
+		if said(list[0]) != `ch1 "Left monitor" on true - -` || row["ok"] != true {
+			t.Errorf("http %d: /metrics after the refusal: %s; the meter's row %v", status, said(list[0]), row)
+		}
+		if next := r.flip(t, sockCh2, "on", r.approve(t, sockCh2, "on")); next.status != 200 || next.body["confirmed"] != true {
+			t.Errorf("http %d: the next socket: %s", status, next)
+		}
+	}
+	out := log.String()
+	for _, want := range []string{
+		`level=ERROR msg="plug: failed after the approval was used" reason=ha_refused why="home assistant refused the switch request with http 401: its token is not accepted, or its user may not switch this socket" source=desk-bar socket=ch1 to=off`,
+		`level=WARN msg="plug: home assistant refused the switch request; the approval is used up. The wait after a refused token is not started by this" status=403 source=desk-bar socket=ch1`,
+		`level=ERROR msg="plug: failed after the approval was used" reason=ha_refused why="home assistant answered http 500"`} {
+		if !strings.Contains(out, want) {
+			t.Errorf("the log has no line with %s\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "plugs: home assistant refused the token") {
+		t.Errorf("the wait after a refused token was started:\n%s", out)
+	}
+}
+
+// The wait after a refused token (a state read was answered 401 or 403). Until it is over nothing is asked of
+// Home Assistant; a switch answers 502 ha_unreachable with the time that is left; and so does the request for
+// a challenge, so nobody is sent to the passkey for a switch that is certain to be refused. The answer says
+// how the wait ends. An approval from before the wait is whole after it.
+func TestPlugSwitchDuringTheWaitAfterARefusedToken(t *testing.T) {
+	log := captureLog(t)
+	ctx := context.Background()
+	r := newPlugRig(t, plugRigOpts{})
+	ap := r.approve(t, sockCh1, "off") // given before the wait
+	r.ha.AnswerState(401)
+	r.plugs.PollOnce(ctx) // the reader meets one refusal
+	r.ha.Honest()         // and Home Assistant takes the token again at once: the agent cannot know
+	r.ha.Forget()
+	held := func(what string, a answer, secs int) {
+		t.Helper()
+		if a.status != 502 || a.code() != api.CodeHAUnreachable || a.body["retry_after_s"] != float64(secs) || len(a.hdr["Retry-After"]) != 1 || a.hdr["Retry-After"][0] != strconv.Itoa(secs) ||
+			a.body["challenge"] != nil || a.body["needed"] != nil {
+			t.Errorf("%s: %s, Retry-After %v", what, a, a.hdr["Retry-After"])
+		}
+		for _, how := range []string{"The wait ends when its time is over, or when the agent is restarted after the token was corrected", "the approval was not used"} {
+			if !strings.Contains(a.raw, how) {
+				t.Errorf("%s: the answer does not say %q: %s", what, how, a)
+			}
+		}
+	}
+	for _, to := range []string{"on", "off"} {
+		held("a challenge for "+to, r.challenge(t, sockCh1, to), 300)
+	}
+	held("a challenge for another socket", r.challenge(t, sockCh2, "on"), 300)
+	held("a switch with the approval from before", r.flip(t, sockCh1, "off", ap), 300)
+	// what is refused without a look at Home Assistant keeps its own answer, at the challenge as at the switch
+	if c := r.challenge(t, sockCorner, "off"); c.status != 403 || c.code() != api.CodeFeedsSelf {
+		t.Errorf("a challenge for a feeds_self socket during the wait: %s", c)
+	}
+	if c := r.challenge(t, sockGone, "off"); c.status != 404 || c.code() != api.CodeUnknownSocket {
+		t.Errorf("a challenge for no socket during the wait: %s", c)
+	}
+	if a := r.flip(t, sockCh1, "off", nil); a.status != 403 || a.code() != api.CodeApprovalRequired {
+		t.Errorf("a switch without an approval during the wait: %s", a)
+	}
+	r.clk.add(4*time.Minute + 59*time.Second)
+	held("a challenge one second before the end", r.challenge(t, sockCh1, "off"), 1)
+	held("a switch one second before the end", r.flip(t, sockCh1, "off", ap), 1)
+	r.quiet(t, "the wait after a refused token")
+	if n := strings.Count(r.log.String(), `msg="approval: challenge issued" request="socket_set`); n != 1 {
+		t.Errorf("%d challenges were given, want the one from before the wait", n)
+	}
+	if want := `msg="plug: no challenge given" source=desk-bar socket=ch1 to=off reason=ha_unreachable`; !strings.Contains(log.String(), want) {
+		t.Errorf("the log has no line with %s\n%s", want, log.String())
+	}
+	r.clk.add(time.Second)
+	if a := r.flip(t, sockCh1, "off", ap); a.status != 200 || a.body["confirmed"] != true { // the gate's clock is the real one: the challenge is seconds old
+		t.Errorf("the approval from before the wait, after it: %s", a)
+	}
+	if c := r.challenge(t, sockCh2, "on"); c.status != 200 || c.body["needed"] != true {
+		t.Errorf("a challenge after the wait: %s", c)
+	}
+
+	// refusals in a row: 5 minutes, 15 minutes, an hour, an hour
+	r = newPlugRig(t, plugRigOpts{})
+	for i, want := range []int{300, 900, 3600, 3600} {
+		r.ha.AnswerState(401)
+		r.plugs.PollOnce(ctx)
+		held("refusal "+strconv.Itoa(i+1)+" in a row", r.challenge(t, sockCh1, "off"), want)
+		r.clk.add(2 * time.Hour)
+	}
+
+	// a machine whose passkey check is off or cannot be used says that, as its switch does
+	off := newPlugRig(t, plugRigOpts{trust: "none"})
+	off.ha.AnswerState(401)
+	off.plugs.PollOnce(ctx)
+	if c := off.challenge(t, sockCh1, "off"); c.status != 409 || c.code() != api.CodeApprovalOff {
+		t.Errorf("no passkey check, during the wait: challenge %s", c)
+	}
+	if a := off.flip(t, sockCh1, "off", nil); a.status != 409 || a.code() != api.CodeApprovalOff {
+		t.Errorf("no passkey check, during the wait: switch %s", a)
+	}
+	broken := newPlugRig(t, plugRigOpts{})
+	broken.breakTrust(t)
+	broken.ha.AnswerState(401)
+	broken.plugs.PollOnce(ctx)
+	if c := broken.challenge(t, sockCh1, "off"); c.status != 503 || c.code() != api.CodeApprovalUnavailable {
+		t.Errorf("a trust file that cannot be used, during the wait: challenge %s", c)
+	}
+	if a := broken.flip(t, sockCh1, "off", nil); a.status != 503 || a.code() != api.CodeApprovalUnavailable {
+		t.Errorf("a trust file that cannot be used, during the wait: switch %s", a)
 	}
 }
 
