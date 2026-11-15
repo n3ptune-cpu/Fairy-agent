@@ -36,13 +36,38 @@ type relaySource struct {
 	hint string
 }
 
+// hintText is a system_hint as a text, for an entry with sockets. A text is itself. A bare number or true/false
+// is the text of the value YAML read (123 is "123", true is "true"; a number is the number, so 007 is "7" and
+// 0x10 is "16"): a machine whose name is digits only may be written without quotes. No value (the member is
+// not there, or is null) is "". ok is false for what has no text form: a list, a map, a date.
+func hintText(v any) (text string, ok bool) {
+	switch v := v.(type) {
+	case nil:
+		return "", true
+	case string:
+		return v, true
+	case bool, int, int64, uint64, float64:
+		return fmt.Sprint(v), true
+	}
+	return "", false
+}
+
 // NewRelay validates the agent's power_sources and ups entries (type "agent" makes no sense here).
+//
+// system_hint is no member of a device's own settings: it is taken out of the entry here and kept beside it.
+// On an entry without sockets it is what the panel links the plug by and nothing else, and only a text is a
+// hint: any other form (a number, true, a list) is ignored without a word, as in every version before
+// sockets, so a file from then loads and reports as it did. On an entry with sockets the hint decides whether
+// the sockets are locked (hintKind), so it is never ignored: a number or true/false counts as its text
+// (hintText), and a form without a text is a config problem, named by the entry's id and the key, with
+// nothing of the value.
 func NewRelay(sources, upsCfg []map[string]any) (*Relay, error) {
 	r := &Relay{rows: map[string]map[string]any{}, upsRows: map[string][]map[string]any{}}
 	seen := map[string]bool{}
 	for _, raw := range sources {
 		raw = maps.Clone(raw)
-		hint, _ := raw["system_hint"].(string)
+		written := raw["system_hint"]
+		hint, _ := written.(string)
 		delete(raw, "system_hint")
 		if t, _ := raw["type"].(string); t == "agent" {
 			return nil, fmt.Errorf("power_sources: type agent is for the panel, not the agent")
@@ -55,6 +80,14 @@ func NewRelay(sources, upsCfg []map[string]any) (*Relay, error) {
 			return nil, fmt.Errorf("power source %s: duplicate id", s.Info().ID)
 		}
 		seen[s.Info().ID] = true
+		if sk, ok := s.(power.Socketed); ok && len(sk.Sockets()) > 0 {
+			text, ok := hintText(written)
+			if !ok {
+				return nil, fmt.Errorf("power source %s: system_hint is not a text (it is a list, a set of members or a date): on an entry with sockets it says "+
+					"whether the sockets are locked, so it must be one text. Write system_hint: self for this machine, or one name, in quotes", s.Info().ID)
+			}
+			hint = text
+		}
 		r.sources = append(r.sources, relaySource{src: s, hint: hint})
 	}
 	for _, raw := range upsCfg {

@@ -1268,6 +1268,14 @@ The rules, all of them enforced by the agent on the machine that talks to Home A
   feeds this machine, write `system_hint: self`, or list its switches in `feeds_self`. The socket's line of
   `check-config` shows the result: `never switched (its power source says system_hint: self)`, or
   `never switched (the system_hint of its power source is this machine's name)`.
+
+  On an entry with sockets a hint is never dropped without a word. One that YAML does not read as a text
+  because it is written without quotes, a number or `true`/`false`, counts as its text: `system_hint: 123`
+  on the machine named `123` locks like `system_hint: "123"`. A number is the number YAML reads, so a name
+  such as `007` needs its quotes (without them it is `7`, locks nothing and gets the note above). A hint
+  that is a list, a set of members or a date does not load: `config problem: power source <id>: system_hint
+  is not a text ...`. On an entry without sockets nothing changed: only a text is a hint there, and any
+  other form is ignored as it always was.
 * **Only on and off.** The agent sends `switch.turn_on` or `switch.turn_off` and nothing else: never
   `toggle`, never another kind of entity (no light, lock, cover, script), never a service somebody names.
 * **The address, the token, the two lists and the on/off of all this are in `config.yaml` on this machine

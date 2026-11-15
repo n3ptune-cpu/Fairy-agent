@@ -287,12 +287,13 @@ func hintKind(hint, name string) int {
 	return hintOther
 }
 
-// sourceHints are the system_hint of each power_sources entry as it is written in the file, by the entry's id.
+// sourceHints are the system_hint of each power_sources entry as it is written in the file, by the entry's id:
+// the text NewRelay takes for an entry with sockets (hintText), which is what PlugReport asks it for.
 func (c *Config) sourceHints() map[string]string {
 	out := map[string]string{}
 	for _, raw := range c.PowerSources {
 		id, _ := raw["id"].(string)
-		if hint, _ := raw["system_hint"].(string); id != "" && hint != "" {
+		if hint, _ := hintText(raw["system_hint"]); id != "" && hint != "" {
 			out[id] = hint
 		}
 	}

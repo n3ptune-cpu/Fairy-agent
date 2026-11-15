@@ -247,6 +247,10 @@ func TestCheckConfigSystemHint(t *testing.T) {
 		"another-machine": {"can be switched", true},
 		`"not this one"`:  {"can be switched", true},
 		`"selfish-thing"`: {"can be switched", true},
+		// not a text in the file: a number or true counts as its text, and is not dropped without the note
+		"4242424":   {"can be switched", true},
+		`"4242424"`: {"can be switched", true},
+		"true":      {"can be switched", true},
 	} {
 		p := plugFiles(t, block, strings.Replace(plugSources, "system_hint: self", "system_hint: "+hint, 1), env, api.ApprovalRequired)
 		var out, errb bytes.Buffer
@@ -320,6 +324,11 @@ func TestCheckConfigPlugProblems(t *testing.T) {
 			"home_assistant.url must be the address of Home Assistant itself"},
 		"a ca_file that is not there": {strings.Replace(plugBlock("  ca_file: /nonexistent/ha.pem\n"), "http://", "https://", 1), strings.ReplaceAll(plugSources, "http://", "https://"),
 			"config problem: home_assistant.ca_file: "},
+		"a system_hint that is a list": {plugBlock(), strings.Replace(plugSources, "system_hint: self", "system_hint: ["+secret+", self]", 1),
+			"config problem: power source own-plug: system_hint is not a text (it is a list, a set of members or a date): on an entry with sockets it says whether the sockets are locked, " +
+				"so it must be one text. Write system_hint: self for this machine, or one name, in quotes\n"},
+		"a system_hint that is a set of members": {plugBlock(), strings.Replace(plugSources, "system_hint: self", "system_hint: {machine: "+secret+"}", 1),
+			"config problem: power source own-plug: system_hint is not a text"},
 	} {
 		p := plugFiles(t, c.block, c.sources, env, api.ApprovalRequired)
 		var out, errb bytes.Buffer
