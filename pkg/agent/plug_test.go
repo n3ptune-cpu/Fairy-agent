@@ -197,6 +197,77 @@ func TestPlugSwitch(t *testing.T) {
 	}
 }
 
+// One token for reading and for switching, the normal setup: home_assistant.token_env names the variable the
+// meters' entries read with. The config loads with switching on, the watts and the sockets' states are read,
+// and a switch goes through end to end, every request with that one token. The start log says so in a line
+// that is no warning.
+func TestPlugSwitchWithOneTokenForReadingAndSwitching(t *testing.T) {
+	log := captureLog(t)
+	r := newPlugRig(t, plugRigOpts{oneVar: true})
+	if r.cfg.HomeAssistant.TokenEnv != plugSwitchEnv || !r.cfg.HomeAssistant.Switching {
+		t.Fatalf("%+v", r.cfg.HomeAssistant)
+	}
+	m, raw := r.metrics(t)
+	list, row := socketsOf(t, m, agenttest.PlugBar)
+	if row["ok"] != true || row["watts"] != 95.5 || said(list[0]) != `ch1 "Left monitor" on true - -` || said(list[1]) != `ch2 "ch2" off true - -` {
+		t.Fatalf("/metrics: the meter's row %v, sockets %s; %s", row, said(list[0]), said(list[1]))
+	}
+	if f := m["features"].(map[string]any); f[api.FeaturePlugSwitching] != true {
+		t.Errorf("features: %v", f)
+	}
+	for _, c := range []struct {
+		s        sockRef
+		to, path string
+	}{{sockCh1, "off", "/api/services/switch/turn_off"}, {sockCh2, "on", "/api/services/switch/turn_on"}} {
+		ap := r.approve(t, c.s, c.to)
+		r.ha.Forget()
+		a := r.flip(t, c.s, c.to, ap)
+		if a.status != 200 || a.body["confirmed"] != true || a.body["state"] != c.to {
+			t.Fatalf("%s %s: %s", c.s.socket, c.to, a)
+		}
+		if got := r.asked(); !slices.Equal(got, []string{"GET /api/states/" + c.s.entity, "POST " + c.path, "GET /api/states/" + c.s.entity}) {
+			t.Errorf("%s %s: Home Assistant was asked %v", c.s.socket, c.to, got)
+		}
+		if posts := r.ha.Posts(); len(posts) != 1 || posts[0].Body != `{"entity_id":"`+c.s.entity+`"}` {
+			t.Errorf("%s %s: %+v", c.s.socket, c.to, posts)
+		}
+		if r.ha.State(c.s.entity) != c.to {
+			t.Errorf("%s is %s", c.s.entity, r.ha.State(c.s.entity))
+		}
+		if again := r.flip(t, c.s, c.to, ap); again.status != 403 || again.code() != api.CodeApprovalRefused { // one approval is still one switch
+			t.Errorf("%s %s: the approval used again: %s", c.s.socket, c.to, again)
+		}
+	}
+	r.ha.Forget()
+	r.poll() // the meters and the sockets, each asked once
+	sensors, switches := 0, 0
+	for _, q := range r.ha.Requests() {
+		if !q.TokenOK || q.ReadToken || q.Method != "GET" { // the one token there is, and nothing but reads
+			t.Errorf("Home Assistant was asked %s %s with another token than the one of the config", q.Method, q.Path)
+		}
+		switch {
+		case strings.HasPrefix(q.Path, "/api/states/sensor."):
+			sensors++
+		case strings.HasPrefix(q.Path, "/api/states/switch."):
+			switches++
+		}
+	}
+	if sensors != 3 || switches != 5 {
+		t.Errorf("one round asked %d sensors and %d switches: %v", sensors, switches, r.asked())
+	}
+	out := log.String() + r.log.String()
+	for _, never := range []string{hatest.Token(), "Bearer"} {
+		if strings.Contains(out, never) || strings.Contains(raw, never) {
+			t.Errorf("the log or /metrics holds %q", never)
+		}
+	}
+	// without the token nothing is read and nothing is switched, as with two: no_token
+	t.Setenv(plugSwitchEnv, "")
+	if c := r.challenge(t, sockCh1, "on"); c.status != 409 || c.code() != api.CodeNoSwitchToken {
+		t.Errorf("challenge without the token: %s", c)
+	}
+}
+
 // The request is sent also when the socket shows the wanted state already: Home Assistant's state can be old,
 // and the person approved "make it off".
 func TestPlugSwitchIsSentWhenTheStateIsThatAlready(t *testing.T) {

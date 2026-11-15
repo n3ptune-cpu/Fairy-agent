@@ -24,7 +24,7 @@ import (
 //
 //	home_assistant:
 //	  url: "http://192.0.2.10:8123"   # Home Assistant itself: http(s)://host[:port], nothing after it
-//	  token_env: HA_SWITCH_TOKEN      # NAME of the variable in env_file that holds the token for switching
+//	  token_env: HA_TOKEN             # NAME of the variable in env_file that holds the token for the sockets
 //	  # ca_file: /etc/fairy-agent/ha.pem   # https only
 //	  switching: false                # default: sockets are shown, nothing is ever switched
 //	  switch_allow: []                # exact switch.* entity ids that may be switched
@@ -36,11 +36,11 @@ type HomeAssistantConfig struct {
 	URL string `yaml:"url"`
 	// TokenEnv names the environment variable that holds the long-lived access token the sockets' states are
 	// read with and the sockets are switched with. It is this block's own: the homeassistant entries read their
-	// sensors with the token their own token_env names, and nothing ever falls back from one to the other. The
-	// owner's decision is a second Home Assistant user for switching, whose token can be revoked alone: with
-	// Switching true this must not be the variable of a homeassistant entry (Config.tokenEnvShared; the config
-	// does not load). The token is not only used at a switch: the sockets' states are read with it every 10 s.
-	// While the variable holds nothing, no state is read and nothing is switched.
+	// sensors with the token their own token_env names, and nothing ever falls back from one to the other. It
+	// may name the same variable as the entries do (one token for reading and switching, the normal setup;
+	// Config.PlugReport then says so) or another one (a token that can be revoked alone). The token is not only
+	// used at a switch: the sockets' states are read with it every 10 s. While the variable holds nothing, no
+	// state is read and nothing is switched, whatever the entries' variables hold.
 	TokenEnv string `yaml:"token_env"`
 	// CAFile (https only): the certificate, or its CA, that Home Assistant must show.
 	CAFile string `yaml:"ca_file"`

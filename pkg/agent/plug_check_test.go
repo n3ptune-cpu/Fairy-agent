@@ -23,7 +23,10 @@ func TestStartLogOfTheSockets(t *testing.T) {
 	t.Setenv(switchEnv, secret)
 	said := func(t *testing.T, o agenttest.PlugOptions, state string) string {
 		t.Helper()
-		o.ReadEnv, o.SwitchEnv = readEnv, switchEnv
+		o.ReadEnv = readEnv
+		if o.SwitchEnv == "" {
+			o.SwitchEnv = switchEnv
+		}
 		cfg := mustParse(t, agenttest.PlugConfig("http://192.0.2.10:8123", o))
 		relay, err := cfg.NewRelay()
 		if err != nil {
@@ -66,6 +69,13 @@ func TestStartLogOfTheSockets(t *testing.T) {
 	noToken := said(t, agenttest.PlugOptions{Switching: true}, api.ApprovalRequired)
 	if !strings.Contains(noToken, "token_set=false") || !strings.Contains(noToken, `level=WARN msg="plug sockets: the variable `+switchEnv+` holds no token: no socket's state is read and nothing is switched until it does.`) {
 		t.Errorf("no token:\n%s", noToken)
+	}
+	// one variable for both tokens: said once, in a line that is no warning
+	t.Setenv(readEnv, secret)
+	one := said(t, agenttest.PlugOptions{Switching: true, SwitchEnv: readEnv}, api.ApprovalRequired)
+	if strings.Count(one, "level=WARN") != 1 || strings.Count(one, "the same token") != 1 ||
+		!strings.Contains(one, `level=INFO msg="plug sockets: switching and reading use the same token (`+readEnv+`): Home Assistant gives every token of an account the same rights, so a second token only lets you revoke one without the other."`) {
+		t.Errorf("one variable for both tokens:\n%s", one)
 	}
 	t.Setenv(switchEnv, "made up, with a space")
 	unusable := said(t, agenttest.PlugOptions{Switching: true}, api.ApprovalRequired)

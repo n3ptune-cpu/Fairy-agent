@@ -18,8 +18,12 @@ import (
 type PlugReport struct {
 	// Lines: one for the home_assistant block, one for each socket, one for the sockets that are never switched.
 	Lines []string
-	// Notes: what loads and will not do what its owner may expect (check-config prints each after "note: ").
+	// Notes: what loads and will not do what its owner may expect (check-config prints each after "note: ", the
+	// start log has each as a warning).
 	Notes []string
+	// Remarks: what is worth saying once and is nothing to worry about (check-config prints each after "note: "
+	// as well, after the Notes; the start log has each as an info line, not a warning).
+	Remarks []string
 	// Sockets is how many sockets the config has, Switchable how many of them a switch request is not refused
 	// for by the config, Never the entity ids of feeds_self.
 	Sockets, Switchable int
@@ -106,15 +110,19 @@ func (c *Config) PlugReport(p *plugs.Plugs, approvalState string) PlugReport {
 			rep.Notes = append(rep.Notes, "the passkey check of this machine cannot be used (fairy-agent helper-trust show says why): every switch request is refused until it is repaired.")
 		}
 	}
+	// One variable for both tokens, the normal setup: said once, with the variable's name (as the block writes
+	// it), and as a remark. It is no problem and no warning.
 	for _, raw := range c.PowerSources {
 		if typ, _ := raw["type"].(string); typ != "homeassistant" {
 			continue
 		}
-		// Only a file with switching off gets here like this: with switching on it does not load (tokenEnvShared).
-		if env, _ := raw["token_env"].(string); strings.EqualFold(env, h.TokenEnv) {
-			rep.Notes = append(rep.Notes, "home_assistant.token_env names the variable the power sources read with: one token reads the sensors and the sockets' states. "+
-				"This loads only while switching is false: with switching: true the token for switching needs a variable of its own. "+
-				"Make a second Home Assistant user for it: its token can be revoked alone, and Home Assistant's own logbook shows which switches came from Fairy.")
+		if env, _ := raw["token_env"].(string); env != "" && strings.EqualFold(env, h.TokenEnv) {
+			const why = "Home Assistant gives every token of an account the same rights, so a second token only lets you revoke one without the other."
+			if h.Switching {
+				rep.Remarks = append(rep.Remarks, "switching and reading use the same token ("+h.TokenEnv+"): "+why)
+			} else {
+				rep.Remarks = append(rep.Remarks, "the sockets' states and the sensors are read with the same token ("+h.TokenEnv+"), and switching would use it too: "+why)
+			}
 			break
 		}
 	}
@@ -147,7 +155,7 @@ func ApprovalStateOnDisk(files approval.Files) string {
 }
 
 // logPlugs writes to the log, once at start, what the config says about the sockets: how many there are, how
-// many can be switched, which switches are never switched, and each note as a warning.
+// many can be switched, which switches are never switched, each note as a warning and each remark as a line.
 func logPlugs(cfg *Config, p *plugs.Plugs, approvalState string) {
 	if p == nil {
 		return
@@ -158,5 +166,8 @@ func logPlugs(cfg *Config, p *plugs.Plugs, approvalState string) {
 		"token_env", p.HA().TokenEnv(), "token_set", p.HA().TokenSet())
 	for _, n := range rep.Notes {
 		slog.Warn("plug sockets: " + n)
+	}
+	for _, n := range rep.Remarks {
+		slog.Info("plug sockets: " + n)
 	}
 }

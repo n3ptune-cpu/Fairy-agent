@@ -279,18 +279,20 @@ func TestSwitchTokenIsNotHandedToChildPrograms(t *testing.T) {
 	}
 }
 
-// The token for switching has a variable of its own: with switching: true, a config in which
-// home_assistant.token_env names the variable a homeassistant entry reads with does not load. The problem names
-// the two places and never the variable. With switching off the same file loads (check-config has a note).
-func TestSwitchingNeedsATokenVariableOfItsOwn(t *testing.T) {
-	const words = ": with switching: true the token that switches the sockets needs a variable of its own, so that it can be revoked alone and is not the token the sensors are read with. " +
-		"Give home_assistant.token_env a name that no power source uses, and store the second token under it (fairy-agent secret set <that name>)"
+// One token for reading and for switching is the normal setup: home_assistant.token_env may name the variable
+// the homeassistant entries read with, with switching on and with it off, in any letter case. (The block still
+// names its variable itself; an empty one is never replaced by an entry's: TestMetricsSocketsWhy.)
+func TestOneVariableForBothTokensLoads(t *testing.T) {
 	relay := func(conf string) error {
 		cfg, err := Parse([]byte(conf), filepath.Join(t.TempDir(), "config.yaml"))
 		if err != nil {
 			t.Fatal(err)
 		}
-		_, err = cfg.NewRelay()
+		r, err := cfg.NewRelay()
+		if err != nil {
+			return err
+		}
+		_, err = cfg.NewPlugs(r)
 		return err
 	}
 	on := haBlock(map[string]string{"token_env": "TOO_HA_TOKEN", "switching": "true", "feeds_self": "[]"})
@@ -299,47 +301,32 @@ func TestSwitchingNeedsATokenVariableOfItsOwn(t *testing.T) {
 		return fmt.Sprintf("  - {id: %s, type: homeassistant, url: \"http://192.0.2.10:8123\", token_env: %s, entity: sensor.%s_power%s}\n", id, env, strings.ReplaceAll(id, "-", "_"), more)
 	}
 	const sockets = ", sockets: [{id: main, switch_entity: switch.desk_plug}]"
-	for name, c := range map[string]struct{ sources, who string }{
-		"an entry with sockets":          {meter("desk-plug", "TOO_HA_TOKEN", sockets), "desk-plug"},
-		"an entry without sockets":       {meter("desk-plug", "TOO_HA_TOKEN", ""), "desk-plug"},
-		"in another letter case":         {meter("desk-plug", "too_ha_token", sockets), "desk-plug"},
-		"the second entry of two":        {meter("desk-plug", "TOO_READ_TOKEN", sockets) + meter("lab-plug", "TOO_HA_TOKEN", ""), "lab-plug"},
-		"next to a plug of another type": {`  - {id: shelly-1, type: shelly, url: "http://192.0.2.11", password_env: TOO_SHELLY}` + "\n" + meter("lab-plug", "Too_Ha_Token", ""), "lab-plug"},
-	} {
-		err := relay(on + "power_sources:\n" + c.sources)
-		if want := "home_assistant: token_env names the same variable as token_env of power source " + c.who + words; err == nil || err.Error() != want {
-			t.Errorf("switching on, %s: %v\nwant %s", name, err, want)
-		}
-		if err != nil && strings.Contains(strings.ToUpper(err.Error()), "TOO_") {
-			t.Errorf("%s: the problem names the variable: %v", name, err)
-		}
-		if err := relay(off + "power_sources:\n" + c.sources); err != nil {
-			t.Errorf("switching off, %s: %v", name, err)
-		}
-		if err := relay(strings.Replace(on, "switching: true", "switching: false", 1) + "power_sources:\n" + c.sources); err != nil {
-			t.Errorf("switching: false, %s: %v", name, err)
-		}
-	}
 	for name, sources := range map[string]string{
-		"a variable of its own":                   meter("desk-plug", "TOO_READ_TOKEN", sockets) + meter("lab-plug", "TOO_READ_TOKEN", ""),
+		"an entry with sockets":                   meter("desk-plug", "TOO_HA_TOKEN", sockets),
+		"an entry without sockets":                meter("desk-plug", "TOO_HA_TOKEN", ""),
+		"in another letter case":                  meter("desk-plug", "too_ha_token", sockets),
+		"the second entry of two":                 meter("desk-plug", "TOO_READ_TOKEN", sockets) + meter("lab-plug", "TOO_HA_TOKEN", ""),
+		"next to a plug of another type":          `  - {id: shelly-1, type: shelly, url: "http://192.0.2.11", password_env: TOO_SHELLY}` + "\n" + meter("lab-plug", "Too_Ha_Token", ""),
+		"two variables":                           meter("desk-plug", "TOO_READ_TOKEN", sockets) + meter("lab-plug", "TOO_READ_TOKEN", ""),
 		"a name that only begins the same":        meter("desk-plug", "TOO_HA_TOKEN_2", sockets),
-		"an old entry of a type that is ignored":  `  - {id: desk-plug, type: tuya, device_id: plug1, ip: 192.0.2.60, local_key_env: TOO_HA_TOKEN, version: "3.4"}` + "\n",
-		"no power source at all":                  "",
 		"a plug of another type and its password": `  - {id: shelly-1, type: shelly, url: "http://192.0.2.11", password_env: TOO_SHELLY}` + "\n",
 	} {
-		conf := on
-		if sources != "" {
-			conf += "power_sources:\n" + sources
+		for what, block := range map[string]string{"switching on": on, "switching off": off, "switching: false": strings.Replace(on, "switching: true", "switching: false", 1)} {
+			if err := relay(block + "power_sources:\n" + sources); err != nil {
+				t.Errorf("%s, %s: %v", what, name, err)
+			}
 		}
-		if err := relay(conf); err != nil {
-			t.Errorf("switching on, %s: %v", name, err)
-		}
+	}
+	// what stays refused: the variable of another kind of secret (TestSwitchTokenEnvIsNotAVariableAnotherSettingNames)
+	if err := relay(on + "power_sources:\n" + meter("desk-plug", "TOO_HA_TOKEN", sockets) + `  - {id: shelly-1, type: shelly, url: "http://192.0.2.11", password_env: TOO_HA_TOKEN}` + "\n"); err == nil ||
+		!strings.Contains(err.Error(), "token_env names the same variable as password_env of power source shelly-1") {
+		t.Errorf("the token's variable is also a plug's password: %v", err)
 	}
 }
 
 // What the variable named by home_assistant.token_env holds is sent to Home Assistant: it is never one another
-// kind of secret is kept in. (That it is not the variable the homeassistant entries read with either, once
-// switching is on: TestSwitchingNeedsATokenVariableOfItsOwn.)
+// kind of secret is kept in. It may be the variable the homeassistant entries read with (one token for both,
+// TestOneVariableForBothTokensLoads) or one of its own.
 func TestSwitchTokenEnvIsNotAVariableAnotherSettingNames(t *testing.T) {
 	const words = ": what that variable holds would be sent to Home Assistant as the token. The token needs a variable that nothing else names"
 	block := haBlock(map[string]string{"token_env": "TES_SWITCH"})
@@ -372,7 +359,7 @@ func TestSwitchTokenEnvIsNotAVariableAnotherSettingNames(t *testing.T) {
 		"a variable of its own": block + "power_sources:\n" +
 			`  - {id: desk-plug, type: homeassistant, url: "http://192.0.2.10:8123", token_env: TES_READ, entity: sensor.desk_plug_power}` + "\n" +
 			`  - {id: shelly-1, type: shelly, url: "http://192.0.2.11", password_env: TES_SHELLY}` + "\n",
-		"the variable the meters read with, while switching is off": block + "power_sources:\n" +
+		"the variable the meters read with": block + "power_sources:\n" +
 			`  - {id: desk-plug, type: homeassistant, url: "http://192.0.2.10:8123", token_env: TES_SWITCH, entity: sensor.desk_plug_power}` + "\n",
 		"nothing else in the file": block,
 	} {

@@ -172,21 +172,35 @@ note: switch.no_such_socket is in switch_allow and no socket in this file has th
 		}
 	}
 
-	// one variable for both tokens. While switching is off: a note, with what is to come. With switching on:
-	// a config problem that names the two places and not the variable.
-	p := plugFiles(t, strings.Replace(plugBlock("  feeds_self: []\n"), plugSwitchVar, plugReadVar, 1), plugSources, both, api.ApprovalRequired)
-	var out, errb bytes.Buffer
-	if code := checkConfigCmd(p, &out, &errb); code != 0 || !strings.Contains(out.String(), "note: home_assistant.token_env names the variable the power sources read with: one token reads the sensors and the sockets' states. "+
-		"This loads only while switching is false: with switching: true the token for switching needs a variable of its own.") {
-		t.Errorf("one variable for both, switching off: exit %d\n%s%s", code, out.String(), errb.String())
+	// one variable for both tokens, the normal setup: it loads with switching on and with it off, and there is
+	// one note that says so with the variable's name. A note, not a problem; no token is in it.
+	const oneOn = "note: switching and reading use the same token (" + plugReadVar + "): Home Assistant gives every token of an account the same rights, " +
+		"so a second token only lets you revoke one without the other.\n"
+	const oneOff = "note: the sockets' states and the sensors are read with the same token (" + plugReadVar + "), and switching would use it too: " +
+		"Home Assistant gives every token of an account the same rights, so a second token only lets you revoke one without the other.\n"
+	for name, c := range map[string]struct{ block, note string }{
+		"switching on":  {plugBlock("  switching: true\n", "  switch_allow: [switch.desk_bar_socket_1]\n", "  feeds_self: []\n"), oneOn},
+		"switching off": {plugBlock("  feeds_self: []\n"), oneOff},
+	} {
+		p := plugFiles(t, strings.Replace(c.block, plugSwitchVar, plugReadVar, 1), plugSources, both, api.ApprovalRequired)
+		var out, errb bytes.Buffer
+		code := checkConfigCmd(p, &out, &errb)
+		if code != 0 || errb.Len() != 0 || strings.Count(out.String(), c.note) != 1 || strings.Count(out.String(), "the same token") != 1 ||
+			!strings.Contains(out.String(), "home assistant: host 192.0.2.10:8123 (http), token: present ("+plugReadVar+"), switching: ") {
+			t.Errorf("one variable for both, %s: exit %d\nstdout:\n%s\nstderr: %s", name, code, out.String(), errb.String())
+		}
+		if name == "switching on" && !strings.Contains(out.String(), `socket "desk-bar/ch1" (Left monitor): switch.desk_bar_socket_1, can be switched`+"\n") {
+			t.Errorf("one variable for both, switching on:\n%s", out.String())
+		}
+		if s := out.String() + errb.String(); strings.Contains(s, read) || strings.Contains(s, sw) || strings.Contains(s, "problem") {
+			t.Errorf("one variable for both, %s: check-config shows a token, or calls it a problem:\n%s", name, s)
+		}
 	}
-	p = plugFiles(t, strings.Replace(plugBlock("  switching: true\n", "  feeds_self: []\n"), plugSwitchVar, plugReadVar, 1), plugSources, both, api.ApprovalRequired)
-	out.Reset()
-	errb.Reset()
-	if code := checkConfigCmd(p, &out, &errb); code != 1 || out.Len() != 0 || !strings.HasPrefix(errb.String(), "config problem: ") ||
-		!strings.Contains(errb.String(), "home_assistant: token_env names the same variable as token_env of power source desk-bar: with switching: true the token that switches the sockets needs a variable of its own") ||
-		strings.Contains(errb.String(), plugReadVar) || strings.Contains(errb.String(), read) {
-		t.Errorf("one variable for both, switching on: exit %d\nstdout: %s\nstderr: %s", code, out.String(), errb.String())
+	// two variables: no such note
+	p := plugFiles(t, plugBlock("  switching: true\n", "  feeds_self: []\n"), plugSources, both, api.ApprovalRequired)
+	var out, errb bytes.Buffer
+	if code := checkConfigCmd(p, &out, &errb); code != 0 || strings.Contains(out.String(), "the same token") {
+		t.Errorf("two variables: exit %d\n%s%s", code, out.String(), errb.String())
 	}
 
 	// https: no note about the network
@@ -359,28 +373,24 @@ func TestConfigSetSwitching(t *testing.T) {
 	if err != nil || !cfg.HomeAssistant.Switching || len(cfg.HomeAssistant.SwitchAllow) != 2 || len(cfg.HomeAssistant.FeedsSelf) != 1 {
 		t.Fatalf("%+v %v", cfg, err)
 	}
-	// with switching on, the block's variable cannot be made the one the entries read with; and in a file where
-	// it is that one, switching cannot be turned on
-	before, _ = os.ReadFile(p)
+	// one variable for both tokens can be set with switching on, and switching can be turned on in a file that
+	// has one variable for both
 	out.Reset()
 	errb.Reset()
-	if code := configCmd([]string{"set", "home_assistant.token_env", plugReadVar, "--config", p}, &out, &errb); code != 1 ||
-		!strings.Contains(errb.String(), "not changed, the agent could not start with it") || !strings.Contains(errb.String(), "the token that switches the sockets needs a variable of its own") {
+	if code := configCmd([]string{"set", "home_assistant.token_env", plugReadVar, "--config", p}, &out, &errb); code != 0 {
 		t.Fatalf("the read token's variable for switching: exit %d\n%s%s", code, out.String(), errb.String())
 	}
-	if now, _ := os.ReadFile(p); !bytes.Equal(now, before) {
-		t.Fatal("the file was changed")
+	if cfg, err := agent.Load(p); err != nil || cfg.HomeAssistant.TokenEnv != plugReadVar || !cfg.HomeAssistant.Switching {
+		t.Fatalf("%+v %v", cfg, err)
 	}
 	shared := plugFiles(t, strings.Replace(plugBlock("  feeds_self: []\n"), plugSwitchVar, plugReadVar, 1), plugSources, env, api.ApprovalRequired)
-	before, _ = os.ReadFile(shared)
 	out.Reset()
 	errb.Reset()
-	if code := configCmd([]string{"set", "home_assistant.switching", "true", "--config", shared}, &out, &errb); code != 1 ||
-		!strings.Contains(errb.String(), "not changed, the agent could not start with it") || !strings.Contains(errb.String(), "token_env names the same variable as token_env of power source desk-bar") {
+	if code := configCmd([]string{"set", "home_assistant.switching", "true", "--config", shared}, &out, &errb); code != 0 {
 		t.Fatalf("switching on with one variable for both: exit %d\n%s%s", code, out.String(), errb.String())
 	}
-	if now, _ := os.ReadFile(shared); !bytes.Equal(now, before) {
-		t.Fatal("the file was changed")
+	if cfg, err := agent.Load(shared); err != nil || !cfg.HomeAssistant.Switching || cfg.HomeAssistant.TokenEnv != plugReadVar {
+		t.Fatalf("%+v %v", cfg, err)
 	}
 	out.Reset()
 	if code := configCmd([]string{"show", "--config", p}, &out, &errb); code != 0 || !strings.Contains(out.String(), "home_assistant.switching: true\n") ||

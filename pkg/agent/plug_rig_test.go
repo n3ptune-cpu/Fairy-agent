@@ -73,6 +73,7 @@ type plugRigOpts struct {
 	noGate  bool   // the agent was built without a gate
 	quick   bool   // short timeouts for a Home Assistant that does not answer
 	rate    int    // control_rate_per_min (0: 60)
+	oneVar  bool   // one variable, and so one token, for the meters and for the block (plugSwitchEnv)
 	helper  agent.HelperControl
 	gateOpt func(*approval.Options)
 }
@@ -91,6 +92,10 @@ func newPlugRig(t *testing.T, o plugRigOpts) *plugRig {
 		o.rate = 60
 	}
 	o.ReadEnv, o.SwitchEnv, o.Switching = plugReadEnv, plugSwitchEnv, !o.off
+	if o.oneVar {
+		o.ReadEnv = plugSwitchEnv
+		t.Setenv(plugReadEnv, "") // nothing can be read with a second token: there is none
+	}
 	cfg, err := agent.Parse([]byte("control_rate_per_min: "+strconv.Itoa(o.rate)+"\npower_control: {enabled: true}\n"+agenttest.PlugConfig(r.ha.URL, o.PlugOptions)),
 		filepath.Join(t.TempDir(), "config.yaml"))
 	if err != nil {

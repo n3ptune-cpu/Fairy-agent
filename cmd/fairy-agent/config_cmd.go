@@ -73,6 +73,7 @@ var plugTrustState = func(cfg *agent.Config) string { return agent.ApprovalState
 //	never switched (feeds_self): switch.server_corner_socket
 //	note: switching goes over http: the token and every request cross that network unencrypted, ...
 //	note: this machine has no passkey check: every switch request is refused (approval_off) until the check is turned on.
+//	note: switching and reading use the same token (HA_TOKEN): Home Assistant gives every token of an account the same rights, ...
 //
 // They say, every time, which sockets can be switched and which never are. Nothing without the block.
 // "present" means the variable holds a value the agent would send as the token; the token is not shown or
@@ -93,7 +94,7 @@ func plugReport(cfg *agent.Config) (lines, notes []string) {
 		state = ""
 	}
 	rep := cfg.PlugReport(p, state)
-	for _, n := range rep.Notes {
+	for _, n := range append(rep.Notes, rep.Remarks...) {
 		notes = append(notes, "note: "+n)
 	}
 	return rep.Lines, notes

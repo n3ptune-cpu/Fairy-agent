@@ -1068,8 +1068,11 @@ M7 is the proof of that.
 
 ### A. Shown, nothing switched
 
-* M1 **[KEY]** **The block and the sockets load, with switching off.** Make a second Home Assistant user and
-  a long-lived access token for it, then `& $fa secret set HA_SWITCH_TOKEN` (asks for the token, no echo).
+* M1 **[KEY]** **The block and the sockets load, with switching off.** These steps use a variable of its
+  own for the block's token, so that M10 can empty it alone: make a second long-lived access token in Home
+  Assistant, then `& $fa secret set HA_SWITCH_TOKEN` (asks for the token, no echo). (The normal setup is one
+  token: `token_env:` of the block names the variable the entry already uses. `check-config` then adds
+  `note: switching and reading use the same token (...)`, and everything below is the same.)
   Add to `config.yaml`, at the top level, `home_assistant:` with `url:` (the same address the entry has),
   `token_env: HA_SWITCH_TOKEN`, `switching: false`, `switch_allow: []`, `feeds_self: []`; and to the
   `type: homeassistant` entry `sockets:` with one line `- {id: ch1, name: "Lamp", switch_entity: switch.desk_bar_socket_1}`
