@@ -68,15 +68,18 @@ func NewRelay(sources, upsCfg []map[string]any) (*Relay, error) {
 }
 
 // NewRelay builds the relay of this config's power_sources and ups entries (the function NewRelay) and makes
-// the one check that needs the whole config: the variable a homeassistant entry names in token_env is not the
-// one another setting keeps its secret in (tokenEnvShared). The running agent and check-config build their
-// relay with it.
+// the checks that need the whole config: the variable a homeassistant entry names in token_env is not the
+// one another setting keeps its secret in (tokenEnvShared), and an entry with sockets fits the home_assistant
+// block (socketChecks). The running agent and check-config build their relay with it.
 func (c *Config) NewRelay() (*Relay, error) {
 	r, err := NewRelay(c.PowerSources, c.UPS)
 	if err != nil {
 		return nil, err
 	}
 	if err := c.tokenEnvShared(); err != nil { // after NewRelay: every id it names has been checked
+		return nil, err
+	}
+	if err := c.socketChecks(r); err != nil {
 		return nil, err
 	}
 	return r, nil
@@ -156,6 +159,36 @@ func (r *Relay) Checks() []power.Check {
 		if c, ok := s.src.(power.Checker); ok {
 			out = append(out, c.Check())
 		}
+	}
+	return out
+}
+
+// SocketSource is a relayed power source whose entry lists sockets: its id and name, its system_hint, the
+// Home Assistant it reads from and the sockets, in the entry's order.
+type SocketSource struct {
+	ID, Name, Hint string
+	Scheme, Host   string // of the entry's url: http or https, host[:port]
+	Sockets        []power.Socket
+}
+
+// SocketSources are the power sources that have sockets, in config order. Nothing is asked of any device.
+func (r *Relay) SocketSources() []SocketSource {
+	var out []SocketSource
+	if r == nil {
+		return out
+	}
+	for _, s := range r.sources {
+		sk, ok := s.src.(power.Socketed)
+		if !ok || len(sk.Sockets()) == 0 {
+			continue
+		}
+		b := s.src.Info()
+		ss := SocketSource{ID: b.ID, Name: b.DisplayName(), Hint: s.hint, Sockets: sk.Sockets()}
+		if c, ok := s.src.(power.Checker); ok {
+			ch := c.Check()
+			ss.Scheme, ss.Host = ch.Scheme, ch.Host
+		}
+		out = append(out, ss)
 	}
 	return out
 }

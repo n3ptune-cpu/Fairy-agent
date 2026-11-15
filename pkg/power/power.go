@@ -72,6 +72,17 @@ type Check struct {
 // Checker is a Source that has a Check (today: homeassistant).
 type Checker interface{ Check() Check }
 
+// Socket is one outlet of a plug that can be told apart: its id inside the plug's entry, the name shown for
+// it, and the entity id of its switch in Home Assistant.
+type Socket struct {
+	ID, Name, SwitchEntity string
+}
+
+// Socketed is a Source whose entry lists sockets (today: homeassistant with `sockets:`). The source itself
+// reads the plug's watts and nothing else; it hands its sockets on for whoever shows and switches them (the
+// agent, pkg/plugs). Sockets is nil for an entry without any.
+type Socketed interface{ Sockets() []Socket }
+
 // Partial is a Source whose reading can come without some of the values it was set up to read (today:
 // homeassistant with voltage_entity, current_entity or energy_entity). ReadPartial is Read, and says for each
 // such value why it is not in the reading: missing has the value's name in a Reading's JSON ("voltage",

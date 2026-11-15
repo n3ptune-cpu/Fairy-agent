@@ -1,10 +1,13 @@
 package agent
 
 import (
+	"fmt"
 	"strconv"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/n3ptune-cpu/Fairy-agent/pkg/agent/api"
 	"github.com/n3ptune-cpu/Fairy-agent/pkg/power"
 )
 
@@ -48,6 +51,9 @@ type HomeAssistantConfig struct {
 	// MinGapS is the least time between two switches of one socket (DefaultSwitchGapS; 5 to 3600).
 	MinGapS int `yaml:"min_gap_s"`
 }
+
+// maxSocketSourceID is the longest id of an entry with sockets.
+const maxSocketSourceID = api.MaxSocketSource
 
 const (
 	// DefaultSwitchGapS is home_assistant.min_gap_s when the file does not set it.
@@ -139,4 +145,40 @@ func (c *Config) validateHomeAssistant(add func(string)) {
 	if !(h.MinGapS >= 5 && h.MinGapS <= 3600) {
 		add("home_assistant.min_gap_s must be 5-3600")
 	}
+}
+
+// socketChecks are the checks of the entries with sockets that need the whole file (Config.NewRelay makes
+// them, so the running agent and check-config do). Each is a config problem: the agent does not start.
+//
+//   - An entry with sockets needs the home_assistant block with its address and its token's variable, and the
+//     entry's own url must be the same scheme, host and port as home_assistant.url. The states of the sockets
+//     are read from the block's address with the block's token, and a switch request goes there: a socket is
+//     never asked of an address the block does not name.
+//   - Its id has at most api.MaxSocketSource (40) characters, where an id may otherwise have 63: the id is
+//     part of an approval's text, which must fit into 128 bytes.
+//   - One switch belongs to at most one socket of the whole file. Two sockets with one switch would be two
+//     names, two tags and two entries of switch_allow's meaning for one thing that is switched.
+//
+// The errors name entries by their ids and sockets by their place, never an entity id or an address.
+func (c *Config) socketChecks(r *Relay) error {
+	bScheme, bHost, bOK := power.HAAddress(c.HomeAssistant.URL)
+	owner := map[string]string{} // switch entity -> the id of the entry that has it
+	for _, src := range r.SocketSources() {
+		if !c.haSet || !bOK || src.Scheme != bScheme || !strings.EqualFold(src.Host, bHost) {
+			return fmt.Errorf("power source %s: sockets need the home_assistant block, and the entry's url must be the same address as home_assistant.url", src.ID)
+		}
+		if c.HomeAssistant.TokenEnv == "" {
+			return fmt.Errorf("power source %s: sockets need home_assistant.token_env: the states of the sockets are read with that token, not with the entry's", src.ID)
+		}
+		if len(src.ID) > maxSocketSourceID {
+			return fmt.Errorf("power source %s: an entry with sockets needs an id of at most %d characters (the id is part of the text a passkey approval is given for)", src.ID, maxSocketSourceID)
+		}
+		for i, sock := range src.Sockets {
+			if other, taken := owner[sock.SwitchEntity]; taken {
+				return fmt.Errorf("power source %s: sockets, item %d: its switch_entity is already the switch of a socket of power source %s; one switch is one socket", src.ID, i+1, other)
+			}
+			owner[sock.SwitchEntity] = src.ID
+		}
+	}
+	return nil
 }

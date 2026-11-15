@@ -13,6 +13,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"gopkg.in/yaml.v3"
 
@@ -35,7 +37,27 @@ type HomeAssistantConfig struct {
 	VoltageEntity string `yaml:"voltage_entity"` // sensor.desk_plug_voltage: volts
 	CurrentEntity string `yaml:"current_entity"` // sensor.desk_plug_current: amperes
 	EnergyEntity  string `yaml:"energy_entity"`  // sensor.desk_plug_energy: the energy total, kWh
+
+	// Sockets are the plug's outlets that Home Assistant has a switch for: none (a meter only), one (an
+	// ordinary plug) or several (a powerbar), at most MaxHASockets. This type only decodes and checks them
+	// and hands them on (Sockets): it never asks Home Assistant about a socket and has no code that could.
+	// Their states are read, and a socket is switched, by pkg/plugs, on an agent whose own config allows it.
+	Sockets []HASocketConfig `yaml:"sockets"`
 }
+
+// HASocketConfig is one entry of `sockets:`.
+type HASocketConfig struct {
+	ID           string `yaml:"id"`            // ch1: 1-16 lower-case letters, digits and dashes, unique in the entry
+	Name         string `yaml:"name"`          // "Left monitor": what is plugged in; left out: the id
+	SwitchEntity string `yaml:"switch_entity"` // switch.desk_bar_socket_1: the entity id of the socket's switch
+}
+
+// Limits of `sockets:`.
+const (
+	MaxHASockets    = 8  // sockets of one entry
+	MaxHASocketID   = 16 // characters of a socket's id (api.MaxSocketID: the id is part of an approval's text)
+	MaxHASocketName = 48 // bytes of a socket's name
+)
 
 // haExtra is one of the values a homeassistant entry can read besides the watts, each from a sensor of its
 // own: the member of the entry that names the sensor, the member of the reading (and of the agent's row) the
@@ -93,6 +115,7 @@ type homeAssistant struct {
 	addr   string          // the address asked for the watts: scheme://host[:port]/api/states/<entity>
 	extras []haExtra       // the optional values this entry has, in the order of haExtras
 	host   string          // host[:port], for the config check's line
+	socks  []Socket        // the entry's sockets, checked; never asked about by this type
 	maxAge time.Duration   // 0: off
 	tr     *http.Transport // https: one transport of its own (the ca_file, connections reused); nil for http
 }
@@ -120,6 +143,9 @@ var haSystemEnv = []string{"PATH", "HOME", "TEMP", "TMP", "SystemRoot", "USERPRO
 const maxHAAgeS = 7 * 24 * 3600
 
 func (s *homeAssistant) Info() Base { return s.c.Base }
+
+// Sockets are the entry's sockets as they were checked when the config was read (a copy).
+func (s *homeAssistant) Sockets() []Socket { return slices.Clone(s.socks) }
 
 // Home Assistant itself hears from most plugs every 10 to 60 s: asking it more often shows nothing new.
 func (s *homeAssistant) DefaultInterval() float64 { return 10 }
@@ -311,6 +337,8 @@ func haDecode(id string, raw map[string]any, c *HomeAssistantConfig) error {
 		}
 		b, err := yaml.Marshal(one)
 		switch {
+		case k == "sockets":
+			wrong = append(wrong, "sockets: must be a list of sockets, each with id, switch_entity and, if wanted, name, and no other member")
 		case !haMemberName.MatchString(k):
 			wrong = append(wrong, "a member with a name that no member of a homeassistant entry has")
 		case err == nil && yaml.Unmarshal(b, &HomeAssistantConfig{}) == nil: // decodes when unknown members are let through
@@ -341,6 +369,53 @@ func haAddress(raw, entity string) (addr, host string, ok bool) {
 		}
 	}
 	return (&url.URL{Scheme: u.Scheme, Host: u.Host, Path: "/api/states/" + entity}).String(), u.Host, true
+}
+
+// haSocketID is what a socket's id must be.
+var haSocketID = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,15}$`)
+
+// haSockets checks the `sockets:` of an entry and returns them with their names filled in (a socket without a
+// name has its id for one). Its errors name the entry, the member and the socket's place in the list, never
+// what was written there, as every error of this type.
+//
+//   - at most MaxHASockets;
+//   - id: 1 to MaxHASocketID lower-case letters, digits and dashes, the first a letter or a digit; no id twice;
+//   - name: at most MaxHASocketName bytes of text without control characters or line separators;
+//   - switch_entity: the entity id of a switch (HASwitchEntity); no switch twice in the entry. (That no other
+//     entry names it either is checked by whoever reads the whole file: the agent.)
+func haSockets(id string, in []HASocketConfig) ([]Socket, error) {
+	if len(in) > MaxHASockets {
+		return nil, fmt.Errorf("power source %s: sockets: more than %d sockets", id, MaxHASockets)
+	}
+	var out []Socket
+	ids, switches := map[string]bool{}, map[string]bool{}
+	for i, sc := range in {
+		where := fmt.Sprintf("power source %s: sockets, item %d", id, i+1)
+		if !haSocketID.MatchString(sc.ID) {
+			return nil, fmt.Errorf("%s: id must be 1-%d lower-case letters, digits and dashes (the first a letter or a digit)", where, MaxHASocketID)
+		}
+		if ids[sc.ID] {
+			return nil, fmt.Errorf("power source %s: sockets: two sockets have the same id", id)
+		}
+		ids[sc.ID] = true
+		name := sc.Name
+		if name == "" {
+			name = sc.ID
+		}
+		if len(name) > MaxHASocketName || !utf8.ValidString(name) ||
+			strings.ContainsFunc(name, func(r rune) bool { return unicode.IsControl(r) || r == '\u2028' || r == '\u2029' }) {
+			return nil, fmt.Errorf("%s: name must be at most %d bytes of text without control characters", where, MaxHASocketName)
+		}
+		if !HASwitchEntity(sc.SwitchEntity) {
+			return nil, fmt.Errorf("%s: switch_entity must be the entity id of a switch in Home Assistant, like switch.desk_plug_socket_1 (only switch.* is ever switched)", where)
+		}
+		if switches[sc.SwitchEntity] {
+			return nil, fmt.Errorf("power source %s: sockets: two sockets name the same switch_entity", id)
+		}
+		switches[sc.SwitchEntity] = true
+		out = append(out, Socket{ID: sc.ID, Name: name, SwitchEntity: sc.SwitchEntity})
+	}
+	return out, nil
 }
 
 // HATokenEnvProblem says what is wrong with name as a token_env, the name of the environment variable that
@@ -443,7 +518,11 @@ func buildHomeAssistant(raw map[string]any) (Source, error) {
 	if !(c.MaxAgeS == 0 || c.MaxAgeS >= 1 && c.MaxAgeS <= maxHAAgeS) { // "not inside": .nan fails too
 		return nil, fmt.Errorf("power source %s: max_age_s must be 0 (not checked) or 1 to %d s", c.ID, maxHAAgeS)
 	}
-	s := &homeAssistant{c: c, addr: addr, host: host, extras: extras, maxAge: time.Duration(c.MaxAgeS * float64(time.Second))}
+	socks, err := haSockets(c.ID, c.Sockets)
+	if err != nil {
+		return nil, err
+	}
+	s := &homeAssistant{c: c, addr: addr, host: host, extras: extras, socks: socks, maxAge: time.Duration(c.MaxAgeS * float64(time.Second))}
 	https := strings.HasPrefix(addr, "https://")
 	if c.CAFile != "" && !https {
 		return nil, fmt.Errorf("power source %s: ca_file is only for an https url", c.ID)
