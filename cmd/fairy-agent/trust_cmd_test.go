@@ -6,10 +6,12 @@ import (
 	"crypto/rsa"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -125,8 +127,8 @@ func TestHelperTrustSetShowClear(t *testing.T) {
 		t.Fatalf("trust: %+v", tr)
 	}
 	raw, _ := os.ReadFile(r.files.Path)
-	if strings.Contains(string(raw), "x5c") || strings.Contains(string(raw), `"use"`) {
-		t.Errorf("the trust file holds more of the JWKS than the key:\n%s", raw)
+	if more := moreThanTheKey(t, raw); more != nil {
+		t.Errorf("the trust file holds more of the JWKS than the key (%s):\n%s", strings.Join(more, ", "), raw)
 	}
 	// the gate believes this file: a token of the issuer's key 0 for client fairy-pc-actions, user-a
 	// (checked in pkg/approval); here: the status a running helper or agent would show
@@ -234,6 +236,77 @@ func TestHelperTrustSetShowClear(t *testing.T) {
 	}
 	if code, out, _ := r.run("", "clear"); code != 0 || !strings.Contains(out, "there is no trust file") {
 		t.Fatalf("second clear: %d\n%s", code, out)
+	}
+}
+
+// moreThanTheKey names what the keys of a trust file hold besides the pinned form (kty, kid, alg, n, e:
+// keysFromJWKS), as "keys[0].x5c", sorted; nil when every key in the file is that and nothing else.
+//
+// It reads the file as JSON and compares the names of the members. The file's text is not searched for a name:
+// a key's modulus is a few hundred random characters of base64url, and a short name is spelled in them now and
+// then (TestHelperTrustSetKeyTextThatSpellsAMemberName).
+func moreThanTheKey(t *testing.T, raw []byte) []string {
+	t.Helper()
+	var file struct {
+		Keys []map[string]json.RawMessage `json:"keys"`
+	}
+	if err := json.Unmarshal(raw, &file); err != nil || len(file.Keys) == 0 {
+		t.Fatalf("the trust file is not JSON with keys in it (%v):\n%s", err, raw)
+	}
+	var more []string
+	for i, k := range file.Keys {
+		for name := range k {
+			if !slices.Contains([]string{"kty", "kid", "alg", "n", "e"}, name) {
+				more = append(more, fmt.Sprintf("keys[%d].%s", i, name))
+			}
+		}
+	}
+	slices.Sort(more)
+	return more
+}
+
+// TestHelperTrustSetKeyTextThatSpellsAMemberName: a trust file whose random text has the letters of a JWKS
+// member's name in it is written like every other, and the check that nothing but the key was taken from the
+// JWKS says so.
+//
+// The check used to look for the letters x5c anywhere in the trust file. The file holds two random texts: the
+// key's modulus, 342 characters of base64url, made anew each time the test program starts, and the machine id,
+// 22 such characters, made up by every first set. About one modulus in 770 has "x5c" in it somewhere (340
+// places for three characters out of 64), and one machine id in 13000. TestHelperTrustSetShowClear then failed
+// on a trust file that was right: seen on 2026-11-16 in one run of the whole repository, then in 10 of 6000
+// starts of the test program (each time the file's one key had its five members and no other, and its modulus
+// spelled x5c), and once with the machine id Z2_wHJD8MiQx5csy-BiJ2g. Here both texts are sure to spell it, and
+// the issuer publishes a real x5c and "use" beside the key.
+func TestHelperTrustSetKeyTextThatSpellsAMemberName(t *testing.T) {
+	r := newTrustRig(t)
+	k := approval.KeyFromRSA("key-1", &approvaltest.Key(0).PublicKey)
+	// Three characters in the middle of the modulus are replaced: it keeps its length and stays odd, which is all
+	// the command can know of a modulus. Nobody holds a key for it, and nothing here is signed.
+	n := k.N[:100] + "x5c" + k.N[103:]
+	r.jwks = map[string]any{"keys": []any{
+		map[string]any{"kty": "RSA", "kid": k.Kid, "use": "sig", "alg": "RS256", "n": n, "e": k.E, "x5c": []string{"ignored"}}}}
+	oldID := trustNewID
+	trustNewID = func() (string, error) { return "Z2_wHJD8MiQx5csy-BiJ2g", nil }
+	t.Cleanup(func() { trustNewID = oldID })
+	if code, out, errs := r.run("", "set", "--yes", "--issuer", r.issuer.URL, "--client-id", "fairy-pc-actions", "--user", "user-a"); code != 0 {
+		t.Fatalf("set: %d\n%s\n%s", code, out, errs)
+	}
+	tr := r.trust()
+	if tr == nil || tr.MachineID != "Z2_wHJD8MiQx5csy-BiJ2g" || len(tr.Keys) != 1 ||
+		tr.Keys[0] != (api.TrustKey{Kty: "RSA", Kid: "key-1", Alg: "RS256", N: n, E: "AQAB"}) {
+		t.Fatalf("trust: %+v", tr)
+	}
+	raw, _ := os.ReadFile(r.files.Path)
+	if !strings.Contains(string(raw), `"n": "`+n[:100]+`x5c`) || !strings.Contains(string(raw), `"machine_id": "Z2_wHJD8MiQx5csy-BiJ2g"`) {
+		t.Fatalf("the modulus and the machine id of this test do not both spell x5c in the trust file:\n%s", raw)
+	}
+	if more := moreThanTheKey(t, raw); more != nil {
+		t.Errorf("the trust file holds more of the JWKS than the key (%s):\n%s", strings.Join(more, ", "), raw)
+	}
+	// and the check is one: the same file with the two members the issuer published beside the key
+	leaked := bytes.Replace(raw, []byte(`"kty": "RSA",`), []byte(`"kty": "RSA", "use": "sig", "x5c": ["ignored"],`), 1)
+	if got := moreThanTheKey(t, leaked); bytes.Equal(leaked, raw) || !slices.Equal(got, []string{"keys[0].use", "keys[0].x5c"}) {
+		t.Errorf("a trust file whose key has the members use and x5c: the check names %q", got)
 	}
 }
 
