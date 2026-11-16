@@ -471,20 +471,27 @@ func TestHelperTrustSetSaysWhatIsInEffect(t *testing.T) {
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			r := newTrustRig(t)
-			old := trustHelper
+			old, oldID := trustHelper, trustNewID
 			trustHelper = func() (string, []byte, error) { return c.state, c.data, c.err }
-			t.Cleanup(func() { trustHelper = old })
+			// The machine id that set makes up is 22 random characters, shown above what is checked here; this one
+			// spells the word two of the cases must not find.
+			trustNewID = func() (string, error) { return "the-id-says-NOT-in-it-0", nil }
+			t.Cleanup(func() { trustHelper, trustNewID = old, oldID })
 			code, out, errs := r.run("", "set", "--yes", "--issuer", r.issuer.URL, "--client-id", "c", "--user", "u")
-			if code != 0 || !strings.Contains(out, "written. From now on only this command changes it") {
+			// what the command says about the effect stands between these two lines; above them it shows the
+			// trust: the machine id, the key's thumbprint and the trust hash, random characters every time
+			_, after, written := strings.Cut(out, "written. From now on only this command changes it (the panel cannot).\n")
+			effect, _, proven := strings.Cut(after, "NOT PROVEN")
+			if code != 0 || !written || !proven || !strings.Contains(out, "machine id:      the-id-says-NOT-in-it-0 ") {
 				t.Fatalf("set: %d\n%s\n%s", code, out, errs)
 			}
 			for _, w := range c.want {
-				if !strings.Contains(out, w) {
+				if !strings.Contains(effect, w) {
 					t.Errorf("output lacks %q:\n%s", w, out)
 				}
 			}
 			for _, n := range c.never {
-				if strings.Contains(strings.SplitN(out, "NOT PROVEN", 2)[0], n) {
+				if strings.Contains(effect, n) {
 					t.Errorf("output says %q:\n%s", n, out)
 				}
 			}
