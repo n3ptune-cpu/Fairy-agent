@@ -1,4 +1,4 @@
-# Testing 0.5.x, 0.6.0, the passkey approval and 0.9.0 on Windows (agent + helper, self-migration, security fixes, runs)
+# Testing 0.5.x, 0.6.0, the passkey approval, 0.9.0 and 0.10.0 on Windows (agent + helper, self-migration, security fixes, runs, a plug's sockets)
 
 0.5.0 moves the Windows agent to its own low-rights account and adds the **fairy-agent-helper** service (see
 AGENT.md, "Two services"). None of this has run on real Windows yet. Try it on **one** PC first, ideally one
@@ -1071,8 +1071,10 @@ M7 is the proof of that.
 * M1 **[KEY]** **The block and the sockets load, with switching off.** These steps use a variable of its
   own for the block's token, so that M10 can empty it alone: make a second long-lived access token in Home
   Assistant, then `& $fa secret set HA_SWITCH_TOKEN` (asks for the token, no echo). (The normal setup is one
-  token: `token_env:` of the block names the variable the entry already uses. `check-config` then adds
-  `note: switching and reading use the same token (...)`, and everything below is the same.)
+  token: `token_env:` of the block names the variable the entry already uses. `check-config` then adds one
+  note: while switching is off (M1 to M4)
+  `note: the sockets' states and the sensors are read with the same token (...), and switching would use it too: ...`,
+  from M5 on `note: switching and reading use the same token (...)`; and everything below is the same.)
   Add to `config.yaml`, at the top level, `home_assistant:` with `url:` (the same address the entry has),
   `token_env: HA_SWITCH_TOKEN`, `switching: false`, `switch_allow: []`, `feeds_self: []`; and to the
   `type: homeassistant` entry `sockets:` with one line `- {id: ch1, name: "Lamp", switch_entity: switch.desk_bar_socket_1}`

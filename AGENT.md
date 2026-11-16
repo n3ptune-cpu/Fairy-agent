@@ -1011,8 +1011,9 @@ Home Assistant on the same network knows it: the agent asks that Home Assistant 
 It reads the watts, and the plug's volts, amperes and energy total when the entry names the sensors for them
 ([below](#volts-amperes-and-the-energy-total-voltage_entity-current_entity-energy_entity)), and nothing else.
 This type switches nothing and writes nothing to Home Assistant. (From 0.10.0 an agent can also switch a
-plug's sockets when its own `config.yaml` turns that on; that is another part of the agent with a token of
-its own: [Switching a plug's sockets](#switching-a-plugs-sockets-home_assistant-0100).)
+plug's sockets when its own `config.yaml` turns that on; that is another part of the agent, which names the
+variable of its token itself (normally the one the entries name, so one token reads and switches):
+[Switching a plug's sockets](#switching-a-plugs-sockets-home_assistant-0100).)
 `type: homeassistant` belongs in an agent's `power_sources:`; do not put it into the panel's own
 `power_sources:` (the long wait after a refused token exists only in the agent).
 
