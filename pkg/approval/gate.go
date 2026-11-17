@@ -548,7 +548,7 @@ func (g *Gate) Precheck(req api.ApprovalRequest, sent bool) *Refusal {
 // right now (the fan window, or the one shutdown after boot, which is recorded here). An approval that is
 // sent is always checked in full. A nil Gate lets everything run.
 //
-// Not so for a request that is never carried out without an approval (isStrict, today socket_set): with trust
+// Not so for a request that is never carried out without an approval (isStrict: socket_set and uninstall): with trust
 // off, and with a nil Gate, it is refused (409 approval_off); no window and no setting lets it through; and the
 // approval it carries must have a list of exactly one entry (strict.go says why).
 //

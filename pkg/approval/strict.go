@@ -9,7 +9,9 @@ import (
 // Every request the gate knew before runs unchecked on a machine without a trust file: Challenge answers
 // "needed: false, reason: off" and Admit lets it through. That is right for fans, power and updates, which
 // worked before approvals existed. It is wrong for a request that only ever existed together with the passkey
-// check: switching a plug socket (api.ApproveSocketSet). For such a verb:
+// check: switching a plug socket (api.ApproveSocketSet) and uninstalling the agent (api.ApproveUninstall: it
+// cannot be undone from the panel, and a program that took the control token must not be able to do it). For
+// such a verb:
 //
 //   - no trust file: refused, 409 approval_off, from Challenge, Precheck, Look, Admit, RunCovers and AdmitRun,
 //     and from each of them on a nil Gate too (a part that was built without a gate lets nothing of this kind
@@ -19,7 +21,7 @@ import (
 //     tied to their own verbs (isFan, isShutdown), and a run covers an update and a shutdown and nothing else
 //     (runCover);
 //   - there is no ticket for it: an approval answers a challenge of this machine, which lives ChallengeTTL.
-func isStrict(verb string) bool { return verb == api.ApproveSocketSet }
+func isStrict(verb string) bool { return verb == api.ApproveSocketSet || verb == api.ApproveUninstall }
 
 // strictOff is the answer to a strict request on a machine without a trust file.
 func strictOff() *Refusal {

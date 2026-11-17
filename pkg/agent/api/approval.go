@@ -279,6 +279,12 @@ const (
 	// It is the one request that is refused on a machine WITHOUT a trust file (409 approval_off), where every
 	// verb above runs unchecked; and its approval's list must hold exactly one entry (pkg/approval).
 	ApproveSocketSet = "socket_set"
+	// ApproveUninstall is POST /uninstall: this agent's services are removed from the machine (the panel's
+	// "Uninstall agent"). It takes no member: the approval names this machine already, and there is nothing
+	// else to choose. Like socket_set it is never carried out without an approval (409 approval_off on a
+	// machine without a trust file), its approval's list must hold exactly this one entry, and no window, run
+	// or ticket stands in for it (pkg/approval, strict.go).
+	ApproveUninstall = "uninstall"
 )
 
 // Limits of the socket_set request. With them its canonical text is at most 116 bytes (MaxApprovalRequest is
@@ -419,6 +425,7 @@ type ApprovalRequest struct {
 //	run_arm run=<16 hex> valid_s=<120-600> wait_s=<120-3600> notice_s=<30-600>
 //	run_go run=<16 hex> to=<version | -> shutdown_delay_s=<10-600> within_s=<300-1800>
 //	socket_set source=<power source id, 1-40> socket=<socket id, 1-16> to=<on|off> tag=<22 characters: SocketTag>
+//	uninstall
 //
 // ASCII, single spaces, numbers in decimal without sign or leading zeros, the fields in exactly this order.
 // Every value is a small number, one word of a fixed list, 43 or 22 characters of the base64url alphabet, 16
@@ -536,9 +543,14 @@ func (r ApprovalRequest) Canonical() (string, error) {
 			return "", err
 		}
 		return "socket_set source=" + *r.Source + " socket=" + *r.Socket + " to=" + *r.To + " tag=" + *r.Tag, nil
+	case ApproveUninstall:
+		if err := only(); err != nil {
+			return "", err
+		}
+		return "uninstall", nil
 	}
-	// the sentence of v0.8.0, byte for byte (the two verbs of a run and socket_set are known verbs and never get
-	// here)
+	// the sentence of v0.8.0, byte for byte (the two verbs of a run, socket_set and uninstall are known verbs
+	// and never get here)
 	return "", errors.New("verb must be fan_set, fan_mode, power, apply_update or trust_set")
 }
 
