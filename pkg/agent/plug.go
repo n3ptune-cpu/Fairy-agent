@@ -114,7 +114,9 @@ func (a *Agent) withSockets(ctx context.Context, rows []map[string]any) []map[st
 // approvals (hasApproval), and on every agent that switches plug sockets. The second is for a machine without
 // any passkey check: it must answer a socket's challenge request with 409 approval_off itself, where the route
 // used to be 404 for everybody (approvalChallenge keeps that answer for every other request).
-func (a *Agent) challengeOpen() bool { return a.hasApproval() || a.d.Plugs.Switching() }
+func (a *Agent) challengeOpen() bool {
+	return a.hasApproval() || a.d.Plugs.Switching() || a.uninstallOn() // the last two: to answer approval_off
+}
 
 // plugRefusal is the answer of POST /plug/switch for a refusal of the agent's own (the gate has its own).
 // Every text is a fixed sentence of this file: nothing Home Assistant sent is ever repeated.

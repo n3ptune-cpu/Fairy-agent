@@ -88,6 +88,9 @@ wol:
 self_update:
   enabled: false         # let the panel's Update button install the latest signed release
 
+uninstall:
+  enabled: false         # the panel's "Uninstall agent" (needs a passkey approval trust; see AGENT.md)
+
 ups: []                  # UPSes this agent reads and passes on, e.g. [{id: local-ups, type: nut, host: 127.0.0.1}]
 `
 

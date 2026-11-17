@@ -363,6 +363,15 @@ func Run(ctx context.Context, cfg *Config, b Build) error {
 			_ = clearDir(o.StageDir) // a stage left from the last update is not needed any more
 		}
 	}
+	if cfg.Uninstall.Enabled {
+		// the panel's "Uninstall agent" (uninstall.go): only with a passkey approval, never on a machine without
+		// an approval trust
+		if u := SystemUninstaller(); u != nil {
+			d.Uninstaller = u
+		} else {
+			slog.Warn("uninstall is enabled in config.yaml, but this system cannot be uninstalled from the panel yet")
+		}
+	}
 	if !relay.Empty() {
 		go relay.Run(ctx)
 	}
@@ -404,7 +413,7 @@ func Run(ctx context.Context, cfg *Config, b Build) error {
 	var on []string
 	for name, ok := range map[string]bool{"processes": cfg.ProcessesEnabled(), "fan_control": d.Fan != nil,
 		"power_control": d.Power != nil, "wol_relay": d.WOL != nil, "ipmi": d.BMC != nil, "gpu": d.GPU != nil,
-		"self_update": d.Updater != nil, "helper": viaHelper,
+		"self_update": d.Updater != nil, "uninstall": d.Uninstaller != nil, "helper": viaHelper,
 		"coretemp": cfg.Sensors.CoreTemp} {
 		if ok {
 			on = append(on, name)

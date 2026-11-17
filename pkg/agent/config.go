@@ -70,6 +70,7 @@ type Config struct {
 	WOL          WOLConfig          `yaml:"wol"`
 	SelfUpdate   SelfUpdateConfig   `yaml:"self_update"`
 	BMCRelay     BMCRelayConfig     `yaml:"bmc_relay"`
+	Uninstall    UninstallConfig    `yaml:"uninstall"`
 
 	// ControlRatePerMin limits POST requests for the whole agent, a minute: control requests (fan, power,
 	// Wake-on-LAN, BMC relay, self-update, helper stop / start, the first-time set of the approval trust) all
@@ -159,6 +160,15 @@ type WOLConfig struct {
 	AllowedMACs []string `yaml:"allowed_macs"` // empty = any MAC
 }
 
+// UninstallConfig lets the panel's "Uninstall agent" button remove this agent's services from the machine
+// (POST /uninstall with the control token and a passkey approval; never without one, and never on a machine
+// without an approval trust). Off unless config.yaml says so; no request can switch it on. Linux: a fixed root
+// unit (fairy-agent-uninstall.service, which install.sh puts in place only while this is on) runs the removal
+// script with --keep-data. Config, tokens and logs stay on the machine.
+type UninstallConfig struct {
+	Enabled bool `yaml:"enabled"`
+}
+
 // SelfUpdateConfig lets the panel's Update button make this agent install the latest signed Fairy-agent
 // release from GitHub (POST /update with the control token). Nothing is ever installed on its own.
 type SelfUpdateConfig struct {
@@ -215,7 +225,7 @@ func (c *Config) IPMISensors() bool { return c.IPMI.Enabled && boolOr(c.IPMI.Sen
 // ControlEnabled reports whether any POST feature is on (then a control token is required).
 func (c *Config) ControlEnabled() bool {
 	return c.FanControl.Enabled || c.PowerControl.Enabled || c.WOL.Enabled || c.SelfUpdate.Enabled || c.BMCRelay.Enabled ||
-		c.HomeAssistant.Switching
+		c.Uninstall.Enabled || c.HomeAssistant.Switching
 }
 
 var (

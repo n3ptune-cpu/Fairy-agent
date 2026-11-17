@@ -28,7 +28,8 @@
 # against SHA256SUMS and the signature with fairy-agent's built-in release key, then installs exactly what
 # AGENT.md describes: user fairy-agent, /usr/local/bin/fairy-agent, /etc/fairy-agent (config.yaml and tokens
 # 0640 root:fairy-agent), fairy-agent.service (+ fairy-agent-update.service when needed, one polkit rule per
-# feature that is on: shutdown / reboot, self-update; the RAPL tmpfiles rule when the machine has RAPL), a
+# feature that is on: shutdown / reboot, self-update, uninstall from the panel (with its root unit
+# fairy-agent-uninstall.service); the RAPL tmpfiles rule when the machine has RAPL), a
 # firewall rule for the panel when ufw / firewalld is on, and the release's removal script as
 # /usr/local/lib/fairy-agent/uninstall-fairy-agent.sh (root's, run only by root).
 # `fairy-agent join` then writes the tokens and the chosen settings (no editor, nothing to copy) and stores the
@@ -138,8 +139,9 @@ trap 'rm -rf "$TMP"' EXIT INT TERM
 say "downloading the release from $BASE"
 POLKIT_POWER=fairy-agent-power.polkit.rules
 POLKIT_UPDATE=fairy-agent-update.polkit.rules
+POLKIT_UNINSTALL=fairy-agent-uninstall.polkit.rules
 UNINSTALLER=uninstall-fairy-agent.sh
-FILES="$ASSET SHA256SUMS SHA256SUMS.sig VERSION fairy-agent.service fairy-agent-update.service $POLKIT_POWER $POLKIT_UPDATE fairy-agent.tmpfiles.conf $UNINSTALLER"
+FILES="$ASSET SHA256SUMS SHA256SUMS.sig VERSION fairy-agent.service fairy-agent-update.service $POLKIT_POWER $POLKIT_UPDATE fairy-agent.tmpfiles.conf $UNINSTALLER fairy-agent-uninstall.service $POLKIT_UNINSTALL"
 for f in $FILES; do
   curl -fsSL --proto '=https,file' --proto-redir '=https' --retry 3 -o "$TMP/$f" "$BASE/$f" || die "download of $f failed"
 done
@@ -292,18 +294,22 @@ feature_on() { # feature_on KEY FALLBACK: is KEY true in config.yaml (FALLBACK w
 }
 want_power=0
 want_update=0
+want_uninstall=0
 if feature_on power_control.enabled "$POWER"; then want_power=1; fi
 if feature_on self_update.enabled "$UPDATE"; then want_update=1; fi
-if [ "$want_power" -eq 1 ] || [ "$want_update" -eq 1 ]; then
+# never switched on by this script (no option for it): only by `fairy-agent config set uninstall.enabled true`
+# on the machine, then this script again (or AGENT.md's by-hand steps)
+if feature_on uninstall.enabled 0; then want_uninstall=1; fi
+if [ "$want_power" -eq 1 ] || [ "$want_update" -eq 1 ] || [ "$want_uninstall" -eq 1 ]; then
   if [ ! -d "$RULES" ]; then
     if command -v apt-get >/dev/null 2>&1; then
-      say "installing polkitd (needed for shutdown / reboot and self-update)"
+      say "installing polkitd (needed for shutdown / reboot, self-update and uninstall from the panel)"
       DEBIAN_FRONTEND=noninteractive apt-get install -y -q polkitd >/dev/null || apt-get install -y -q policykit-1 >/dev/null
     elif command -v dnf >/dev/null 2>&1; then
       dnf install -y -q polkit >/dev/null
     fi
   fi
-  [ -d "$RULES" ] || die "polkit is not installed (needed for shutdown / reboot and self-update)"
+  [ -d "$RULES" ] || die "polkit is not installed (needed for shutdown / reboot, self-update and uninstall from the panel)"
 fi
 polkit_rule() { # polkit_rule WANTED SRC DEST WHAT
   if [ "$1" -eq 1 ]; then
@@ -319,10 +325,19 @@ polkit_rule() { # polkit_rule WANTED SRC DEST WHAT
 if [ -d "$RULES" ]; then
   polkit_rule "$want_power" "$TMP/$POLKIT_POWER" "$RULES/49-fairy-agent-power.rules" "power off, reboot and suspend this machine"
   polkit_rule "$want_update" "$TMP/$POLKIT_UPDATE" "$RULES/49-fairy-agent-update.rules" "start the self-update installer"
+  polkit_rule "$want_uninstall" "$TMP/$POLKIT_UNINSTALL" "$RULES/49-fairy-agent-uninstall.rules" "start the removal of this agent (after a passkey approval)"
   if [ -e "$RULES/49-fairy-agent.rules" ]; then
     rm -f "$RULES/49-fairy-agent.rules"
     say "polkit: removed the old combined rule $RULES/49-fairy-agent.rules (now one file per feature)"
   fi
+fi
+
+# the root unit of the panel's "Uninstall agent": there only while the feature is on, like its polkit rule
+if [ "$want_uninstall" -eq 1 ]; then
+  put "$TMP/fairy-agent-uninstall.service" "$UNITS/fairy-agent-uninstall.service" 0644
+elif [ -e "$UNITS/fairy-agent-uninstall.service" ]; then
+  rm -f "$UNITS/fairy-agent-uninstall.service"
+  say "removed $UNITS/fairy-agent-uninstall.service (uninstall from the panel is off)"
 fi
 
 systemctl daemon-reload

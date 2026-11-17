@@ -1,0 +1,15 @@
+// /etc/polkit-1/rules.d/49-fairy-agent-uninstall.rules
+//
+// Installed only while uninstall.enabled is switched on in /etc/fairy-agent/config.yaml (install.sh removes it
+// when the feature is off). It lets the fairy-agent user (and nobody else) do exactly one thing: start the root
+// unit fairy-agent-uninstall.service (`systemctl start`), nothing else: no other unit, no stop/restart/enable.
+// The agent starts it only after a passkey approval it has checked itself (AGENT.md, "Uninstall from the
+// panel"). A program that already runs as the fairy-agent user can start it without one: that is the limit of
+// this rule, as for the power and update rules.
+
+polkit.addRule(function (action, subject) {
+    if (subject.user === "fairy-agent" && action.id === "org.freedesktop.systemd1.manage-units" &&
+        action.lookup("unit") === "fairy-agent-uninstall.service" && action.lookup("verb") === "start") {
+        return polkit.Result.YES;
+    }
+});

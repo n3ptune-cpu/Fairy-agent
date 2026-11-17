@@ -59,7 +59,7 @@ func (a *Agent) helperApproval() (HelperApproval, bool) {
 
 // approvalVerbs are the requests that need an approval while trust is set. The last one, the switch of a plug
 // socket, is also refused while it is not (plug.go); this agent process always carries it out itself.
-var approvalVerbs = []string{api.ApproveFanSet, api.ApproveFanMode, api.ApprovePower, api.ApproveApplyUpdate, api.ApproveSocketSet}
+var approvalVerbs = []string{api.ApproveFanSet, api.ApproveFanMode, api.ApprovePower, api.ApproveApplyUpdate, api.ApproveSocketSet, api.ApproveUninstall}
 
 // helperRuns reports whether the Windows helper carries out the request verb, and so is the one that checks
 // its approval: fans through the helper (ipmi.transport: wmi), power through the helper, and the update of an
@@ -75,6 +75,8 @@ func (a *Agent) helperRuns(verb string) bool {
 		return a.d.Updater != nil && a.d.Updater.throughHelper()
 	case api.ApproveRunArm, api.ApproveRunGo: // a run is kept by whoever carries out its shutdown
 		return a.d.Power != nil && a.d.Power.throughHelper()
+	case api.ApproveUninstall:
+		return a.d.Uninstaller != nil && a.d.Uninstaller.ThroughHelper()
 	}
 	return false
 }
@@ -368,6 +370,8 @@ func (a *Agent) featureOff(verb string) string {
 		return "self_update_disabled"
 	case verb == api.ApproveSocketSet && !a.d.Plugs.Switching():
 		return api.CodePlugSwitchingDisabled
+	case verb == api.ApproveUninstall && !a.uninstallOn():
+		return api.CodeUninstallDisabled
 	}
 	return "" // also trust_set: no part to switch off
 }
@@ -385,7 +389,8 @@ func (a *Agent) approvalChallenge(w http.ResponseWriter, r *http.Request) {
 	// The route is open on every agent that switches plug sockets, also on one where nothing checks approvals
 	// (challengeOpen): such a machine must answer a socket's challenge request itself, with a refusal. Every
 	// other request gets there what it always got on such a machine.
-	if !a.hasApproval() && (err != nil || req.Verb != api.ApproveSocketSet) {
+	// The same for an uninstall, the other request that is never run without an approval.
+	if !a.hasApproval() && (err != nil || (req.Verb != api.ApproveSocketSet && req.Verb != api.ApproveUninstall)) {
 		approvalDisabled(w)
 		return
 	}
@@ -407,6 +412,10 @@ func (a *Agent) approvalChallenge(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.Verb == api.ApproveSocketSet { // never the helper's, and never "needs none" (plug.go)
 		a.socketChallenge(w, r, req)
+		return
+	}
+	if req.Verb == api.ApproveUninstall && !a.helperRuns(req.Verb) { // never "needs none" (uninstall.go)
+		a.uninstallChallenge(w, r, req)
 		return
 	}
 	h, viaHelper := a.helperApproval()

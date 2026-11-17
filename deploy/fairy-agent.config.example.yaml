@@ -86,8 +86,16 @@ self_update:
   enabled: false
   # repo: n3ptune-cpu/Fairy-agent   # only for a fork; its releases must be signed with the same key
 
+# The panel's "Uninstall agent" (POST /uninstall). Off = the agent never removes itself. On: only with a fresh
+# passkey approval for exactly this machine and this request, and never on a machine without an approval trust
+# (409 approval_off). The services go away; config, tokens and logs stay. Linux also needs
+# deploy/fairy-agent-uninstall.service and deploy/fairy-agent-uninstall.polkit.rules (install.sh puts them in
+# place while this is on, and removes them when it is off).
+uninstall:
+  enabled: false
+
 # Requests a minute, for everybody together, in each of three budgets that cannot use each other up:
-# control requests (fan, power, Wake-on-LAN, BMC relay, update, helper stop / start, the first-time set of the
+# control requests (fan, power, Wake-on-LAN, BMC relay, update, uninstall, helper stop / start, the first-time set of the
 # approval trust, a plug's socket) all together; approval challenges (POST /approval/challenge: an approved action costs one
 # control request and one challenge); and POST /power cancel. One more is answered 429.
 control_rate_per_min: 12

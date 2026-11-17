@@ -201,6 +201,9 @@ wol:
 
 self_update:
   enabled: false         # let the panel's Update button install the latest signed release (see AGENT.md)
+
+uninstall:
+  enabled: false         # the panel's "Uninstall agent" (needs a passkey approval trust; see AGENT.md)
 `
 
 func starterConfig() string { return strings.ReplaceAll(windowsStarter, "\n", "\r\n") }

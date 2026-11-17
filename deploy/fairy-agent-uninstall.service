@@ -1,0 +1,34 @@
+# /etc/systemd/system/fairy-agent-uninstall.service  (Linux; only for uninstall.enabled, see AGENT.md)
+#
+# The panel's "Uninstall agent". The agent starts this unit (`systemctl start --no-block`, allowed by its own
+# polkit rule, 49-fairy-agent-uninstall.rules) only after it has checked a fresh passkey approval for exactly
+# this machine and this request; on a machine without an approval trust the request is refused before that.
+# Never enabled, never on a timer, no [Install] section. As root it runs the removal script of the release
+# install.sh put in place, with --keep-data: the services, units, polkit rules, firewall rule and program go;
+# /etc/fairy-agent, /var/lib/fairy-agent* and the fairy-agent user stay (delete them by hand when sure).
+# The script removes this unit's own file too; a running oneshot is not disturbed by that.
+#   journalctl -u fairy-agent-uninstall
+[Unit]
+Description=Fairy agent removal (the panel's "Uninstall agent", approved with a passkey)
+Documentation=file:///usr/local/share/doc/fairy-agent/AGENT.md
+
+[Service]
+Type=oneshot
+# a moment for the agent's answer to reach the panel before the agent is stopped
+ExecStartPre=/bin/sleep 3
+ExecStart=/bin/sh /usr/local/lib/fairy-agent/uninstall-fairy-agent.sh --yes --keep-data
+TimeoutStartSec=300
+# It stops and deletes units, polkit rules, firewall rules and /usr/local files, so the file system stays
+# writable; the rest is closed.
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+SystemCallArchitectures=native

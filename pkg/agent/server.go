@@ -142,6 +142,9 @@ type Deps struct {
 	// Migration is the Windows move from LocalSystem to NT SERVICE\fairy-agent (/metrics "migration"); nil on
 	// Linux.
 	Migration interface{ Status() api.MigrationStatus }
+	// Uninstaller is what POST /uninstall sets going (uninstall.go); nil: the route is closed (404). Run sets it
+	// only while config.yaml says uninstall.enabled and the system has one.
+	Uninstaller Uninstaller
 	// Approval is this agent's own passkey check (pkg/approval) of the requests it carries out itself: all of
 	// them where there is no helper (every system but Windows); on Windows the ones that do not go through the
 	// helper, with a gate that only reads the helper's trust file. Run always sets it. nil (tests of other
@@ -184,6 +187,9 @@ type Agent struct {
 	now          func() time.Time
 	sampling     chan struct{} // holds one token while LocalTemps takes its own sample
 	tempWait     time.Duration // how long LocalTemps waits for that sample
+
+	// uninstallOnce: POST /uninstall started the removal (uninstall.go); there is never a second one.
+	uninstallOnce atomic.Bool
 }
 
 // New builds the agent. tokens come from Config.LoadTokens.
@@ -389,6 +395,7 @@ func (a *Agent) Handler() http.Handler {
 		"/wol":              {method: http.MethodPost, control: true, budget: budgetControl, feature: func() bool { return a.d.WOL != nil }, code: "wol_disabled", h: a.wol},
 		"/update":           {method: http.MethodPost, control: true, budget: budgetControl, maxBody: approvalBody, feature: func() bool { return a.d.Updater != nil }, code: "self_update_disabled", h: a.update},
 		"/bmc/power":        {method: http.MethodPost, control: true, budget: budgetControl, feature: func() bool { return a.d.BMCRelay != nil }, code: "bmc_relay_disabled", h: a.bmcPower},
+		api.PathUninstall:   {method: http.MethodPost, control: true, budget: budgetControl, maxBody: approvalBody, feature: a.uninstallOn, code: api.CodeUninstallDisabled, h: a.uninstall},
 		api.PathHelperStop:  {method: http.MethodPost, control: true, budget: budgetControl, feature: a.hasHelper, h: a.helperStop},
 		api.PathHelperStart: {method: http.MethodPost, control: true, budget: budgetControl, feature: a.hasHelper, h: a.helperStart},
 		// the passkey approval of the routes above (approval.go)
@@ -757,7 +764,8 @@ func (a *Agent) helperControl(w http.ResponseWriter, r *http.Request, start bool
 func (a *Agent) Features() map[string]bool {
 	return map[string]bool{"processes": a.cfg.ProcessesEnabled(), "cmdline": a.cfg.ProcessesEnabled() && a.cfg.CmdlineEnabled(),
 		"fan_control": a.d.Fan != nil, "power_control": a.d.Power != nil, "wol_relay": a.d.WOL != nil,
-		"self_update": a.d.Updater != nil, "bmc_relay": a.d.BMCRelay != nil, api.FeaturePlugSwitching: a.d.Plugs.Switching()}
+		"self_update": a.d.Updater != nil, "bmc_relay": a.d.BMCRelay != nil, api.FeaturePlugSwitching: a.d.Plugs.Switching(),
+		"uninstall": a.uninstallOn()}
 }
 
 // PairInfo is the /pair answer without the tokens.
