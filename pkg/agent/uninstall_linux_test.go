@@ -44,7 +44,8 @@ func TestUnitUninstallerStartsTheOneUnit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(unit), "[Install]") {
+	// a section header at the start of a line; the file's comments may name it ("no [Install] section")
+	if regexp.MustCompile(`(?m)^\s*\[Install\]`).Match(unit) {
 		t.Fatal("the unit has an [Install] section: it must never start by itself")
 	}
 	if !strings.Contains(string(unit), "ExecStart=/bin/sh /usr/local/lib/fairy-agent/uninstall-fairy-agent.sh --yes --keep-data\n") {
