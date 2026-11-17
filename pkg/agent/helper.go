@@ -46,9 +46,10 @@ type HelperService interface {
 }
 
 // NeedsHelper reports whether config.yaml switches on something that needs the Windows helper: Core Temp,
-// IPMI through Windows' driver (and with it fan control), or power control.
+// IPMI through Windows' driver (and with it fan control), power control, or uninstall from the panel (the
+// helper checks its approval and has the updater carry it out).
 func NeedsHelper(c *Config) bool {
-	return c.Sensors.CoreTemp || (c.IPMI.Enabled && c.IPMI.Transport == "wmi") || c.PowerControl.Enabled
+	return c.Sensors.CoreTemp || (c.IPMI.Enabled && c.IPMI.Transport == "wmi") || c.PowerControl.Enabled || c.Uninstall.Enabled
 }
 
 // HelperClient talks to fairy-agent-helper.
@@ -876,6 +877,9 @@ func (c *HelperClient) approvalCall(ctx context.Context, req proto.Request) (int
 		if req.Verb == proto.VerbRunArm || req.Verb == proto.VerbRunGo {
 			return helperUnanswered("the run request", "it may have been taken all the same: look at the \"run\" of the machine's approval state")
 		}
+		if req.Verb == proto.VerbUninstall {
+			return helperUnanswered("the uninstall request", "it may have been started all the same: if it was, this machine goes offline within a minute")
+		}
 		return helperUnanswered("the question about an approval", "nothing was done; ask again")
 	}
 	if err != nil {
@@ -900,6 +904,33 @@ func (c *HelperClient) approvalCall(ctx context.Context, req proto.Request) (int
 		body["reason"] = r.Reason
 	}
 	return r.Status, body
+}
+
+// Uninstall is POST /uninstall through the helper: it checks the approval itself and, once it holds, has the
+// updater service remove the services. The agent does not look inside the approval.
+func (c *HelperClient) Uninstall(ctx context.Context, by string, ap *api.Approval) (int, any) {
+	req := proto.Request{Verb: proto.VerbUninstall, Approval: ap}
+	if by = helperBy(by); by != "" {
+		req.By = &by
+	}
+	st, body := c.approvalCall(ctx, req)
+	c.invalidate()
+	return st, body
+}
+
+// helperBy is s in the letters a helper request's "by" may hold (letters, digits, " ._@-", up to 64): every
+// other character becomes ".", so an IPv6 address or a name with other letters still says who asked.
+func helperBy(s string) string {
+	b := []byte(s)
+	for i, c := range b {
+		if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == ' ' || c == '.' || c == '_' || c == '@' || c == '-') {
+			b[i] = '.'
+		}
+	}
+	if len(b) > 64 {
+		b = b[:64]
+	}
+	return string(b)
 }
 
 // Challenge is POST /approval/challenge through the helper.

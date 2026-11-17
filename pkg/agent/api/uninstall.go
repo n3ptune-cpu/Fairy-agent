@@ -11,6 +11,8 @@ package api
 //	202 {"state": "uninstalling"}  the removal is under way; the agent goes offline within seconds and does not
 //	                               answer again. Config, tokens and logs stay on the machine.
 //	409 {"code": "uninstall_in_progress"}  one was already started by this process
+//	409 {"code": "helper_required"}        Windows: the helper is not installed
+//	409 {"code": "updater_busy"}           Windows: the updater service is installing an update
 //	502 {"error": ...}             the removal could not be started (the approval was used up)
 const PathUninstall = "/uninstall"
 
@@ -28,4 +30,8 @@ const UninstallStarted = "uninstalling"
 const (
 	CodeUninstallDisabled = "uninstall_disabled"    // off in config.yaml, or nothing on this system can do it
 	CodeUninstallBusy     = "uninstall_in_progress" // this process already started one
+	// Windows: the helper checks the approval and carries the uninstall out, so without it there is none.
+	CodeHelperRequired = "helper_required"
+	// Windows: the updater service, which removes the services, is busy with an update.
+	CodeUpdaterBusy = "updater_busy"
 )

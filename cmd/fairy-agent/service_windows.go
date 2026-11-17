@@ -641,6 +641,21 @@ func revokeServiceSID(h windows.Handle, sid *windows.SID) error {
 }
 
 func uninstall() error {
+	if err := removeServices(func(msg string) { fmt.Println("warning:", msg) }); err != nil {
+		return err
+	}
+	fmt.Println(`removed the "fairy-agent" services. Their folder (config, tokens, logs) is kept: delete`,
+		filepath.Dir(agent.DefaultConfigPath()), "yourself if you no longer need it.")
+	return nil
+}
+
+// removeServices is what `fairy-agent uninstall` and the panel's "Uninstall agent" (in the updater service)
+// both do: stop the agent, take its account out of "Performance Monitor Users" while that account still
+// exists, delete the agent's service, stop the helper (the fans go back to the BMC first) and delete it with
+// its event-log source and firewall rules, and delete the updater service. A running service that is deleted
+// is gone once it stops: the updater, when it is the one running this, at the end of its own run. warn gets
+// what could not be done and does not stop the rest.
+func removeServices(warn func(string)) error {
 	m, err := mgr.Connect()
 	if err != nil {
 		return fmt.Errorf("cannot reach the service manager (run PowerShell as Administrator): %w", err)
@@ -654,7 +669,7 @@ func uninstall() error {
 	stopAndWait(s, 20*time.Second)
 	// while the service exists (its account exists only with it)
 	if err := agent.RemoveCounterAccess(); err != nil {
-		fmt.Println("warning:", err)
+		warn(err.Error())
 	}
 	if err := s.Delete(); err != nil {
 		return err
@@ -662,12 +677,10 @@ func uninstall() error {
 	deleteHelper(m)
 	if u, err := m.OpenService(agent.UpdaterServiceName); err == nil {
 		if err := u.Delete(); err != nil {
-			fmt.Println("warning: could not remove the", agent.UpdaterServiceName, "service:", err)
+			warn("could not remove the " + agent.UpdaterServiceName + " service: " + err.Error())
 		}
 		u.Close()
 	}
 	_ = eventlog.Remove(serviceName)
-	fmt.Println(`removed the "fairy-agent" services. Their folder (config, tokens, logs) is kept: delete`,
-		filepath.Dir(agent.DefaultConfigPath()), "yourself if you no longer need it.")
 	return nil
 }

@@ -82,6 +82,11 @@ const (
 	VerbFanAuto      = "fan_auto"
 	VerbPower        = "power"
 	VerbApplyUpdate  = "apply_update"
+	// VerbUninstall is the panel's "Uninstall agent": with an approval the helper has verified itself (never
+	// without one, and never while the helper has no trust file), it leaves a one-time request in its own
+	// folder, which only administrators and SYSTEM can write, and starts the updater service, which removes
+	// the services (cmd/fairy-agent, apply-update). It takes nothing but the approval and who asked.
+	VerbUninstall = api.ApproveUninstall
 	// Version3 only.
 	VerbChallenge = "challenge"  // a challenge for one exact fan_set, fan_mode, power or apply_update request, or for trust_init
 	VerbTrustInit = "trust_init" // the first trust, accepted only while the helper has none and with an approval that proves it
@@ -143,7 +148,7 @@ type Request struct {
 // Control reports whether the verb changes something (the helper's control rate limit and audit log).
 func Control(verb string) bool {
 	switch verb {
-	case VerbFanSet, VerbFanMode, VerbFanAuto, VerbPower, VerbApplyUpdate, VerbChallenge, VerbTrustInit, VerbRunArm, VerbRunGo:
+	case VerbFanSet, VerbFanMode, VerbFanAuto, VerbPower, VerbApplyUpdate, VerbUninstall, VerbChallenge, VerbTrustInit, VerbRunArm, VerbRunGo:
 		return true
 	}
 	return false
@@ -157,6 +162,7 @@ var verbFields = map[string][]string{
 	VerbFanAuto:     {"by"},
 	VerbPower:       {"action", "delay_s", "by", "approval", "run"},
 	VerbApplyUpdate: {"by", "approval", "run"},
+	VerbUninstall:   {"by", "approval"},
 	VerbChallenge:   {"for", "zone", "percent", "mode", "action", "delay_s", "trust_hash", "by", "run", "to", "shutdown_delay_s", "within_s"},
 	VerbTrustInit:   {"trust", "by"},
 	VerbRunArm:      {"approval", "by"},
@@ -193,6 +199,8 @@ func ApprovalRequestOf(r Request) (api.ApprovalRequest, bool) {
 		}
 	case VerbApplyUpdate:
 		return api.ApprovalRequest{Verb: api.ApproveApplyUpdate}, true
+	case VerbUninstall:
+		return api.ApprovalRequest{Verb: api.ApproveUninstall}, true
 	}
 	return api.ApprovalRequest{}, false
 }
@@ -349,7 +357,7 @@ func (r *Request) Validate() error {
 		}
 		inner := Request{V: Version, Verb: *r.For, Zone: r.Zone, Percent: r.Percent, Mode: r.Mode, Action: r.Action, DelayS: r.DelayS}
 		if _, ok := ApprovalRequestOf(inner); !ok || inner.Verb == VerbChallenge {
-			return bad("a challenge is for fan_set, fan_mode, power (not cancel), apply_update, trust_set or run_go")
+			return bad("a challenge is for fan_set, fan_mode, power (not cancel), apply_update, uninstall, trust_set or run_go")
 		}
 		if err := inner.Validate(); err != nil {
 			return err

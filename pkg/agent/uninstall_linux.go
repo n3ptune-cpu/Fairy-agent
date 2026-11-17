@@ -4,6 +4,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"fmt"
 )
 
@@ -18,7 +19,7 @@ type unitUninstaller struct {
 }
 
 // SystemUninstaller is what POST /uninstall starts on this system.
-func SystemUninstaller() Uninstaller { return unitUninstaller{run: runSystemctl} }
+func SystemUninstaller(*HelperClient) Uninstaller { return unitUninstaller{run: runSystemctl} }
 
 // Start asks systemd to start the root unit and does not wait (--no-block): the unit stops this agent.
 func (u unitUninstaller) Start(ctx context.Context) error {
@@ -30,3 +31,8 @@ func (u unitUninstaller) Start(ctx context.Context) error {
 }
 
 func (unitUninstaller) ThroughHelper() bool { return false }
+
+// StartUninstallViaUpdater is the Windows helper's; there is no helper here.
+func StartUninstallViaUpdater(context.Context, *Config, string) error {
+	return errors.New("uninstall through the updater service is Windows only")
+}

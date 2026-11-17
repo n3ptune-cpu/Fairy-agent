@@ -318,6 +318,12 @@ func applyUpdateCtx(ctx context.Context, cfgPath string) int {
 	}
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Minute)
 	defer cancel()
+	// Windows: the panel's "Uninstall agent", approved with a passkey that the helper verified itself, which then
+	// left a one-time request in its own folder (administrators and SYSTEM only) and started this service. It
+	// comes first: the machine is going away. Nothing the agent's account can write is looked at for it.
+	if handled, code := uninstallFromPanel(ctx, cfg); handled {
+		return code
+	}
 	// Windows: the agent moved its service to NT SERVICE\fairy-agent and started this service to restart and
 	// check it; that is all this run does (the state file is administrators-only)
 	if handled, code := superviseMigration(ctx, cfg, cfgPath); handled {

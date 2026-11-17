@@ -366,7 +366,7 @@ func Run(ctx context.Context, cfg *Config, b Build) error {
 	if cfg.Uninstall.Enabled {
 		// the panel's "Uninstall agent" (uninstall.go): only with a passkey approval, never on a machine without
 		// an approval trust
-		if u := SystemUninstaller(); u != nil {
+		if u := SystemUninstaller(helper); u != nil {
 			d.Uninstaller = u
 		} else {
 			slog.Warn("uninstall is enabled in config.yaml, but this system cannot be uninstalled from the panel yet")

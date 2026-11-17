@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"net/http"
 	"time"
@@ -22,6 +23,14 @@ type Uninstaller interface {
 	Start(ctx context.Context) error
 	// ThroughHelper reports whether the Windows helper carries it out (and so checks its approval itself).
 	ThroughHelper() bool
+}
+
+// HelperUninstall is the Uninstaller of a system where the helper checks the approval and carries the
+// uninstall out (Windows). The agent hands it the approval and does not look inside; the answer is the
+// helper's, as an HTTP status and body.
+type HelperUninstall interface {
+	Uninstaller
+	Ask(ctx context.Context, by string, ap *api.Approval) (int, any)
 }
 
 // uninstallOn reports whether POST /uninstall is open: switched on in config.yaml (Run builds an Uninstaller
@@ -80,10 +89,8 @@ func (a *Agent) uninstall(w http.ResponseWriter, r *http.Request) {
 	refused := func(code string) {
 		slog.Warn("uninstall: refused", "reason", code, "requested_by", who, "remote", remote)
 	}
-	if a.d.Uninstaller.ThroughHelper() {
-		// Windows: the helper checks and carries it out (uninstall_windows.go); not built yet
-		refused(api.CodeUninstallDisabled)
-		writeJSON(w, 404, map[string]any{"error": "uninstall is not available on this system", "code": api.CodeUninstallDisabled})
+	if hu, ok := a.d.Uninstaller.(HelperUninstall); ok && hu.ThroughHelper() {
+		a.uninstallThroughHelper(w, r, hu, b, who, remote)
 		return
 	}
 	req := api.ApprovalRequest{Verb: api.ApproveUninstall}
@@ -119,4 +126,52 @@ func (a *Agent) uninstall(w http.ResponseWriter, r *http.Request) {
 	}
 	slog.Warn("uninstall: approved and started, this agent is being removed", "requested_by", who, "remote", remote)
 	writeJSON(w, 202, map[string]any{"state": api.UninstallStarted})
+}
+
+// uninstallThroughHelper is POST /uninstall where the helper checks the approval (Windows). The agent checks
+// nothing of the approval itself: the helper owns the trust file and refuses without one (approval_off), and
+// keeps its own once. Here only the agent's own once is kept, so a second request is refused before it costs
+// the helper anything.
+func (a *Agent) uninstallThroughHelper(w http.ResponseWriter, r *http.Request, hu HelperUninstall, b api.UninstallRequest, who, remote string) {
+	if !a.uninstallOnce.CompareAndSwap(false, true) {
+		slog.Warn("uninstall: refused", "reason", api.CodeUninstallBusy, "requested_by", who, "remote", remote)
+		writeJSON(w, 409, map[string]any{"error": "an uninstall was already started on this machine", "code": api.CodeUninstallBusy})
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), uninstallStartTimeout)
+	defer cancel()
+	st, body := hu.Ask(ctx, "panel "+remote+" "+who, b.Approval)
+	if st != 200 {
+		a.uninstallOnce.Store(false)
+		code := ""
+		if m, ok := body.(map[string]any); ok {
+			code, _ = m["code"].(string)
+		}
+		slog.Warn("uninstall: refused by the helper", "status", st, "reason", code, "requested_by", who, "remote", remote)
+		writeJSON(w, st, body)
+		return
+	}
+	slog.Warn("uninstall: approved by the helper and started, this agent is being removed", "requested_by", who, "remote", remote)
+	writeJSON(w, 202, map[string]any{"state": api.UninstallStarted})
+}
+
+// HelperUninstaller is the Uninstaller that hands the request to the helper (Windows): the helper checks the
+// approval and carries the uninstall out; the agent only passes it on, as it does for power and fans through
+// the helper.
+func HelperUninstaller(c *HelperClient) HelperUninstall { return helperUninstaller{c: c} }
+
+type helperUninstaller struct{ c *HelperClient }
+
+func (helperUninstaller) ThroughHelper() bool { return true }
+
+func (helperUninstaller) Start(context.Context) error {
+	return errors.New("the helper carries an uninstall out (Ask)")
+}
+
+func (u helperUninstaller) Ask(ctx context.Context, by string, ap *api.Approval) (int, any) {
+	if !u.c.Installed() {
+		return 409, map[string]any{"code": api.CodeHelperRequired,
+			"error": "uninstall from the panel needs the fairy-agent-helper service, which checks the approval and carries it out; it is not installed. " + HelperSetupHint}
+	}
+	return u.c.Uninstall(ctx, by, ap)
 }

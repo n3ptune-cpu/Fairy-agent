@@ -414,8 +414,20 @@ func (a *Agent) approvalChallenge(w http.ResponseWriter, r *http.Request) {
 		a.socketChallenge(w, r, req)
 		return
 	}
-	if req.Verb == api.ApproveUninstall && !a.helperRuns(req.Verb) { // never "needs none" (uninstall.go)
-		a.uninstallChallenge(w, r, req)
+	if req.Verb == api.ApproveUninstall { // never "needs none", and never this agent's gate in the helper's place
+		if !a.helperRuns(req.Verb) {
+			a.uninstallChallenge(w, r, req)
+			return
+		}
+		h, ok := a.helperApproval()
+		if !ok {
+			writeJSON(w, 409, map[string]any{"code": api.CodeHelperRequired,
+				"error": "uninstall from the panel needs the fairy-agent-helper service, which checks the approval; it is not installed. " + HelperSetupHint})
+			return
+		}
+		st, body := h.Challenge(r.Context(), req)
+		retryAfter(w, body)
+		writeJSON(w, st, body)
 		return
 	}
 	h, viaHelper := a.helperApproval()

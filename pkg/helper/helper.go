@@ -43,6 +43,10 @@ type Parts struct {
 	// shorten the warning time below what the administrator set. 0 means the protocol's minimum.
 	MinDelayS int
 	Updater   func(ctx context.Context) error
+	// Uninstall leaves the one-time uninstall request in the helper's folder and starts the updater service,
+	// which removes the services (agent.StartUninstallViaUpdater). Called only after the uninstall's approval
+	// was accepted. nil: uninstall.enabled is off, the verb answers "disabled".
+	Uninstall func(ctx context.Context, by string) error
 	// Approval is the passkey check (pkg/approval): with a trust file in the helper's folder, fan_set, fan_mode,
 	// power (other than cancel) and apply_update run only with an approval the helper has verified itself. The
 	// agent is not trusted with any part of it. nil: no check (tests of the other parts).
@@ -62,6 +66,10 @@ type Server struct {
 	p       Parts
 	limit   *proto.Limiter
 	started time.Time
+
+	// uninstallMu holds one uninstall at a time; uninstallStarted: one was started, there is no second.
+	uninstallMu      sync.Mutex
+	uninstallStarted bool
 
 	sleepMu   sync.Mutex
 	sleepOK   bool
@@ -152,6 +160,10 @@ func FromConfig(cfg *agent.Config, version string, audit *slog.Logger) (Parts, f
 	}
 	if cfg.SelfUpdate.Enabled {
 		p.Updater = agent.StartUpdaterService
+		p.Updating = agent.UpdaterRunning
+	}
+	if cfg.Uninstall.Enabled {
+		p.Uninstall = func(ctx context.Context, by string) error { return agent.StartUninstallViaUpdater(ctx, cfg, by) }
 		p.Updating = agent.UpdaterRunning
 	}
 	return p, closer, nil
@@ -322,6 +334,8 @@ func (s *Server) off(verb string) *proto.Response {
 		resp = disabled("power control") // a run ends with a shutdown, the self-off or the confirmed one
 	case verb == proto.VerbApplyUpdate && s.p.Updater == nil:
 		resp = disabled("self-update")
+	case verb == proto.VerbUninstall && s.p.Uninstall == nil:
+		resp = disabled("uninstall from the panel")
 	default:
 		return nil
 	}
@@ -430,6 +444,9 @@ func (s *Server) challenge(r proto.Request) proto.Response {
 	if s.p.Approval == nil {
 		if ar.Verb == api.ApproveTrustSet || ar.Verb == api.ApproveRunGo {
 			return proto.Fail(proto.CodeDisabled, "this helper has no approval check")
+		}
+		if ar.Verb == api.ApproveUninstall { // never run unchecked: never "needs none" either
+			return refusal(approval.Off())
 		}
 		canon, _ := ar.Canonical()
 		return proto.OK(api.ChallengeResponse{Reason: "off", Request: canon})
@@ -545,6 +562,8 @@ func (s *Server) dispatch(ctx context.Context, r proto.Request) proto.Response {
 		return proto.OK(proto.AutoData{Mode: mode})
 	case proto.VerbPower:
 		return s.power(r)
+	case proto.VerbUninstall:
+		return s.uninstall(ctx, r)
 	case proto.VerbApplyUpdate:
 		if s.p.Updater == nil {
 			return disabled("self-update")
@@ -707,3 +726,52 @@ func (s *Server) reply(w io.Writer, d deadliner, r proto.Response) bool {
 }
 
 var jsonMarshal = json.Marshal
+
+// uninstall is the verb uninstall, the panel's "Uninstall agent". The order keeps a refused request from
+// costing anything:
+//
+//  1. switched on in config.yaml (else "disabled");
+//  2. the approval, looked at and not used up. Never through approvable(), which lets a request run unchecked
+//     when this helper has no gate: the gate's own methods refuse an uninstall on a nil gate and without a
+//     trust file (409 approval_off), and refuse every approval that is not one entry for exactly this request
+//     on this machine;
+//  3. one at a time, and once: a second request is 409 uninstall_in_progress, and none is started while the
+//     updater service runs (409 updater_busy), both before the approval is used up. (A refusal is a Response
+//     with Code and Error, which the agent passes on as the HTTP answer: approvalCall.)
+//  4. the approval used up (Admit), then the one-time request left in this helper's folder and the updater
+//     started (Parts.Uninstall). The updater acts on that request and on nothing the agent can write.
+func (s *Server) uninstall(ctx context.Context, r proto.Request) proto.Response {
+	if resp := s.off(r.Verb); resp != nil {
+		return *resp
+	}
+	req := api.ApprovalRequest{Verb: api.ApproveUninstall}
+	who := s.who(r)
+	if ref := s.p.Approval.Look(req, r.Approval); ref != nil {
+		s.p.Audit.Warn("uninstall: refused", "reason", ref.Code, "by", who)
+		return refusal(ref)
+	}
+	s.uninstallMu.Lock()
+	defer s.uninstallMu.Unlock()
+	if s.uninstallStarted {
+		s.p.Audit.Warn("uninstall: refused", "reason", api.CodeUninstallBusy, "by", who)
+		return proto.Response{Status: 409, Code: api.CodeUninstallBusy, Error: "an uninstall was already started on this machine"}
+	}
+	if s.p.Updating != nil && s.p.Updating() {
+		s.p.Audit.Warn("uninstall: refused", "reason", api.CodeUpdaterBusy, "by", who)
+		return proto.Response{Status: 409, Code: api.CodeUpdaterBusy, Error: agent.ErrUpdaterBusy.Error()}
+	}
+	if _, ref := s.p.Approval.Admit(req, r.Approval); ref != nil {
+		s.p.Audit.Warn("uninstall: refused", "reason", ref.Code, "by", who)
+		return refusal(ref)
+	}
+	if err := s.p.Uninstall(ctx, who); err != nil {
+		s.p.Audit.Error("uninstall: approved, but it could not be started", "by", who, "error", short(err))
+		if errors.Is(err, agent.ErrUpdaterBusy) {
+			return proto.Response{Status: 409, Code: api.CodeUpdaterBusy, Error: agent.ErrUpdaterBusy.Error()}
+		}
+		return proto.Fail(proto.CodeFailed, "starting the uninstall: "+short(err))
+	}
+	s.uninstallStarted = true
+	s.p.Audit.Warn("uninstall: approved; the updater service removes the services now", "by", who)
+	return proto.OK(map[string]bool{"started": true})
+}

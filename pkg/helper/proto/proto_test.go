@@ -106,12 +106,12 @@ func TestEncodeRequestValidates(t *testing.T) {
 }
 
 func TestEveryVerbHasASchema(t *testing.T) {
-	want := []string{"apply_update", "challenge", "coretemp_read", "fan_auto", "fan_mode", "fan_set", "fan_status", "ipmi_sensors", "ping", "power", "run_arm", "run_go", "status", "trust_init"}
+	want := []string{"apply_update", "challenge", "coretemp_read", "fan_auto", "fan_mode", "fan_set", "fan_status", "ipmi_sensors", "ping", "power", "run_arm", "run_go", "status", "trust_init", "uninstall"}
 	if got := strings.Join(Verbs(), ","); got != strings.Join(want, ",") {
 		t.Fatal(got)
 	}
 	for _, v := range Verbs() {
-		if Control(v) != (v == "fan_set" || v == "fan_mode" || v == "fan_auto" || v == "power" || v == "apply_update" || v == "challenge" || v == "trust_init" || v == "run_arm" || v == "run_go") {
+		if Control(v) != (v == "fan_set" || v == "fan_mode" || v == "fan_auto" || v == "power" || v == "apply_update" || v == "uninstall" || v == "challenge" || v == "trust_init" || v == "run_arm" || v == "run_go") {
 			t.Error("control class of", v)
 		}
 	}
@@ -339,5 +339,45 @@ func TestDecodeRequestRefusesAMemberTwice(t *testing.T) {
 		if _, err := decode([]byte(c.in)); err != nil {
 			t.Errorf("%.90s: %v", c.in, err)
 		}
+	}
+}
+
+// uninstall takes the approval and who asked, nothing else; a frame with an approval is a Version3 frame; the
+// request an approval is for is api's uninstall; and a challenge may be asked for it, with no member.
+func TestUninstallRequest(t *testing.T) {
+	by := "panel 100.64.0.10"
+	ap := &api.Approval{Token: "a.b.c"}
+	r := Request{V: Version3, Verb: VerbUninstall, By: &by, Approval: ap}
+	if err := r.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if ar, ok := ApprovalRequestOf(r); !ok || ar.Verb != api.ApproveUninstall {
+		t.Fatalf("approval request %+v %v", ar, ok)
+	}
+	if FrameVersion(r) != Version3 || !Control(VerbUninstall) {
+		t.Fatal("frame version or control class")
+	}
+	zone, mode, action, run := 0, "full", "shutdown", "0123456789abcdef"
+	for what, bad := range map[string]Request{
+		"zone":   {V: Version3, Verb: VerbUninstall, Approval: ap, Zone: &zone},
+		"mode":   {V: Version3, Verb: VerbUninstall, Approval: ap, Mode: &mode},
+		"action": {V: Version3, Verb: VerbUninstall, Approval: ap, Action: &action},
+		"run":    {V: Version3, Verb: VerbUninstall, Approval: ap, Run: &run},
+	} {
+		if err := bad.Validate(); err == nil {
+			t.Errorf("uninstall with %s was accepted", what)
+		}
+	}
+	for_ := VerbUninstall
+	c := Request{V: Version3, Verb: VerbChallenge, For: &for_}
+	if err := c.Validate(); err != nil {
+		t.Fatalf("challenge for uninstall: %v", err)
+	}
+	if ar, ok := ApprovalRequestOf(c); !ok || ar.Verb != api.ApproveUninstall {
+		t.Fatalf("challenge's request %+v %v", ar, ok)
+	}
+	c.Mode = &mode
+	if err := c.Validate(); err == nil {
+		t.Error("a challenge for uninstall with a mode was accepted")
 	}
 }
