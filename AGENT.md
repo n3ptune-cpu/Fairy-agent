@@ -2558,13 +2558,19 @@ are lists of devices: edit those in the file (also the `sockets:` of an entry; t
   until when), or the code expired. The agent's log says "paired with panel" (with the panel's address, never a
   token). The state file is `/var/lib/fairy-agent/pairing.json` (Linux) or
   `C:\ProgramData\fairy-agent\state\pairing.json` (Windows); it never holds the code itself.
-* **Remove.** Windows: `& "C:\Program Files\Fairy\fairy-agent.exe" uninstall` (removes all three services:
-  agent, helper, updater; the fans go back to the BMC first), then
-  `Remove-NetFirewallRule -DisplayName "Fairy agent (Tailscale only)", "Fairy agent helper (no network)"` and delete `C:\Program Files\Fairy` and
-  `C:\ProgramData\fairy-agent`. Linux: `systemctl disable --now fairy-agent`, delete the units
-  (`fairy-agent.service`, `fairy-agent-update.service`), the polkit rules (`rm -f
-  /etc/polkit-1/rules.d/49-fairy-agent*.rules`), `/usr/local/bin/fairy-agent` (and `.old`), `/etc/fairy-agent`,
-  `/var/lib/fairy-agent*`, and `userdel fairy-agent`.
+* **Remove.** Easiest: run the removal script as administrator / root. Windows:
+  `deploy/uninstall-fairy-agent.ps1` (`-Yes` skips the prompt, `-KeepData` keeps `config.yaml` and the tokens).
+  Linux: `sh deploy/uninstall-fairy-agent.sh` (`--yes`, `--keep-data`). They stop the services (the fans go back
+  to the BMC first), remove the firewall rule, the program and the data, and on Linux the polkit rules and the
+  `fairy-agent` user. Then press "Remove host" in the panel. By hand, Windows:
+  `& "C:\Program Files\Fairy\fairy-agent.exe" uninstall` (removes all three services: agent, helper, updater),
+  then `Remove-NetFirewallRule -DisplayName "Fairy agent (Tailscale only)", "Fairy agent helper (no network)"` and
+  delete `C:\Program Files\Fairy` and `C:\ProgramData\fairy-agent`. Linux: `systemctl disable --now fairy-agent`,
+  delete the units (`fairy-agent.service`, `fairy-agent-update.service`), the polkit rules
+  (`rm -f /etc/polkit-1/rules.d/49-fairy-agent*.rules`), `/usr/local/bin/fairy-agent` (and `.old`),
+  `/etc/fairy-agent`, `/var/lib/fairy-agent*`, and `userdel fairy-agent`.
+  
+  
 
 ## Security in short
 
