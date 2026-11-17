@@ -3,6 +3,7 @@ package agent_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http/httptest"
 	"path/filepath"
@@ -47,11 +48,15 @@ type urigOpts struct {
 	enabled bool // config.yaml: uninstall.enabled (Run builds an Uninstaller only then)
 	gate    bool // the agent has its approval gate (Run always builds one)
 	trust   bool // the trust is set from the panel, once, with its proof
+	rate    int  // control_rate_per_min (0: 60)
 }
 
 func newUninstallRig(t *testing.T, o urigOpts) *urig {
 	t.Helper()
-	conf := "control_rate_per_min: 60\n"
+	if o.rate == 0 {
+		o.rate = 60
+	}
+	conf := fmt.Sprintf("control_rate_per_min: %d\n", o.rate)
 	if o.enabled {
 		conf += "uninstall: {enabled: true}\n"
 	}
@@ -245,5 +250,27 @@ func TestUninstallOnceUnderConcurrency(t *testing.T) {
 	}
 	if got[202] != 1 || r.u.starts.Load() != 1 {
 		t.Fatalf("answers %v, %d starts", got, r.u.starts.Load())
+	}
+}
+
+// Wrong tokens, and a burst: refused before the passkey check is even looked at, and counted in the control
+// budget, so a program with the control token cannot hammer the route.
+func TestUninstallTokensAndBudget(t *testing.T) {
+	r := newUninstallRig(t, urigOpts{enabled: true, gate: true, trust: true, rate: 3})
+	for _, tok := range []string{"control-token-cccccccccccccccccccccc", ctlTok + "x", strings.ToUpper(ctlTok)} {
+		if st, _ := do(t, r.base, "POST", api.PathUninstall, tok, map[string]any{}); st != 401 {
+			t.Errorf("a wrong token: %d", st)
+		}
+	}
+	codes := map[int]int{}
+	for i := 0; i < 6; i++ {
+		st, _ := r.post(t, api.PathUninstall, map[string]any{})
+		codes[st]++
+	}
+	if codes[429] == 0 || codes[403]+codes[429] != 6 {
+		t.Fatalf("a burst of six with a budget of three a minute: %v", codes)
+	}
+	if n := r.u.starts.Load(); n != 0 {
+		t.Fatalf("started %d times", n)
 	}
 }

@@ -132,3 +132,23 @@ func TestUninstallMarkerChecks(t *testing.T) {
 		t.Fatalf("passing checks: %q %v", by, err)
 	}
 }
+
+// A link at the request's path (a symbolic link, or on Windows a junction made the same way) is not followed:
+// whatever it points at, nothing is acted on and the target is left alone.
+func TestUninstallMarkerLinkIsNotFollowed(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	src := newMarker(t)
+	if err := src.Write("x", now); err != nil {
+		t.Fatal(err)
+	}
+	m := newMarker(t)
+	if err := os.Symlink(src.Path, m.Path); err != nil {
+		t.Skip("this system does not let the test make a link:", err)
+	}
+	if _, err := m.Take(now); err == nil || errors.Is(err, agent.ErrNoUninstallMarker) {
+		t.Fatalf("a link was taken as a request: %v", err)
+	}
+	if _, err := os.Lstat(src.Path); err != nil {
+		t.Fatal("the link's target was removed")
+	}
+}

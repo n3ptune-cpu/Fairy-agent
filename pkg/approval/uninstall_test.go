@@ -206,3 +206,62 @@ func TestUninstallIsBoundToTheMachine(t *testing.T) {
 	_, ref = a.g.Admit(uninstall, a.iss.Approve(a.Now(), approvaltest.Entry(idA, ca)))
 	accepted(t, "A's own approval", ref)
 }
+
+// A program that holds the control token and makes its own approvals: signed with another key, for another
+// Pocket ID client, or a real one changed afterwards. Each is refused, and none uses the challenge up.
+func TestUninstallForgedApprovals(t *testing.T) {
+	r := newRig(t, true)
+	e := r.entry(uninstall)
+	good := r.iss.Approve(r.Now(), e)
+	stranger := *r.iss
+	stranger.Key = approvaltest.Key(1) // same key id, another key
+	otherClient := *r.iss
+	otherClient.ClientID = "some-other-client"
+	otherIssuer := *r.iss
+	otherIssuer.URL = "https://id.example.net"
+	parts := strings.Split(good.Token, ".")
+	flip := func(s string) string {
+		b := []byte(s)
+		if b[len(b)/2] == 'A' {
+			b[len(b)/2] = 'B'
+		} else {
+			b[len(b)/2] = 'A'
+		}
+		return string(b)
+	}
+	for what, ap := range map[string]*api.Approval{
+		"signed with another key":       stranger.Approve(r.Now(), e),
+		"for another Pocket ID client":  otherClient.Approve(r.Now(), e),
+		"from another issuer":           otherIssuer.Approve(r.Now(), e),
+		"its payload changed":           {Token: parts[0] + "." + flip(parts[1]) + "." + parts[2], Entries: good.Entries},
+		"its signature changed":         {Token: parts[0] + "." + parts[1] + "." + flip(parts[2]), Entries: good.Entries},
+		"no signature":                  {Token: parts[0] + "." + parts[1] + ".", Entries: good.Entries},
+		"the entry's request rewritten": {Token: good.Token, Entries: []api.MachineEntry{{MachineID: e.MachineID, Challenge: e.Challenge, Request: "power action=shutdown delay_s=60"}}},
+	} {
+		if _, ref := r.g.Admit(uninstall, ap); ref == nil {
+			t.Errorf("%s: accepted", what)
+		}
+	}
+	if !r.stillOpen(uninstall, e) {
+		t.Fatal("a forged approval used the challenge up")
+	}
+	_, ref := r.g.Admit(uninstall, good)
+	accepted(t, "the real one afterwards", ref)
+}
+
+// After `helper-trust clear` on the machine, a program with the control token cannot set a trust of its own
+// and uninstall with the same passkey touch: an approval that lists the first-time set and the uninstall
+// together uninstalls nothing (one entry only), and without a trust the uninstall is refused anyway.
+func TestUninstallNotInTheSameApprovalAsTheTrust(t *testing.T) {
+	r := newRig(t, true)
+	e := r.entry(uninstall)
+	hash := strings.Repeat("A", 43)
+	trust := api.MachineEntry{MachineID: e.MachineID, Challenge: base64.RawURLEncoding.EncodeToString([]byte("trust-set-challenge-0123456789ab")),
+		Request: "trust_set hash=" + hash}
+	both := r.iss.Approve(r.Now(), trust, e)
+	_, ref := r.g.Admit(uninstall, both)
+	refused(t, "an approval of the trust and the uninstall together", ref, api.CodeApprovalRefused, "")
+	if !r.stillOpen(uninstall, e) {
+		t.Fatal("it used the challenge up")
+	}
+}

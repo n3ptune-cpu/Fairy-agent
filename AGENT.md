@@ -2387,7 +2387,9 @@ there.
   helper's and the agent's firewall rules and the counter access, and has Windows delete
   `C:\Program Files\Fairy` at the next reboot (it runs from there). No helper installed: `409
   helper_required`; an update in progress: `409 updater_busy` (the approval is not used up by either).
-  `uninstall.enabled` makes the helper needed, so the installer puts it in place.
+  `uninstall.enabled` makes the helper needed, so the installer puts it in place; on an existing install,
+  after `fairy-agent config set uninstall.enabled true` run `fairy-agent setup-self-update` (as administrator),
+  which installs the helper when the config needs it, then restart the agent.
 * **Linux:** the agent checks the approval itself, then starts `fairy-agent-uninstall.service`, a root
   oneshot that runs the release's `uninstall-fairy-agent.sh --yes --keep-data` (installed by `install.sh` as
   `/usr/local/lib/fairy-agent/uninstall-fairy-agent.sh`). A polkit rule (`49-fairy-agent-uninstall.rules`)

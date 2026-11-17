@@ -1184,8 +1184,9 @@ U1. Off (the default): `Post /uninstall @{}` → `404 ... uninstall_disabled`.
 U2. Switch it on, restart both services:
 ```powershell
 & "C:\Program Files\Fairy\fairy-agent.exe" config set uninstall.enabled true
+& "C:\Program Files\Fairy\fairy-agent.exe" setup-self-update    # installs the helper if it was not (uninstall needs it)
 Restart-Service fairy-agent-helper, fairy-agent
-Get-Service fairy-agent-helper          # Running: uninstall makes the helper needed
+Get-Service fairy-agent-helper, fairy-agent-update   # helper Running; the updater is there (it does the removal)
 ```
 
 U3. **No trust file** (`fairy-agent helper-trust show` says none): `Post /uninstall @{}` and
