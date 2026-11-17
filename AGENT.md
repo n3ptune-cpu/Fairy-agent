@@ -363,12 +363,15 @@ Since 0.5.0 (release build 11 or later) fairy-agent on Windows is two services t
 | Files | reads `C:\ProgramData\fairy-agent` (config, tokens), writes only `logs\`, `state\` and `update\stage\` | reads config.yaml, writes only its own log `C:\ProgramData\fairy-agent\helper\helper.log` (the agent can only read it) |
 | Installed | always | only where something needs it: Core Temp, IPMI (BMC sensors, fans) or shutdown / reboot / sleep |
 
-**What the helper does, and nothing else.** It answers twelve fixed requests from the agent: `ping`, `status`,
+**What the helper does, and nothing else.** It answers a fixed list of requests from the agent: `ping`, `status`,
 `coretemp_read` (a copy of Core Temp's shared memory; the agent checks and converts it), `ipmi_sensors` (the
 BMC's readings), `fan_status`, `fan_set` (zone 0 or 1, 30-100 %), `fan_mode` (standard, full, optimal or
 heavyio), `fan_auto` (back to the BMC's automatic mode), `power` (shutdown, reboot or sleep after 10 s to 24 h,
-or cancel), `apply_update` (starts the signature-checking updater service, nothing else), and for the passkey
-approval `challenge` (a challenge for one exact fan, power or update request, or for the first-time set of
+or cancel), `apply_update` (starts the signature-checking updater service, nothing else), `uninstall` (only
+with an approval it has verified itself, never without a trust file: leaves a one-time request in its own folder
+and starts the updater service, which removes the services; see
+[Uninstall from the panel](#uninstall-from-the-panel)), and for the passkey
+approval `challenge` (a challenge for one exact fan, power, update or uninstall request, or for the first-time set of
 the trust) and `trust_init` (the first approval trust, accepted once and only with an approval that fits it;
 see [Passkey approval](#passkey-approval-of-fan-power-and-update-requests-pocket-id)).
 With a trust file in its folder the helper runs `fan_set`, `fan_mode`, `power` (other than cancel) and
@@ -1551,6 +1554,7 @@ says the same next to the id. The panel then has to be told the new id (it still
 | `POST /power` with `shutdown`, `reboot`, `sleep` | yes, one each | never the fan window |
 | `POST /update` | yes, one each | Windows: see "Updates on Windows" below |
 | `POST /plug/switch` (0.10.0) | yes, one each, and an approval for nothing but that one switch | never a window. **And it is refused on a machine without a trust file** (`409 approval_off`), where every other row of this table needs nothing: see [Switching a plug's sockets](#switching-a-plugs-sockets-home_assistant-0100). The agent process checks it itself, also on Windows (`"agent_checks"` names `socket_set`) |
+| `POST /uninstall` (0.11.0) | yes, one, and an approval for nothing but this uninstall of this machine | never a window, never a run. **Refused on a machine without a trust file** (`409 approval_off`), like a plug switch. Windows: the helper checks it; elsewhere the agent. See [Uninstall from the panel](#uninstall-from-the-panel) |
 | `POST /run/arm`, `POST /run/go` (0.9.0) | each **is** one | the ticket and the confirmation of a run: see "Runs" below. `POST /update` and `POST /power` `shutdown` with `"run"` are then let through once each without a new one |
 | `POST /power` with `cancel` | no | it only stops something. Windows: answered `503 helper_stopped` while the helper is stopped (see the next row but one) |
 | `POST /wol`, `POST /bmc/power` (`on`, `status`) | no | they wake machines; the relay has no "off" |
@@ -2349,6 +2353,52 @@ fairy-agent`; Windows `Stop-Service fairy-agent, fairy-agent-helper` (the helper
 runs the same program), rename the current `fairy-agent.exe` away, rename `fairy-agent.exe.old` to
 `fairy-agent.exe`, `Start-Service fairy-agent-helper, fairy-agent`.
 
+## Uninstall from the panel
+
+A host's **Uninstall agent** (0.11.0) removes the agent's services from the machine. It is off unless that
+machine's `config.yaml` says so, which no request can change:
+
+```yaml
+uninstall:
+  enabled: true
+```
+
+and it is **never carried out without a passkey approval**: a fresh one, for exactly this request on exactly
+this machine (an approval that lists anything else as well is refused), used once. A machine without an
+approval trust refuses it (`409 approval_off`), where fans, power and updates would run unchecked: set the trust
+up first. The control token alone, which a program on the machine can take (see
+[Security in short](#security-in-short)), uninstalls nothing. The request is `POST /uninstall` with the control
+token, in the control budget, logged on the machine with who asked and audited in the panel; the answer is
+`202 {"state":"uninstalling"}` and the machine goes offline within seconds.
+
+What goes: the services, the units / polkit rules / firewall rules the installer made, the program. **What
+stays:** the config, the tokens and the logs (`C:\ProgramData\fairy-agent`; Linux `/etc/fairy-agent`,
+`/var/lib/fairy-agent*` and the `fairy-agent` user, who owns them). Delete them by hand once you are sure, or run
+the removal script without `--keep-data` / `-KeepData`. The host stays in the panel's list until you remove it
+there.
+
+* **Windows:** the agent checks nothing of the approval: it hands the request to the helper (LocalSystem),
+  which checks it with its own trust file. Only then does the helper write a one-time request into its own
+  folder (`C:\ProgramData\fairy-agent\helper\uninstall-request.json`: only administrators and SYSTEM can
+  write there; the agent's account can only read) and start the `fairy-agent-update` service. That service
+  acts on that file and nothing else: it checks the folder's and the file's owner and permissions as for the
+  trust file, removes the file before it does anything, and ignores one older than 2 minutes. Then it stops the
+  agent and the helper (the fans go back to the BMC first), deletes the agent, helper and updater services, the
+  helper's and the agent's firewall rules and the counter access, and has Windows delete
+  `C:\Program Files\Fairy` at the next reboot (it runs from there). No helper installed: `409
+  helper_required`; an update in progress: `409 updater_busy` (the approval is not used up by either).
+  `uninstall.enabled` makes the helper needed, so the installer puts it in place.
+* **Linux:** the agent checks the approval itself, then starts `fairy-agent-uninstall.service`, a root
+  oneshot that runs the release's `uninstall-fairy-agent.sh --yes --keep-data` (installed by `install.sh` as
+  `/usr/local/lib/fairy-agent/uninstall-fairy-agent.sh`). A polkit rule (`49-fairy-agent-uninstall.rules`)
+  lets the `fairy-agent` user start exactly that unit. `install.sh` installs the unit and the rule only while
+  `uninstall.enabled` is on, and removes them when it is off: after switching it on with
+  `fairy-agent config set uninstall.enabled true`, run `install.sh` again (or copy
+  `deploy/fairy-agent-uninstall.service` to `/etc/systemd/system/` and
+  `deploy/fairy-agent-uninstall.polkit.rules` to `/etc/polkit-1/rules.d/49-fairy-agent-uninstall.rules`, then
+  `systemctl daemon-reload`). **The limit:** a program that already runs as the `fairy-agent` user can start that
+  unit without an approval, as it can use the power and update rules; any other local user cannot.
+
 ## What it can and cannot show
 
 | | Linux | Windows |
@@ -2472,6 +2522,7 @@ fan_control:   enabled, vendor, min_duty, max_temp_c, auto_mode
 power_control: enabled, min_delay_s
 wol:           enabled, allowed_macs
 self_update:   enabled, repo
+uninstall:     enabled                                    # 0.11.0, see "Uninstall from the panel"
 home_assistant: url, token_env, ca_file, switching, switch_allow, feeds_self, min_gap_s   # 0.10.0
 bmc_relay:     enabled, targets (each: id, backend, host, url, username, password_env, cipher_suite,
                ipmitool_path, tls_fingerprint)
@@ -2558,7 +2609,9 @@ are lists of devices: edit those in the file (also the `sockets:` of an entry; t
   until when), or the code expired. The agent's log says "paired with panel" (with the panel's address, never a
   token). The state file is `/var/lib/fairy-agent/pairing.json` (Linux) or
   `C:\ProgramData\fairy-agent\state\pairing.json` (Windows); it never holds the code itself.
-* **Remove.** Easiest: run the removal script as administrator / root. Windows:
+* **Remove.** From the panel (0.11.0, when switched on): the host's **Uninstall agent**, see
+  [Uninstall from the panel](#uninstall-from-the-panel). On the machine, easiest: run the removal script as
+  administrator / root. Windows:
   `deploy/uninstall-fairy-agent.ps1` (`-Yes` skips the prompt, `-KeepData` keeps `config.yaml` and the tokens).
   Linux: `sudo sh /usr/local/lib/fairy-agent/uninstall-fairy-agent.sh` (`--yes`, `--keep-data`; `install.sh`
   puts the release's checked copy there, and both scripts are release assets covered by the signed
@@ -2595,6 +2648,12 @@ are lists of devices: edit those in the file (also the `sockets:` of an entry; t
     Wrong tries are logged but not limited: the update's own check comes the same way and cannot always be
     told from another local program's tries, so a limit would let any program on the machine make updates
     fail with a few wrong tries.
+* **Uninstall from the panel (0.11.0)** is off unless this machine's `config.yaml` says `uninstall.enabled:
+  true`, and then needs a fresh passkey approval for exactly this request on this machine, used once; without
+  a trust file it is refused (`409 approval_off`). On Windows the helper checks it and the updater service acts
+  only on the request the helper left in its own administrators-only folder; nothing the agent's account can
+  write is ever acted on. On Linux the agent checks it and a fixed root unit does the removal (the limit: a
+  program already running as the `fairy-agent` user can start that unit). Config and tokens stay on the machine.
 * **Switching plug sockets (0.10.0)** is off unless this machine's `config.yaml` says
   `home_assistant.switching: true`, which no request can set. Then: every switch needs a passkey approval
   that this agent checks itself, for exactly one socket in one direction (an approval that lists more than
@@ -2721,7 +2780,7 @@ are lists of devices: edit those in the file (also the `sockets:` of an entry; t
   written at most 30 times a minute (the rest are counted: `suppressed=N` on the next one).
 * Windows: the agent runs as its own virtual account with a single privilege; what needs more goes through the
   helper service, which has no network, admits only the agent's account on its local pipe (checked twice), and
-  answers twelve fixed requests with strict limits. Settings folder readable only by administrators, SYSTEM and the service; the program lives in
+  answers a fixed list of requests with strict limits. Settings folder readable only by administrators, SYSTEM and the service; the program lives in
   `C:\Program Files` and only administrators / SYSTEM can change it (self-update goes through the separate
   LocalSystem updater service, which checks the signature itself). The install scripts check the program's
   SHA-256 against the signed SHA256SUMS before running it as Administrator. Helper programs (ipmitool,

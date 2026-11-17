@@ -1161,6 +1161,79 @@ both out of `config.yaml` before an older agent is put back.
 The output of M1, M3, M4 and M5, of M6 or M7 (whichever fits the PC), of M9, and the `plug` lines of
 `agent.log`. Look through it first: no token belongs in it, and none should be there.
 
+## 17. 0.11.0: Uninstall from the panel (none of this has run on Windows)
+
+What it should do is in AGENT.md, "Uninstall from the panel". Use a VM you can throw away (or snapshot it
+first): part B removes the services. `$ctl` is this PC's control token, `$base` its address as the panel uses it.
+
+```powershell
+$ctl  = Get-Content C:\ProgramData\fairy-agent\control-token     # never paste it anywhere
+$base = "http://100.64.0.10:9101"                                  # EXAMPLE VALUE: this PC's Tailscale address
+function Post($path, $body) {
+  try { $r = Invoke-WebRequest -UseBasicParsing -Method Post -Uri "$base$path" -Headers @{Authorization = "Bearer $ctl"} `
+          -ContentType application/json -Body ($body | ConvertTo-Json -Depth 6 -Compress)
+        "$($r.StatusCode) $($r.Content)" }
+  catch { $e = $_.Exception.Response; $sr = New-Object IO.StreamReader($e.GetResponseStream()); "$([int]$e.StatusCode) $($sr.ReadToEnd())" }
+}
+```
+
+### A. Without the panel: every refusal
+
+U1. Off (the default): `Post /uninstall @{}` → `404 ... uninstall_disabled`.
+
+U2. Switch it on, restart both services:
+```powershell
+& "C:\Program Files\Fairy\fairy-agent.exe" config set uninstall.enabled true
+Restart-Service fairy-agent-helper, fairy-agent
+Get-Service fairy-agent-helper          # Running: uninstall makes the helper needed
+```
+
+U3. **No trust file** (`fairy-agent helper-trust show` says none): `Post /uninstall @{}` and
+`Post /approval/challenge @{verb="uninstall"}` → both `409 ... approval_off`. Nothing in `helper.log` says
+"started".
+
+U4. **With trust** (set it from the panel as in section 13): `Post /uninstall @{}` → `403 ... approval_required`;
+`Post /approval/challenge @{verb="uninstall"}` → `200` with `"needed":true` and `"request":"uninstall"`.
+
+U5. **A request the agent's account could plant.** The agent's account cannot write the helper's folder; check
+its permissions:
+```powershell
+icacls C:\ProgramData\fairy-agent\helper      # only SYSTEM and Administrators have (F) / (M); NT SERVICE\fairy-agent (R) at most
+```
+The one folder that account may write is `update\stage\`. As administrator, put a well-formed request with a
+fresh time there (as the agent's account could) and start the updater:
+```powershell
+$at = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+Set-Content C:\ProgramData\fairy-agent\update\stage\uninstall-request.json "{`"v`":1,`"at`":$at,`"by`":`"x`"}"
+Start-Service fairy-agent-update; Start-Sleep 10
+Get-Service fairy-agent, fairy-agent-helper    # both still there: the stage folder is never looked at
+Remove-Item C:\ProgramData\fairy-agent\update\stage\uninstall-request.json
+```
+
+U6. **Helper stopped / not installed**: `Stop-Service fairy-agent-helper` → `Post /uninstall @{}` answers 503
+(helper stopped). `Start-Service fairy-agent-helper` afterwards.
+
+### B. With the panel (once the panel has the button)
+
+U7. Snapshot the VM. In the panel: the host's ⋯ → **Uninstall agent**, type its name, confirm with the
+passkey. The panel says the agent is removing itself.
+
+U8. Within about 10 seconds:
+```powershell
+Get-Service fairy-agent* -ErrorAction SilentlyContinue                    # nothing
+Get-NetFirewallRule -DisplayName "Fairy agent*" -ErrorAction SilentlyContinue   # nothing
+Test-Path C:\ProgramData\fairy-agent\config.yaml                         # True: config and tokens stay
+Get-Content C:\ProgramData\fairy-agent\update\installer.log -Tail 15     # "uninstall from the panel: ... done"
+```
+With fan control on: the BMC is back in its automatic mode.
+
+U9. Reboot. `Test-Path "C:\Program Files\Fairy"` → False.
+
+### What to send back
+
+The output of U1-U6 (and U8-U9 when the panel has the button), the `uninstall` lines of `agent.log`,
+`helper.log` and `update\installer.log`. Look through it first: no token belongs in it.
+
 ## Rollback (back to build 10 / v0.4.4)
 
 0.4.4 does not know the helper or the new account, so remove 0.5's services first. Config and tokens stay, the
