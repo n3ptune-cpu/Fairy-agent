@@ -82,3 +82,21 @@ its allowed letters (`helperBy`). The panel's audit says `approval: sent`, never
 * The Windows rows 15-17 and 28 need the VM (section 17, U5 and U8).
 * About 108 agent and 17+11 panel tests fail on this machine with and without this feature (symbolic links without
   Developer Mode, file permissions, run records); none is new, compared test by test against the code before it.
+
+## Run on Windows (test VM NSX-TEST-VM, 2026-11-17, agent 17-999956f-selfbuilt)
+
+TEST-ON-WINDOWS.md section 17, with the test panel on the dev PC over the LAN:
+
+| Step | Result |
+|---|---|
+| U1 off by default | `404 uninstall_disabled` |
+| U2 switched on | `setup-self-update` put the helper and the updater in place; the panel showed "Uninstall agent" and its dialog |
+| U3 no trust file | `409 approval_off` for the request and for the challenge |
+| U4 with trust | `403 approval_required`; the challenge `needed: true` for `uninstall`, naming the issuer and client |
+| U5 (rows 15-17) | `icacls`: only SYSTEM and Administrators may write the helper's folder, `NT SERVICE\fairy-agent` has `(RX)`; a well-formed, fresh request in `update\stage\` and the updater started by hand: the updater ran ("nothing staged ... nothing to do") and removed nothing |
+| U6 helper stopped | `503 helper_stopped`, nothing removed |
+| Removal | a request written into the helper's folder (by an administrator, standing in for the helper) and the updater started: taken once (the file gone), the agent, helper and updater services and the firewall rules gone in 32 s, `config.yaml` kept, the host offline in the panel; after a reboot `C:\Program Files\Fairy` gone |
+
+Not run live: the passkey through the panel (the Pocket ID client does not accept the test panel's callback
+address); the panel's refusal of a machine without trust was not reported back; the VM has no BMC fans (row 28).
+These rest on the automated tests named above.
