@@ -7,16 +7,18 @@
 #     only AFTER the service has stopped), their files, .bak copies and drop-in folders
 #   - the polkit rules /etc/polkit-1/rules.d/49-fairy-agent*.rules
 #   - /etc/tmpfiles.d/fairy-agent.conf (RAPL) and /etc/udev/rules.d/60-fairy-agent-ipmi.rules (IPMI), if present
-#   - the firewall rule for TCP 9101 on tailscale0 (ufw or firewalld)
-#   - /usr/local/bin/fairy-agent (and .old / .new)
+#   - the firewall rule install.sh made for the panel: TCP 9101 on tailscale0 (ufw), or the one rich rule
+#     "source address=<panel>/32 port 9101 tcp accept" (firewalld); no other rule for that port is touched
+#   - /usr/local/bin/fairy-agent (and .old / .new), and /usr/local/lib/fairy-agent (this script's installed copy)
 #   - /etc/fairy-agent (config, tokens) and /var/lib/fairy-agent, /var/lib/fairy-agent-update  (not with --keep-data)
-#   - the system user and group "fairy-agent"
+#   - the system user and group "fairy-agent"  (not with --keep-data: the kept files are owned by them, and a
+#     user made again later could get another uid and could not read its own tokens)
 #
 # It does not touch Tailscale, ipmitool, polkit itself, or the panel. Remove the host in the panel too.
 #
 # Usage (as root):   sh uninstall-fairy-agent.sh [--yes] [--keep-data]
 #   --yes, -y     do not ask for confirmation (needed when not run from a terminal)
-#   --keep-data   keep /etc/fairy-agent and /var/lib/fairy-agent* (config and tokens)
+#   --keep-data   keep /etc/fairy-agent, /var/lib/fairy-agent* and the fairy-agent user and group
 #
 # Exit code 0: removed (or nothing to remove). 1: something could not be removed (it says what).
 
@@ -26,6 +28,7 @@ BIN=/usr/local/bin/fairy-agent
 ETC=/etc/fairy-agent
 UNITS=/etc/systemd/system
 RULES=/etc/polkit-1/rules.d
+LIBDIR=/usr/local/lib/fairy-agent
 USER_NAME=fairy-agent
 
 YES=0
@@ -40,7 +43,7 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --yes|-y) YES=1 ;;
     --keep-data) KEEP=1 ;;
-    -h|--help) sed -n '2,24p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,23p' "$0"; exit 0 ;;
     *) die "unknown option '$1' (use --yes and/or --keep-data)" ;;
   esac
   shift
@@ -56,24 +59,37 @@ add() { found="$found
   $1"; }
 # true when at least one of the given paths (or unexpanded globs, which then do not exist) exists
 any_exists() { for p in "$@"; do [ -e "$p" ] && return 0; done; return 1; }
+# The permanent rich rules of exactly the shape install.sh adds (as firewalld lists them back, quoted):
+#   rule family="ipv4" source address="<panel>/32" port port="9101" protocol="tcp" accept
+# Any other rule that mentions port 9101 is the owner's own and is left alone.
+firewalld_ours() {
+  firewall-cmd --permanent --list-rich-rules 2>/dev/null |
+    grep -E '^rule family="ipv4" source address="[0-9]{1,3}(\.[0-9]{1,3}){3}/32" port port="9101" protocol="tcp" accept$'
+}
 
 [ -e "$UNITS/fairy-agent.service" ] || systemctl cat fairy-agent.service >/dev/null 2>&1 && add "service: fairy-agent.service"
 [ -e "$UNITS/fairy-agent-update.service" ] && add "service: fairy-agent-update.service"
+[ -e "$UNITS/fairy-agent-uninstall.service" ] && add "service: fairy-agent-uninstall.service"
 any_exists "$UNITS"/fairy-agent*.service.bak "$UNITS"/fairy-agent*.service.d && add "unit backups / drop-ins in $UNITS"
 any_exists "$RULES"/49-fairy-agent*.rules && add "polkit rules: $RULES/49-fairy-agent*.rules"
 [ -e /etc/tmpfiles.d/fairy-agent.conf ] && add "/etc/tmpfiles.d/fairy-agent.conf"
 [ -e /etc/udev/rules.d/60-fairy-agent-ipmi.rules ] && add "/etc/udev/rules.d/60-fairy-agent-ipmi.rules"
 any_exists "$BIN" "$BIN.old" "$BIN.new" && add "program: $BIN (+ .old / .new if present)"
+[ -e "$LIBDIR" ] && add "$LIBDIR  (this script's installed copy)"
+# what --keep-data keeps, listed as such (it is all of these, not only $ETC)
+kept=""
 if [ "$KEEP" -eq 0 ]; then
   [ -e "$ETC" ] && add "$ETC  (config.yaml, tokens)"
   any_exists /var/lib/fairy-agent /var/lib/fairy-agent-update && add "/var/lib/fairy-agent, /var/lib/fairy-agent-update  (pairing, update stage)"
+  id "$USER_NAME" >/dev/null 2>&1 && add "system user: $USER_NAME"
+  getent group "$USER_NAME" >/dev/null 2>&1 && add "system group: $USER_NAME"
 else
-  [ -e "$ETC" ] && add "$ETC  (KEPT: --keep-data)"
+  for p in "$ETC" /var/lib/fairy-agent /var/lib/fairy-agent-update; do [ -e "$p" ] && kept="$kept $p"; done
+  id "$USER_NAME" >/dev/null 2>&1 && kept="$kept user:$USER_NAME"
+  getent group "$USER_NAME" >/dev/null 2>&1 && kept="$kept group:$USER_NAME"
 fi
-id "$USER_NAME" >/dev/null 2>&1 && add "system user: $USER_NAME"
-getent group "$USER_NAME" >/dev/null 2>&1 && add "system group: $USER_NAME"
 if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q '9101/tcp on tailscale0'; then add "ufw rule(s): 9101/tcp on tailscale0"; fi
-if command -v firewall-cmd >/dev/null 2>&1 && firewall-cmd --permanent --list-rich-rules 2>/dev/null | grep -q 'port="9101"'; then add "firewalld rich rule(s) for port 9101"; fi
+if command -v firewall-cmd >/dev/null 2>&1 && firewalld_ours | grep -q .; then add "firewalld rich rule(s) install.sh made for port 9101"; fi
 
 if [ -z "$found" ]; then
   say "fairy-agent is not installed on this machine. Nothing to do."
@@ -81,6 +97,7 @@ if [ -z "$found" ]; then
 fi
 
 printf '%s\n' "This will remove fairy-agent from this machine:$found"
+[ -n "$kept" ] && printf '%s\n' "Kept (--keep-data):$kept"
 echo
 if [ "$YES" -eq 0 ]; then
   [ -t 0 ] || die "not run from a terminal: add --yes to confirm"
@@ -107,12 +124,13 @@ fi
 
 # --- 2. unit files, rules, tmpfiles, udev ----------------------------------------------------------------------
 
-for f in "$UNITS/fairy-agent.service" "$UNITS/fairy-agent-update.service" \
-         "$UNITS/fairy-agent.service.bak" "$UNITS/fairy-agent-update.service.bak"; do
-  [ -e "$f" ] && rm -f "$f" && say "removed $f"
-done
-for d in "$UNITS/fairy-agent.service.d" "$UNITS/fairy-agent-update.service.d"; do
-  [ -d "$d" ] && rm -rf "$d" && say "removed $d"
+# fairy-agent-uninstall.service is never stopped here: it may be the unit running this script (the panel's
+# "Uninstall agent"). Removing a running oneshot's file is fine; systemd keeps the loaded unit until it ends.
+for u in fairy-agent fairy-agent-update fairy-agent-uninstall; do
+  for f in "$UNITS/$u.service" "$UNITS/$u.service.bak"; do
+    [ -e "$f" ] && rm -f "$f" && say "removed $f"
+  done
+  [ -d "$UNITS/$u.service.d" ] && rm -rf "$UNITS/$u.service.d" && say "removed $UNITS/$u.service.d"
 done
 systemctl daemon-reload
 systemctl reset-failed fairy-agent.service fairy-agent-update.service 2>/dev/null || true
@@ -142,7 +160,7 @@ if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q '^Status: 
   done
 fi
 if command -v firewall-cmd >/dev/null 2>&1 && firewall-cmd --state >/dev/null 2>&1; then
-  firewall-cmd --permanent --list-rich-rules 2>/dev/null | grep 'port="9101"' |
+  firewalld_ours |
   while IFS= read -r r; do
     firewall-cmd -q --permanent --remove-rich-rule="$r" && say "firewalld: removed: $r"
   done
@@ -154,17 +172,22 @@ fi
 for f in "$BIN" "$BIN.old" "$BIN.new"; do
   [ -e "$f" ] && rm -f "$f" && say "removed $f"
 done
+# this script's installed copy (when that is what runs, the shell keeps reading the file it has open)
+[ -e "$LIBDIR" ] && rm -rf "$LIBDIR" && say "removed $LIBDIR"
 if [ "$KEEP" -eq 0 ]; then
   for d in "$ETC" /var/lib/fairy-agent /var/lib/fairy-agent-update; do
     [ -e "$d" ] && rm -rf "$d" && say "removed $d"
   done
 else
-  say "kept $ETC (--keep-data); it holds this machine's tokens: delete it when you no longer need it"
+  [ -n "$kept" ] && say "kept (--keep-data):$kept"
+  [ -e "$ETC" ] && say "  $ETC holds this machine's tokens: delete it when you no longer need it"
 fi
 
-# --- 5. the user and its group ---------------------------------------------------------------------------------
+# --- 5. the user and its group (kept with --keep-data: they own the kept files) ------------------------------
 
-if id "$USER_NAME" >/dev/null 2>&1; then
+if [ "$KEEP" -eq 1 ]; then
+  :
+elif id "$USER_NAME" >/dev/null 2>&1; then
   if ! userdel "$USER_NAME" 2>/dev/null; then
     pkill -KILL -u "$USER_NAME" 2>/dev/null || true
     sleep 1
@@ -172,7 +195,7 @@ if id "$USER_NAME" >/dev/null 2>&1; then
   fi
   id "$USER_NAME" >/dev/null 2>&1 || say "removed user $USER_NAME"
 fi
-if getent group "$USER_NAME" >/dev/null 2>&1; then
+if [ "$KEEP" -eq 0 ] && getent group "$USER_NAME" >/dev/null 2>&1; then
   if groupdel "$USER_NAME" 2>/dev/null; then
     say "removed group $USER_NAME"
   else

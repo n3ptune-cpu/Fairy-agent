@@ -2560,17 +2560,19 @@ are lists of devices: edit those in the file (also the `sockets:` of an entry; t
   `C:\ProgramData\fairy-agent\state\pairing.json` (Windows); it never holds the code itself.
 * **Remove.** Easiest: run the removal script as administrator / root. Windows:
   `deploy/uninstall-fairy-agent.ps1` (`-Yes` skips the prompt, `-KeepData` keeps `config.yaml` and the tokens).
-  Linux: `sh deploy/uninstall-fairy-agent.sh` (`--yes`, `--keep-data`). They stop the services (the fans go back
-  to the BMC first), remove the firewall rule, the program and the data, and on Linux the polkit rules and the
-  `fairy-agent` user. Then press "Remove host" in the panel. By hand, Windows:
+  Linux: `sudo sh /usr/local/lib/fairy-agent/uninstall-fairy-agent.sh` (`--yes`, `--keep-data`; `install.sh`
+  puts the release's checked copy there, and both scripts are release assets covered by the signed
+  `SHA256SUMS`). They stop the services (the fans go back to the BMC first), remove the firewall rule the
+  installer made for the panel (no other rule for port 9101), the program and the data, and on Linux the polkit
+  rules and the `fairy-agent` user. With `--keep-data` the Linux script also keeps that user and its group:
+  they own the kept files, and a user made again later could get another uid and could not read its own
+  tokens. Then press "Remove host" in the panel. By hand, Windows:
   `& "C:\Program Files\Fairy\fairy-agent.exe" uninstall` (removes all three services: agent, helper, updater),
   then `Remove-NetFirewallRule -DisplayName "Fairy agent (Tailscale only)", "Fairy agent helper (no network)"` and
   delete `C:\Program Files\Fairy` and `C:\ProgramData\fairy-agent`. Linux: `systemctl disable --now fairy-agent`,
   delete the units (`fairy-agent.service`, `fairy-agent-update.service`), the polkit rules
   (`rm -f /etc/polkit-1/rules.d/49-fairy-agent*.rules`), `/usr/local/bin/fairy-agent` (and `.old`),
   `/etc/fairy-agent`, `/var/lib/fairy-agent*`, and `userdel fairy-agent`.
-  
-  
 
 ## Security in short
 

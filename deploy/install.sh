@@ -29,7 +29,8 @@
 # AGENT.md describes: user fairy-agent, /usr/local/bin/fairy-agent, /etc/fairy-agent (config.yaml and tokens
 # 0640 root:fairy-agent), fairy-agent.service (+ fairy-agent-update.service when needed, one polkit rule per
 # feature that is on: shutdown / reboot, self-update; the RAPL tmpfiles rule when the machine has RAPL), a
-# firewall rule for the panel when ufw / firewalld is on.
+# firewall rule for the panel when ufw / firewalld is on, and the release's removal script as
+# /usr/local/lib/fairy-agent/uninstall-fairy-agent.sh (root's, run only by root).
 # `fairy-agent join` then writes the tokens and the chosen settings (no editor, nothing to copy) and stores the
 # one-time join code; the panel picks the tokens up by itself within a few seconds. With --proxmox (a standalone
 # Proxmox VE node), join also makes the panel a read-only API token (user fairy@pve, role PVEAuditor, token
@@ -49,6 +50,7 @@ BIN=/usr/local/bin/fairy-agent
 ETC=/etc/fairy-agent
 UNITS=/etc/systemd/system
 RULES=/etc/polkit-1/rules.d
+LIBDIR=/usr/local/lib/fairy-agent
 
 # For every fairy-agent this script runs: this installer never replaces a newer program with an older release
 # (step 3). A fairy-agent that guards itself against installers which do can tell the two apart by this.
@@ -136,7 +138,8 @@ trap 'rm -rf "$TMP"' EXIT INT TERM
 say "downloading the release from $BASE"
 POLKIT_POWER=fairy-agent-power.polkit.rules
 POLKIT_UPDATE=fairy-agent-update.polkit.rules
-FILES="$ASSET SHA256SUMS SHA256SUMS.sig VERSION fairy-agent.service fairy-agent-update.service $POLKIT_POWER $POLKIT_UPDATE fairy-agent.tmpfiles.conf"
+UNINSTALLER=uninstall-fairy-agent.sh
+FILES="$ASSET SHA256SUMS SHA256SUMS.sig VERSION fairy-agent.service fairy-agent-update.service $POLKIT_POWER $POLKIT_UPDATE fairy-agent.tmpfiles.conf $UNINSTALLER"
 for f in $FILES; do
   curl -fsSL --proto '=https,file' --proto-redir '=https' --retry 3 -o "$TMP/$f" "$BASE/$f" || die "download of $f failed"
 done
@@ -225,6 +228,13 @@ if [ "$KEEP" -eq 0 ]; then
 fi
 install -d -m 0750 -o root -g fairy-agent "$ETC"
 install -d -m 0700 -o fairy-agent -g fairy-agent /var/lib/fairy-agent
+# the removal script of this (verified) release, for root by hand and for the panel's "Uninstall agent"
+# (fairy-agent-uninstall.service). Root's folder and file: the agent's user can run it but not change it,
+# and running it as that user does nothing (it refuses to run as anyone but root).
+if [ "$KEEP" -eq 0 ] || [ ! -f "$LIBDIR/$UNINSTALLER" ]; then
+  install -d -m 0755 -o root -g root "$LIBDIR"
+  install -m 0755 -o root -g root "$TMP/$UNINSTALLER" "$LIBDIR/$UNINSTALLER"
+fi
 
 # 5. units (an existing unit that differs is kept as .bak; with a newer agent installed, existing units stay)
 put() { # put SRC DEST MODE
